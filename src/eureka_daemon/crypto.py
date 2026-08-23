@@ -18,6 +18,33 @@ def canonical_json_bytes(payload: dict) -> bytes:
     """
     return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
 
+
+# ---------------------------------------------------------------------------
+# Domain separation
+#
+# Every signature in the protocol is computed over a context tag followed by
+# the canonical payload. Because the tag is part of the signed bytes, a
+# signature minted in one context cannot be lifted into another: a handshake
+# signature presented as an audit-log signature verifies over different bytes
+# and fails. The tags live here, next to sign/verify, so the two sides cannot
+# drift apart -- that is the whole point of the separation.
+# ---------------------------------------------------------------------------
+DOMAIN_HANDSHAKE = b"eureka/handshake/v1"
+DOMAIN_AUDIT_LOG = b"eureka/audit-log/v1"
+
+
+def domain_separated_bytes(domain: bytes, payload: dict) -> bytes:
+    """
+    The exact byte string that gets signed: tag, NUL, canonical payload.
+
+    The NUL byte keeps the boundary unambiguous, so no tag can ever be a
+    prefix of another tag plus the start of a payload.
+    """
+    if not isinstance(domain, bytes):
+        raise TypeError(f"domain tag must be bytes, got {type(domain).__name__}")
+    return domain + b"\x00" + canonical_json_bytes(payload)
+
+
 class EurekaCrypto:
     """
     Handles Ed25519 identity generation, signing, and verification 
@@ -67,15 +94,43 @@ class EurekaCrypto:
             # the intent (bad signature / bad encoding) explicit.
             return False
 
-    def sign_json(self, payload: dict) -> str:
-        """Helper to sign a JSON-serializable dictionary."""
-        return self.sign_data(canonical_json_bytes(payload))
+    def sign_json(self, payload: dict, domain: bytes) -> str:
+        """
+        Signs a JSON-serializable dictionary inside a signing domain.
+
+        `domain` is required: there is no such thing as an untagged signature
+        in this protocol, and a default would let a caller mint one in
+        whichever context happened to be the default. Prefer the bound helpers
+        below, which pin the tag at the call site.
+        """
+        return self.sign_data(domain_separated_bytes(domain, payload))
 
     @staticmethod
-    def verify_json(public_key_hex: str, signature_base64: str, payload: dict) -> bool:
-        """Helper to verify a signature against a JSON dictionary."""
+    def verify_json(public_key_hex: str, signature_base64: str, payload: dict,
+                    domain: bytes) -> bool:
+        """Verifies a signature against a JSON dictionary in a signing domain."""
         return EurekaCrypto.verify_signature(
-            public_key_hex, signature_base64, canonical_json_bytes(payload)
+            public_key_hex, signature_base64, domain_separated_bytes(domain, payload)
+        )
+
+    # -- Bound helpers. Protocol code uses these, never the raw domain arg. --
+
+    def sign_handshake(self, payload: dict) -> str:
+        return self.sign_json(payload, domain=DOMAIN_HANDSHAKE)
+
+    @staticmethod
+    def verify_handshake(public_key_hex: str, signature_base64: str, payload: dict) -> bool:
+        return EurekaCrypto.verify_json(
+            public_key_hex, signature_base64, payload, domain=DOMAIN_HANDSHAKE
+        )
+
+    def sign_audit_log(self, payload: dict) -> str:
+        return self.sign_json(payload, domain=DOMAIN_AUDIT_LOG)
+
+    @staticmethod
+    def verify_audit_log(public_key_hex: str, signature_base64: str, payload: dict) -> bool:
+        return EurekaCrypto.verify_json(
+            public_key_hex, signature_base64, payload, domain=DOMAIN_AUDIT_LOG
         )
 
 if __name__ == "__main__":

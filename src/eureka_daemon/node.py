@@ -3,7 +3,7 @@ import json
 import secrets
 import uuid
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Any, Set
 from .crypto import EurekaCrypto
@@ -12,6 +12,39 @@ from .crypto import EurekaCrypto
 # arrives outside this window is rejected even if its signature is perfect,
 # which is what stops a captured handshake being replayed later.
 HANDSHAKE_FRESHNESS_SECONDS = 30.0
+
+# Hard ceilings on the handshake state tables.
+#
+# Age-based pruning alone does not bound memory: an attacker can request tens
+# of thousands of challenges well inside the freshness window, and every one
+# of them is legitimately "fresh". The caps are what actually bound the
+# tables; the age pruning is what keeps them small in normal operation.
+MAX_PENDING_CHALLENGES = 1024
+MAX_SEEN_NONCES = 4096
+
+# The exact shape of a well-formed challenge. answer_challenge() signs nothing
+# that does not match this precisely -- see the signing-oracle note there.
+CHALLENGE_PROTOCOL = "eureka/1.0"
+CHALLENGE_EVENT = "handshake_challenge"
+CHALLENGE_STRING_FIELDS = ("nonce", "timestamp", "initiator_id", "peer_id")
+CHALLENGE_REQUIRED_KEYS = frozenset(
+    ("protocol", "event") + CHALLENGE_STRING_FIELDS
+)
+
+
+class InvalidChallengeError(ValueError):
+    """
+    Raised by answer_challenge() when asked to sign something that is not a
+    well-formed handshake challenge.
+
+    This is raised rather than returned so a caller cannot mistake a rejection
+    for a signed response and forward it onto the wire.
+    """
+
+    def __init__(self, reason: str, detail: str = ""):
+        self.reason = reason
+        self.detail = detail
+        super().__init__(f"{reason}: {detail}" if detail else reason)
 
 # Rejection reasons, exposed as constants so callers and tests assert on a
 # stable value instead of matching prose.
@@ -44,7 +77,9 @@ class EurekaNode:
     Man_ages identity, peer discovery, authentication, and task execution.
     """
     def __init__(self, node_id: str, crypto_engine: EurekaCrypto, capabilities: List[str],
-                 freshness_seconds: float = HANDSHAKE_FRESHNESS_SECONDS):
+                 freshness_seconds: float = HANDSHAKE_FRESHNESS_SECONDS,
+                 max_pending_challenges: int = MAX_PENDING_CHALLENGES,
+                 max_seen_nonces: int = MAX_SEEN_NONCES):
         self.node_id = node_id
         self.crypto = crypto_async_wrapper(crypto_engine) if hasattr(self, 'crypto_async_wrapper') else crypto_engine
         self.capabilities = capabilities
@@ -57,11 +92,15 @@ class EurekaNode:
         # Handshake state. freshness_seconds is per-node so a deployment can
         # tighten or loosen the replay window without touching the protocol.
         self.freshness_seconds = freshness_seconds
+        self.max_pending_challenges = max_pending_challenges
+        self.max_seen_nonces = max_seen_nonces
         # Challenges we have issued and are still waiting on, keyed by nonce.
+        # Insertion order is issue order, which is what eviction relies on.
         self.pending_challenges: Dict[str, Dict[str, Any]] = {}
-        # Nonces already spent. A nonce is single-use: once it completes a
+        # Nonces already spent, mapped to the instant they were spent so they
+        # can be aged out. A nonce is single-use: once it completes a
         # handshake it can never authenticate another one.
-        self.seen_nonces: Set[str] = set()
+        self.seen_nonces: Dict[str, datetime] = {}
         
         # Manifest of this node's capabilities
         self.manifest = {
@@ -125,35 +164,162 @@ class EurekaNode:
         # Keep our own copy: if the response echoes back a mutated challenge
         # we must still be able to compare it against what we actually sent.
         self.pending_challenges[challenge["nonce"]] = dict(challenge)
+        # Bound the table on the way in. Issuing challenges is the one step an
+        # unauthenticated peer can drive, so it is where growth is bounded.
+        self.prune_expired()
         print(f"[NODE {self.node_id}] Challenge issued to {peer_id}")
         return challenge
 
+    @staticmethod
+    def validate_challenge(challenge: Any) -> None:
+        """
+        Raises InvalidChallengeError unless `challenge` is exactly a
+        well-formed handshake challenge.
+
+        This is the gate on the signing oracle. Without it answer_challenge
+        signs any dict handed to it, so a caller could submit an audit-log or
+        task-shaped payload as a "challenge" and walk away with this node's
+        valid signature on it. Domain separation in crypto.py makes such a
+        signature unusable in the log context; this check means it is never
+        produced in the first place.
+        """
+        if not isinstance(challenge, dict):
+            raise InvalidChallengeError(
+                "not_a_mapping", f"got {type(challenge).__name__}"
+            )
+
+        keys = set(challenge)
+        missing = CHALLENGE_REQUIRED_KEYS - keys
+        if missing:
+            raise InvalidChallengeError("missing_fields", ", ".join(sorted(missing)))
+
+        # Reject unknown keys outright. Anything extra is either a payload
+        # from another context or a field this version does not understand;
+        # signing it blind is exactly the oracle being closed here.
+        extra = keys - CHALLENGE_REQUIRED_KEYS
+        if extra:
+            raise InvalidChallengeError("unexpected_fields", ", ".join(sorted(extra)))
+
+        if challenge["protocol"] != CHALLENGE_PROTOCOL:
+            raise InvalidChallengeError(
+                "wrong_protocol", repr(challenge["protocol"])
+            )
+        if challenge["event"] != CHALLENGE_EVENT:
+            raise InvalidChallengeError("wrong_event", repr(challenge["event"]))
+
+        for field in CHALLENGE_STRING_FIELDS:
+            value = challenge[field]
+            if not isinstance(value, str) or not value:
+                raise InvalidChallengeError(
+                    "bad_field_type",
+                    f"{field} must be a non-empty string, got {type(value).__name__}",
+                )
+
     def answer_challenge(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Handshake message 2. Signs the challenge verbatim and returns the
-        signature together with the public key needed to check it.
+        Handshake message 2. Signs the challenge and returns the signature
+        together with the public key needed to check it.
+
+        Raises InvalidChallengeError without signing anything if the payload
+        is not a well-formed challenge.
         """
+        # Validate BEFORE any signing happens, so a rejected payload never
+        # touches the private key.
+        self.validate_challenge(challenge)
         return {
             "event": "handshake_response",
             "responder_id": self.node_id,
             "challenge": challenge,
-            "signature": self.crypto.sign_json(challenge),
+            "signature": self.crypto.sign_handshake(challenge),
             "public_key": self.crypto.get_public_key_hex(),
         }
 
-    def _challenge_age_seconds(self, timestamp: Any) -> Optional[float]:
-        """Age of a challenge in seconds, or None if the timestamp is unusable."""
+    @staticmethod
+    def _parse_timestamp(timestamp: Any) -> Optional[datetime]:
+        """Parse an ISO timestamp to an aware datetime, or None if unusable."""
         if not isinstance(timestamp, str):
             return None
         try:
-            sent_at = datetime.fromisoformat(timestamp)
+            parsed = datetime.fromisoformat(timestamp)
         except ValueError:
             return None
-        if sent_at.tzinfo is None:
+        if parsed.tzinfo is None:
             # Treat a naive timestamp as UTC rather than crashing on the
-            # aware/naive subtraction below.
-            sent_at = sent_at.replace(tzinfo=timezone.utc)
+            # aware/naive subtraction done by callers.
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _challenge_age_seconds(self, timestamp: Any) -> Optional[float]:
+        """Age of a challenge in seconds, or None if the timestamp is unusable."""
+        sent_at = self._parse_timestamp(timestamp)
+        if sent_at is None:
+            return None
         return (_utc_now() - sent_at).total_seconds()
+
+    @staticmethod
+    def _evict_oldest(table: Dict[str, Any], limit: int) -> int:
+        """Drop oldest entries (dicts keep insertion order) until within limit."""
+        evicted = 0
+        while len(table) > limit:
+            del table[next(iter(table))]
+            evicted += 1
+        return evicted
+
+    def prune_expired(self, now: Optional[datetime] = None) -> Dict[str, int]:
+        """
+        Drop handshake state that can no longer affect an authentication, then
+        enforce the hard caps. Returns per-table counts so the effect is
+        observable.
+
+        Called inline from create_challenge and complete_handshake -- there is
+        no background thread, so pruning is deterministic and a test can drive
+        it by passing an explicit `now`.
+
+        Dropping a spent nonce is safe: once it ages past the window its
+        challenge is stale, and it was removed from pending_challenges when it
+        was spent, so a replay is rejected as an unknown nonce instead.
+
+        Both tables are scanned from the front only. Entries are inserted in
+        time order, so everything expired forms a prefix and the scan can stop
+        at the first live entry -- otherwise every call would re-parse the
+        whole table and a flood of challenges would be quadratic. A back-dated
+        entry in the middle simply survives until the cap evicts it; it can
+        never authenticate, because the freshness check rejects it anyway.
+        """
+        now = now or _utc_now()
+        cutoff = now - timedelta(seconds=self.freshness_seconds)
+
+        pending_expired = 0
+        while self.pending_challenges:
+            nonce = next(iter(self.pending_challenges))
+            issued = self._parse_timestamp(
+                self.pending_challenges[nonce].get("timestamp")
+            )
+            # An unparseable timestamp can never pass the freshness check, so
+            # it is dead weight and goes too.
+            if issued is not None and issued >= cutoff:
+                break
+            del self.pending_challenges[nonce]
+            pending_expired += 1
+
+        nonces_expired = 0
+        while self.seen_nonces:
+            nonce = next(iter(self.seen_nonces))
+            if self.seen_nonces[nonce] >= cutoff:
+                break
+            del self.seen_nonces[nonce]
+            nonces_expired += 1
+
+        return {
+            "pending_expired": pending_expired,
+            "pending_evicted": self._evict_oldest(
+                self.pending_challenges, self.max_pending_challenges
+            ),
+            "nonces_expired": nonces_expired,
+            "nonces_evicted": self._evict_oldest(
+                self.seen_nonces, self.max_seen_nonces
+            ),
+        }
 
     def _handshake_result(self, authenticated: bool, reason: str,
                           peer_id: Optional[str] = None) -> Dict[str, Any]:
@@ -176,7 +342,16 @@ class EurekaNode:
         rejected as a protocol failure rather than raising.
         """
         await self.transition_to(EurekaState.HANDSHAKE)
+        try:
+            return self._evaluate_handshake_response(response)
+        finally:
+            # Prune AFTER evaluating, never before. Pruning first would delete
+            # a stale-but-still-present challenge and downgrade a precise
+            # "stale timestamp" rejection into a vague "unknown nonce".
+            self.prune_expired()
 
+    def _evaluate_handshake_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """The ordered handshake checks. Sync, so pruning can wrap the call."""
         if not isinstance(response, dict):
             return self._handshake_result(False, REASON_MALFORMED)
 
@@ -214,7 +389,9 @@ class EurekaNode:
         if not isinstance(signature, str) or not isinstance(public_key, str):
             return self._handshake_result(False, REASON_MALFORMED, peer_id)
 
-        if not EurekaCrypto.verify_json(public_key, signature, challenge):
+        # Verified in the handshake domain: a signature minted for the audit
+        # log covers different bytes and will not verify here.
+        if not EurekaCrypto.verify_handshake(public_key, signature, challenge):
             print(f"[NODE {self.node_id}] Rejected handshake: bad signature")
             return self._handshake_result(False, REASON_BAD_SIGNATURE, peer_id)
 
@@ -229,7 +406,9 @@ class EurekaNode:
             return self._handshake_result(False, REASON_WRONG_RESPONDER, peer_id)
 
         # Every check passed: spend the nonce and record the peer.
-        self.seen_nonces.add(nonce)
+        # Removing it from pending_challenges is what actually prevents reuse;
+        # seen_nonces additionally gives replays a precise rejection reason.
+        self.seen_nonces[nonce] = _utc_now()
         self.pending_challenges.pop(nonce, None)
         self.peers[peer_id] = {
             "public_key": public_key,
@@ -283,7 +462,9 @@ class EurekaNode:
             "result": result_info["status"]
         }
         
-        signature = self.crypto.sign_json(log_entry)
+        # Audit-log domain: this signature is structurally unusable as a
+        # handshake signature, and a handshake signature is unusable here.
+        signature = self.crypto.sign_audit_log(log_entry)
         signed_log = {
             "payload": log_entry,
             "signature": signature,
