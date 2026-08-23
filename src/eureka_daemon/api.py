@@ -1,4 +1,3 @@
-import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -22,13 +21,13 @@ class NodeManifest(BaseModel):
 
 # Initialize the API and the Underlying Protocol Engine
 app = FastAPI(title="Eureka Protocol Daemon API")
-crypto_engine = EurekaCrypto()
-# In a real deployment, node_id would come from env/config
-node_engine = EurekaNode(
-    node_id=f"node_{os.urandom(4).hex()}",
-    crypto_engine=crypto_engine, 
+# The identity is loaded from disk (created on first run), so restarting the
+# daemon brings the same node back rather than minting a new one. Override the
+# location with $EUREKA_IDENTITY_PATH.
+node_engine = EurekaNode.with_persistent_identity(
     capabilities=["code-exec", "web-retrieval", "data-analysis"]
 )
+crypto_engine = node_engine.crypto
 
 @app.on_event("startup")
 async def startup_event():

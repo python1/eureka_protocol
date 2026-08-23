@@ -76,12 +76,16 @@ class EurekaNode:
     The core 5-layer state machine engine for the Eureka Protocol.
     Man_ages identity, peer discovery, authentication, and task execution.
     """
-    def __init__(self, node_id: str, crypto_engine: EurekaCrypto, capabilities: List[str],
+    def __init__(self, node_id: Optional[str], crypto_engine: EurekaCrypto,
+                 capabilities: List[str],
                  freshness_seconds: float = HANDSHAKE_FRESHNESS_SECONDS,
                  max_pending_challenges: int = MAX_PENDING_CHALLENGES,
                  max_seen_nonces: int = MAX_SEEN_NONCES):
-        self.node_id = node_id
         self.crypto = crypto_async_wrapper(crypto_engine) if hasattr(self, 'crypto_async_wrapper') else crypto_engine
+        # node_id=None means "name me after my key", so a node that reloads a
+        # stored identity comes back under the same id instead of a fresh
+        # random one. An explicit id is still honoured verbatim.
+        self.node_id = node_id if node_id is not None else self.crypto.derive_node_id()
         self.capabilities = capabilities
         self.state = EurekaState.IDENTITY
         self.peers: Dict[str, Dict[str, Any]] = {}
@@ -109,6 +113,25 @@ class EurekaNode:
             "capabilities": self.capabilities,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+
+    @classmethod
+    def with_persistent_identity(cls, capabilities: List[str],
+                                 identity_path: Optional[str] = None,
+                                 **kwargs) -> "EurekaNode":
+        """
+        Build a node backed by the on-disk identity, creating it on first run.
+
+        This is the entry point a daemon should use: restart the process and
+        the node keeps the same key and the same node_id.
+        """
+        crypto = EurekaCrypto.load_or_create(identity_path)
+        return cls(node_id=None, crypto_engine=crypto,
+                   capabilities=capabilities, **kwargs)
+
+    @property
+    def public_key_hex(self) -> str:
+        """This node's long-term public key, as advertised to peers."""
+        return self.crypto.get_public_key_hex()
 
     async def transition_to(self, new_state: EurekaState):
         """Handles state transitions and logging."""

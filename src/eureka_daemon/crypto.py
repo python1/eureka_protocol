@@ -3,8 +3,44 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.exceptions import InvalidSignature
 import binascii
+import hashlib
 import json
 import base64
+import stat
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Union
+
+# Where a node's long-term identity lives. The default filename ends in .key,
+# which the repository .gitignore already excludes -- a private key must not
+# become committable by accident.
+IDENTITY_PATH_ENV_VAR = "EUREKA_IDENTITY_PATH"
+DEFAULT_IDENTITY_PATH = Path.home() / ".eureka" / "identity.key"
+
+# On-disk identity format. Versioned so the file can be recognised and
+# migrated later rather than being an anonymous blob of hex.
+IDENTITY_FILE_VERSION = 1
+IDENTITY_ALGORITHM = "ed25519"
+
+
+class IdentityError(RuntimeError):
+    """Raised when a stored identity cannot be loaded or safely written."""
+
+
+def resolve_identity_path(path: Optional[Union[str, Path]] = None) -> Path:
+    """
+    Explicit argument wins, then $EUREKA_IDENTITY_PATH, then the default.
+
+    Resolved in one place so every caller agrees on which file *is* the
+    node's identity.
+    """
+    if path is not None:
+        return Path(path).expanduser()
+    from_env = os.environ.get(IDENTITY_PATH_ENV_VAR)
+    if from_env:
+        return Path(from_env).expanduser()
+    return DEFAULT_IDENTITY_PATH
 
 
 def canonical_json_bytes(payload: dict) -> bytes:
@@ -64,6 +100,131 @@ class EurekaCrypto:
 
     def get_public_key_hex(self):
         return self.public_key_bytes.hex()
+
+    def get_private_key_hex(self) -> str:
+        return self.private_key_bytes.hex()
+
+    def derive_node_id(self) -> str:
+        """
+        The node's name, derived from its public key.
+
+        Deriving rather than randomising is what makes the identity coherent:
+        the same key always yields the same node_id, so a restarted node comes
+        back as itself. The shape (node_ + 8 hex) matches the ids this daemon
+        already emitted, so nothing on the wire changes form.
+        """
+        digest = hashlib.sha256(self.public_key_bytes).hexdigest()
+        return f"node_{digest[:8]}"
+
+    # -- Persistence ------------------------------------------------------
+
+    @classmethod
+    def load_or_create(cls, path: Optional[Union[str, Path]] = None) -> "EurekaCrypto":
+        """
+        Load this node's long-term identity, generating it on first run.
+
+        An existing key is *always* loaded, never regenerated: silently
+        minting a new key would change the node's identity and invalidate
+        every peer relationship built on the old one.
+        """
+        target = resolve_identity_path(path)
+        if target.exists():
+            return cls.load(target)
+        crypto = cls()
+        crypto.save(target)
+        return crypto
+
+    @classmethod
+    def load(cls, path: Optional[Union[str, Path]] = None) -> "EurekaCrypto":
+        """Load an identity from disk, refusing anything unsafe or unreadable."""
+        target = resolve_identity_path(path)
+        try:
+            raw = target.read_text()
+        except FileNotFoundError as exc:
+            raise IdentityError(f"no identity file at {target}") from exc
+
+        mode = stat.S_IMODE(target.stat().st_mode)
+        if mode & 0o077:
+            # We always create at 0600, so a widened mode means something
+            # else changed it. Fail loudly rather than use an exposed key.
+            raise IdentityError(
+                f"identity file {target} is group/world accessible "
+                f"(mode {mode:04o}); expected 0600"
+            )
+
+        try:
+            document = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise IdentityError(f"identity file {target} is not valid JSON") from exc
+
+        if document.get("version") != IDENTITY_FILE_VERSION:
+            raise IdentityError(
+                f"identity file {target} has unsupported version "
+                f"{document.get('version')!r}"
+            )
+        if document.get("algorithm") != IDENTITY_ALGORITHM:
+            raise IdentityError(
+                f"identity file {target} has unsupported algorithm "
+                f"{document.get('algorithm')!r}"
+            )
+
+        private_key_hex = document.get("private_key_hex")
+        if not isinstance(private_key_hex, str):
+            raise IdentityError(f"identity file {target} has no private_key_hex")
+
+        try:
+            return cls(private_key_hex=private_key_hex)
+        except (ValueError, binascii.Error) as exc:
+            raise IdentityError(
+                f"identity file {target} does not contain a usable key: {exc}"
+            ) from exc
+
+    def save(self, path: Optional[Union[str, Path]] = None,
+             overwrite: bool = False) -> Path:
+        """
+        Write this identity to disk atomically, mode 0600.
+
+        Refuses to clobber an existing file unless explicitly told to:
+        overwriting an identity destroys it irrecoverably, and the caller
+        should have to mean it.
+        """
+        target = resolve_identity_path(path)
+        if target.exists() and not overwrite:
+            raise IdentityError(
+                f"refusing to overwrite existing identity at {target} "
+                f"(pass overwrite=True to replace it)"
+            )
+
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        document = {
+            "version": IDENTITY_FILE_VERSION,
+            "algorithm": IDENTITY_ALGORITHM,
+            "private_key_hex": self.get_private_key_hex(),
+            "public_key_hex": self.get_public_key_hex(),
+            "node_id": self.derive_node_id(),
+            "created": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Write-then-rename so a crash mid-write cannot leave a truncated
+        # identity behind; the key is never briefly world-readable because
+        # the temp file is created 0600 in the destination directory.
+        fd, temp_name = tempfile.mkstemp(
+            dir=str(target.parent), prefix=".identity-", suffix=".tmp"
+        )
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                json.dump(document, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, target)
+        except BaseException:
+            # Never leave a stray copy of the private key lying around.
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+            raise
+        return target
 
     def sign_data(self, data: bytes) -> str:
         """Signs bytes and returns a base64 encoded signature."""
