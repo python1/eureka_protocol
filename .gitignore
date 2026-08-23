@@ -6,3 +6,4 @@ logs/
 *.pem
 *_ed25519*
 .env
+.pytest_cache/
