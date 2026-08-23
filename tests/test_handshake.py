@@ -47,17 +47,22 @@ def make_node(node_id, **kwargs):
     )
 
 
-def trust(node, *peers):
+def trust(node, *peers, mutual=True):
     """
-    Provision `node` to trust each peer's public key.
+    Provision `node` to trust each peer's public key, and by default each peer
+    to trust `node` back.
 
-    Trust is now a precondition of a successful handshake, so tests that are
-    about the handshake itself have to establish it explicitly -- the same
-    step an operator performs when deploying a trust file. This is a
-    provisioning action, never something the handshake does on its own.
+    The handshake is mutual, so a successful exchange needs trust in both
+    directions: the responder checks the initiator's key at message 1 and the
+    initiator checks the responder's at message 2. Pass mutual=False to
+    provision only one direction, which is how the asymmetric-trust tests set
+    themselves up. This is a provisioning action, never something the
+    handshake does on its own.
     """
     for peer in peers:
         node.trust_list.add(peer.node_id, peer.crypto.get_public_key_hex())
+        if mutual:
+            peer.trust_list.add(node.node_id, node.crypto.get_public_key_hex())
     return node
 
 

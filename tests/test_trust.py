@@ -41,6 +41,19 @@ def make_node(node_id, **kwargs):
     )
 
 
+def let_responder_trust(responder, initiator):
+    """
+    Provision the responder to accept the initiator.
+
+    The handshake is mutual and the responder checks the initiator's key at
+    message 1, before the initiator ever receives a message 2 to verify. These
+    tests are about the *initiator's* trust decision, so without this the
+    exchange would stop one step early and never reach the check under test.
+    """
+    responder.trust_list.add(initiator.node_id, initiator.public_key_hex)
+    return responder
+
+
 def write_trust_file(path, peers, version=TRUST_FILE_VERSION,
                      algorithm=TRUST_ALGORITHM):
     path.write_text(json.dumps({
@@ -65,6 +78,7 @@ def test_trusted_peer_authenticates(tmp_path):
         responder.node_id: responder.crypto.get_public_key_hex(),
     })
     initiator = make_node("node_initiator", trust_path=trust_file)
+    let_responder_trust(responder, initiator)
 
     result = run(initiator.handshake(responder))
 
@@ -100,6 +114,7 @@ def test_untrusted_key_with_a_valid_signature_is_rejected(tmp_path):
 def test_absent_trust_file_rejects_everyone(tmp_path):
     responder = make_node("node_responder")
     initiator = make_node("node_initiator", trust_path=tmp_path / "absent.json")
+    let_responder_trust(responder, initiator)
 
     assert len(initiator.trust_list) == 0
 
@@ -114,6 +129,7 @@ def test_empty_trust_file_rejects_everyone(tmp_path):
     responder = make_node("node_responder")
     trust_file = write_trust_file(tmp_path / "trust.json", {})
     initiator = make_node("node_initiator", trust_path=trust_file)
+    let_responder_trust(responder, initiator)
 
     assert len(initiator.trust_list) == 0
 
@@ -165,6 +181,7 @@ def test_rejected_peer_is_not_added_to_the_trust_list(tmp_path):
     """No trust-on-first-use: a stranger cannot talk its way onto the list."""
     responder = make_node("node_responder")
     initiator = make_node("node_initiator", trust_path=tmp_path / "absent.json")
+    let_responder_trust(responder, initiator)
 
     for _ in range(3):
         assert run(initiator.handshake(responder))["reason"] == REASON_UNTRUSTED_KEY
@@ -181,6 +198,7 @@ def test_trusting_a_different_key_of_the_same_name_does_not_help(tmp_path):
         responder.node_id: some_key(),
     })
     initiator = make_node("node_initiator", trust_path=trust_file)
+    let_responder_trust(responder, initiator)
 
     result = run(initiator.handshake(responder))
 
@@ -194,6 +212,7 @@ def test_trust_survives_across_many_handshakes(tmp_path):
         responder.node_id: responder.crypto.get_public_key_hex(),
     })
     initiator = make_node("node_initiator", trust_path=trust_file)
+    let_responder_trust(responder, initiator)
 
     for _ in range(5):
         assert run(initiator.handshake(responder))["authenticated"] is True
@@ -367,6 +386,7 @@ def test_node_honours_the_environment_variable(tmp_path, monkeypatch):
     monkeypatch.setenv(TRUST_PATH_ENV_VAR, str(target))
 
     initiator = make_node("node_initiator")
+    let_responder_trust(responder, initiator)
 
     assert run(initiator.handshake(responder))["authenticated"] is True
 

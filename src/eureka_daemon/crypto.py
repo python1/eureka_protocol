@@ -65,7 +65,14 @@ def canonical_json_bytes(payload: dict) -> bytes:
 # and fails. The tags live here, next to sign/verify, so the two sides cannot
 # drift apart -- that is the whole point of the separation.
 # ---------------------------------------------------------------------------
-DOMAIN_HANDSHAKE = b"eureka/handshake/v1"
+# The handshake is three messages, and each position gets its own tag. A
+# signature harvested from one position covers different bytes than the same
+# payload would in another, so it cannot be replayed into a different step of
+# the exchange. Message 2 keeps the original tag: it is the direct successor
+# of the old single-response handshake.
+DOMAIN_HANDSHAKE_OFFER = b"eureka/handshake/offer/v1"      # message 1
+DOMAIN_HANDSHAKE = b"eureka/handshake/v1"                  # message 2
+DOMAIN_HANDSHAKE_CONFIRM = b"eureka/handshake/confirm/v1"  # message 3
 DOMAIN_AUDIT_LOG = b"eureka/audit-log/v1"
 
 
@@ -276,7 +283,32 @@ class EurekaCrypto:
 
     # -- Bound helpers. Protocol code uses these, never the raw domain arg. --
 
+    def sign_handshake_offer(self, payload: dict) -> str:
+        """Message 1: the initiator's signature over its own challenge."""
+        return self.sign_json(payload, domain=DOMAIN_HANDSHAKE_OFFER)
+
+    @staticmethod
+    def verify_handshake_offer(public_key_hex: str, signature_base64: str,
+                               payload: dict) -> bool:
+        return EurekaCrypto.verify_json(
+            public_key_hex, signature_base64, payload,
+            domain=DOMAIN_HANDSHAKE_OFFER,
+        )
+
+    def sign_handshake_confirm(self, payload: dict) -> str:
+        """Message 3: the initiator's signature over the responder's challenge."""
+        return self.sign_json(payload, domain=DOMAIN_HANDSHAKE_CONFIRM)
+
+    @staticmethod
+    def verify_handshake_confirm(public_key_hex: str, signature_base64: str,
+                                 payload: dict) -> bool:
+        return EurekaCrypto.verify_json(
+            public_key_hex, signature_base64, payload,
+            domain=DOMAIN_HANDSHAKE_CONFIRM,
+        )
+
     def sign_handshake(self, payload: dict) -> str:
+        """Message 2: the responder's signature over the initiator's challenge."""
         return self.sign_json(payload, domain=DOMAIN_HANDSHAKE)
 
     @staticmethod

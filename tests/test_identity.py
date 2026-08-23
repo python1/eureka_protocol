@@ -143,8 +143,9 @@ def test_persistent_identity_still_completes_a_handshake(tmp_path):
 
     initiator = EurekaNode.with_persistent_identity(["x"], tmp_path / "a.key")
     responder = EurekaNode.with_persistent_identity(["x"], tmp_path / "b.key")
-    # A handshake now also requires the responder's key to be trusted.
+    # The handshake is mutual, so both sides must trust the other's key.
     initiator.trust_list.add(responder.node_id, responder.public_key_hex)
+    responder.trust_list.add(initiator.node_id, initiator.public_key_hex)
 
     result = asyncio.run(initiator.handshake(responder))
 

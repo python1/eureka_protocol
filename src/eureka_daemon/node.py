@@ -58,6 +58,10 @@ REASON_BAD_SIGNATURE = "signature_verification_failed"
 REASON_CHALLENGE_MISMATCH = "challenge_mismatch"
 REASON_WRONG_RESPONDER = "unexpected_responder"
 REASON_UNTRUSTED_KEY = "untrusted_key"
+# The same check sequence runs on both sides of the exchange, so the
+# "responder" in this reason is really "the peer we addressed". Same value,
+# readable name for the responder-side call.
+REASON_WRONG_PEER = REASON_WRONG_RESPONDER
 
 
 def _utc_now() -> datetime:
@@ -120,6 +124,12 @@ class EurekaNode:
         # can be aged out. A nonce is single-use: once it completes a
         # handshake it can never authenticate another one.
         self.seen_nonces: Dict[str, datetime] = {}
+        # Responder side: who we provisionally saw in message 1, keyed by the
+        # nonce of the counter-challenge we sent back. Nothing here is
+        # authenticated -- it is discarded unless message 3 verifies. Keyed to
+        # pending_challenges so it is pruned and capped in lockstep, which is
+        # what stops initiators that never finish from accumulating state.
+        self.pending_peers: Dict[str, Dict[str, Any]] = {}
         
         # Manifest of this node's capabilities
         self.manifest = {
@@ -303,6 +313,24 @@ class EurekaNode:
             evicted += 1
         return evicted
 
+    def _drop_pending(self, nonce: str) -> None:
+        """
+        Forget an outstanding challenge and anything provisionally attached.
+
+        The two tables are always dropped together; leaving a provisional peer
+        behind after its challenge is gone would be state nobody prunes.
+        """
+        self.pending_challenges.pop(nonce, None)
+        self.pending_peers.pop(nonce, None)
+
+    def _evict_oldest_pending(self, limit: int) -> int:
+        """Cap enforcement for the paired pending tables."""
+        evicted = 0
+        while len(self.pending_challenges) > limit:
+            self._drop_pending(next(iter(self.pending_challenges)))
+            evicted += 1
+        return evicted
+
     def prune_expired(self, now: Optional[datetime] = None) -> Dict[str, int]:
         """
         Drop handshake state that can no longer affect an authentication, then
@@ -337,7 +365,7 @@ class EurekaNode:
             # it is dead weight and goes too.
             if issued is not None and issued >= cutoff:
                 break
-            del self.pending_challenges[nonce]
+            self._drop_pending(nonce)
             pending_expired += 1
 
         nonces_expired = 0
@@ -350,8 +378,8 @@ class EurekaNode:
 
         return {
             "pending_expired": pending_expired,
-            "pending_evicted": self._evict_oldest(
-                self.pending_challenges, self.max_pending_challenges
+            "pending_evicted": self._evict_oldest_pending(
+                self.max_pending_challenges
             ),
             "nonces_expired": nonces_expired,
             "nonces_evicted": self._evict_oldest(
@@ -388,75 +416,99 @@ class EurekaNode:
             # "stale timestamp" rejection into a vague "unknown nonce".
             self.prune_expired()
 
-    def _evaluate_handshake_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """The ordered handshake checks. Sync, so pruning can wrap the call."""
-        if not isinstance(response, dict):
-            return self._handshake_result(False, REASON_MALFORMED)
+    def _verify_challenge_reply(self, reply: Any, verifier, identity_field: str):
+        """
+        The single ordered check sequence, run by BOTH sides of the exchange.
 
-        challenge = response.get("challenge")
+        The initiator runs it over message 2 against the challenge it issued;
+        the responder runs it over message 3 against the counter-challenge it
+        issued. Same steps, same order, same reason constants -- the asymmetry
+        is only which signing domain verifies and which field names the peer.
+
+        Returns (rejection_result, nonce, public_key, peer_id). On success the
+        rejection is None and the caller is responsible for recording; nothing
+        here mutates state, so a failed check leaves no trace.
+        """
+        if not isinstance(reply, dict):
+            return self._handshake_result(False, REASON_MALFORMED), None, None, None
+
+        challenge = reply.get("challenge")
         if not isinstance(challenge, dict):
-            return self._handshake_result(False, REASON_MALFORMED)
+            return self._handshake_result(False, REASON_MALFORMED), None, None, None
 
         nonce = challenge.get("nonce")
         if not isinstance(nonce, str):
-            return self._handshake_result(False, REASON_MALFORMED)
+            return self._handshake_result(False, REASON_MALFORMED), None, None, None
 
         # 1. Replay: a nonce is single-use, even with a flawless signature.
         if nonce in self.seen_nonces:
             print(f"[NODE {self.node_id}] Rejected handshake: nonce already used")
-            return self._handshake_result(False, REASON_REPLAYED_NONCE)
+            return (self._handshake_result(False, REASON_REPLAYED_NONCE),
+                    nonce, None, None)
 
         # 2. The nonce must be one we actually issued and are still awaiting.
         pending = self.pending_challenges.get(nonce)
         if pending is None:
-            return self._handshake_result(False, REASON_UNKNOWN_NONCE)
+            return (self._handshake_result(False, REASON_UNKNOWN_NONCE),
+                    nonce, None, None)
 
         peer_id = pending.get("peer_id")
 
         # 3. Freshness, checked against the timestamp that was signed.
         age = self._challenge_age_seconds(challenge.get("timestamp"))
         if age is None:
-            return self._handshake_result(False, REASON_MALFORMED, peer_id)
+            return (self._handshake_result(False, REASON_MALFORMED, peer_id),
+                    nonce, None, peer_id)
         if abs(age) > self.freshness_seconds:
             print(f"[NODE {self.node_id}] Rejected handshake: challenge {age:.1f}s old")
-            return self._handshake_result(False, REASON_STALE, peer_id)
+            return (self._handshake_result(False, REASON_STALE, peer_id),
+                    nonce, None, peer_id)
 
-        # 4. Signature over the exact challenge bytes the responder signed.
-        signature = response.get("signature")
-        public_key = response.get("public_key")
+        # 4. Signature over the exact challenge bytes the peer signed.
+        signature = reply.get("signature")
+        public_key = reply.get("public_key")
         if not isinstance(signature, str) or not isinstance(public_key, str):
-            return self._handshake_result(False, REASON_MALFORMED, peer_id)
+            return (self._handshake_result(False, REASON_MALFORMED, peer_id),
+                    nonce, None, peer_id)
 
-        # Verified in the handshake domain: a signature minted for the audit
-        # log covers different bytes and will not verify here.
-        if not EurekaCrypto.verify_handshake(public_key, signature, challenge):
+        # Verified in this message's own domain: a signature harvested from
+        # another position in the exchange covers different bytes and fails.
+        if not verifier(public_key, signature, challenge):
             print(f"[NODE {self.node_id}] Rejected handshake: bad signature")
-            return self._handshake_result(False, REASON_BAD_SIGNATURE, peer_id)
+            return (self._handshake_result(False, REASON_BAD_SIGNATURE, peer_id),
+                    nonce, public_key, peer_id)
 
-        # 5. A valid signature only proves the responder signed *something*.
+        # 5. A valid signature only proves the peer signed *something*.
         #    It must be the challenge we sent, unaltered.
         if challenge != pending:
-            return self._handshake_result(False, REASON_CHALLENGE_MISMATCH, peer_id)
+            return (self._handshake_result(False, REASON_CHALLENGE_MISMATCH, peer_id),
+                    nonce, public_key, peer_id)
 
         # 6. ...and it must come from the peer we addressed, not a third party
         #    replaying a legitimately signed challenge under another name.
-        if response.get("responder_id") != peer_id:
-            return self._handshake_result(False, REASON_WRONG_RESPONDER, peer_id)
+        if reply.get(identity_field) != peer_id:
+            return (self._handshake_result(False, REASON_WRONG_PEER, peer_id),
+                    nonce, public_key, peer_id)
 
-        # 7. Finally: a valid signature only proves the responder holds the
-        #    keypair it presented, and anyone can generate a keypair. The key
-        #    must be one we were told to trust. This runs last, so a bad
-        #    signature from a trusted key still reports the signature failure
-        #    rather than being masked by a trust decision.
+        # 7. Finally: a valid signature only proves the peer holds the keypair
+        #    it presented, and anyone can generate a keypair. The key must be
+        #    one we were told to trust. This runs last, so a bad signature from
+        #    a trusted key still reports the signature failure rather than
+        #    being masked by a trust decision.
         if not self.trust_list.trusts(public_key):
             print(f"[NODE {self.node_id}] Rejected handshake: untrusted key")
-            return self._handshake_result(False, REASON_UNTRUSTED_KEY, peer_id)
+            return (self._handshake_result(False, REASON_UNTRUSTED_KEY, peer_id),
+                    nonce, public_key, peer_id)
 
-        # Every check passed: spend the nonce and record the peer.
+        return None, nonce, public_key, peer_id
+
+    def _record_peer(self, nonce: str, peer_id: str, public_key: str) -> Dict[str, Any]:
+        """Spend the nonce and record the peer. Only ever called after every
+        check in _verify_challenge_reply has passed."""
         # Removing it from pending_challenges is what actually prevents reuse;
         # seen_nonces additionally gives replays a precise rejection reason.
         self.seen_nonces[nonce] = _utc_now()
-        self.pending_challenges.pop(nonce, None)
+        self._drop_pending(nonce)
         self.peers[peer_id] = {
             "public_key": public_key,
             "last_seen": time.time(),
@@ -465,15 +517,184 @@ class EurekaNode:
         print(f"[NODE {self.node_id}] Handshake established with {peer_id}")
         return self._handshake_result(True, REASON_OK, peer_id)
 
+    def _evaluate_handshake_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Initiator side: verify message 2 and record the responder.
+
+        Recording here is correct even though the responder has not yet
+        verified us: a node records a peer once *its own* verification of that
+        peer has passed. Our own proof travels in message 3.
+        """
+        rejection, nonce, public_key, peer_id = self._verify_challenge_reply(
+            response, EurekaCrypto.verify_handshake, "responder_id"
+        )
+        if rejection is not None:
+            return rejection
+        return self._record_peer(nonce, peer_id, public_key)
+
+    # ------------------------------------------------------------------
+    # Message 1 (initiator -> responder) and message 3 (initiator -> responder)
+    # ------------------------------------------------------------------
+
+    def create_handshake_offer(self, peer_id: str) -> Dict[str, Any]:
+        """
+        Message 1. A challenge the initiator signs, carrying its public key so
+        the responder can check the signature and look the key up in its own
+        trust list.
+        """
+        challenge = self.create_challenge(peer_id)
+        return {
+            "event": "handshake_offer",
+            "initiator_id": self.node_id,
+            "challenge": challenge,
+            "public_key": self.crypto.get_public_key_hex(),
+            "signature": self.crypto.sign_handshake_offer(challenge),
+        }
+
+    def answer_handshake_offer(self, offer: Any) -> Dict[str, Any]:
+        """
+        Responder side: check message 1, then reply with message 2.
+
+        Returns either message 2 or a rejection result (``authenticated`` is
+        False). The trust check happens here, before any counter-challenge is
+        minted, so an initiator we do not trust never gets a reply to verify
+        and neither side ends up half-authenticated.
+        """
+        if not isinstance(offer, dict):
+            return self._handshake_result(False, REASON_MALFORMED)
+
+        challenge = offer.get("challenge")
+        # Schema first, exactly as answer_challenge does -- we will not sign
+        # or act on anything that is not a well-formed challenge.
+        try:
+            self.validate_challenge(challenge)
+        except InvalidChallengeError:
+            return self._handshake_result(False, REASON_MALFORMED)
+
+        nonce = challenge["nonce"]
+        peer_id = offer.get("initiator_id")
+
+        # Replay: an offer nonce is single-use here too, which also stops a
+        # captured message 1 being replayed at us later.
+        if nonce in self.seen_nonces:
+            return self._handshake_result(False, REASON_REPLAYED_NONCE, peer_id)
+
+        # Freshness of the timestamp the initiator signed.
+        age = self._challenge_age_seconds(challenge["timestamp"])
+        if age is None:
+            return self._handshake_result(False, REASON_MALFORMED, peer_id)
+        if abs(age) > self.freshness_seconds:
+            return self._handshake_result(False, REASON_STALE, peer_id)
+
+        signature = offer.get("signature")
+        public_key = offer.get("public_key")
+        if not isinstance(signature, str) or not isinstance(public_key, str):
+            return self._handshake_result(False, REASON_MALFORMED, peer_id)
+
+        if not EurekaCrypto.verify_handshake_offer(public_key, signature, challenge):
+            return self._handshake_result(False, REASON_BAD_SIGNATURE, peer_id)
+
+        # The envelope must agree with the challenge about who is calling.
+        if peer_id != challenge["initiator_id"]:
+            return self._handshake_result(False, REASON_WRONG_PEER, peer_id)
+
+        # Trust last, same as everywhere else.
+        if not self.trust_list.trusts(public_key):
+            print(f"[NODE {self.node_id}] Rejected offer: untrusted key")
+            return self._handshake_result(False, REASON_UNTRUSTED_KEY, peer_id)
+
+        # Provisional only. Nothing is authenticated until message 3 verifies.
+        self.seen_nonces[nonce] = _utc_now()
+        counter_challenge = self.create_challenge(peer_id)
+        self.pending_peers[counter_challenge["nonce"]] = {
+            "peer_id": peer_id,
+            "public_key": public_key,
+        }
+
+        message_two = self.answer_challenge(challenge)
+        message_two["counter_challenge"] = counter_challenge
+        return message_two
+
+    def confirm_handshake(self, response: Any) -> Dict[str, Any]:
+        """
+        Message 3. Signs the responder's counter-challenge, proving to the
+        responder that we hold the key we advertised in message 1.
+        """
+        if not isinstance(response, dict):
+            raise InvalidChallengeError("not_a_mapping",
+                                        f"got {type(response).__name__}")
+        counter_challenge = response.get("counter_challenge")
+        # Same gate as answer_challenge: never sign an arbitrary payload.
+        self.validate_challenge(counter_challenge)
+        return {
+            "event": "handshake_confirm",
+            "initiator_id": self.node_id,
+            "challenge": counter_challenge,
+            "public_key": self.crypto.get_public_key_hex(),
+            "signature": self.crypto.sign_handshake_confirm(counter_challenge),
+        }
+
+    async def complete_mutual_handshake(self, confirmation: Any) -> Dict[str, Any]:
+        """
+        Responder side: verify message 3 and record the initiator.
+
+        Runs the same check sequence the initiator ran over message 2. On any
+        failure the peer provisionally seen in message 1 is discarded.
+        """
+        await self.transition_to(EurekaState.HANDSHAKE)
+        try:
+            rejection, nonce, public_key, peer_id = self._verify_challenge_reply(
+                confirmation, EurekaCrypto.verify_handshake_confirm, "initiator_id"
+            )
+            if rejection is not None:
+                if nonce is not None:
+                    # Discard the provisional peer from message 1.
+                    self._drop_pending(nonce)
+                return rejection
+
+            # The key that finished the exchange must be the key that started
+            # it, otherwise a peer could open with one trusted identity and
+            # prove possession of a different one.
+            provisional = self.pending_peers.get(nonce)
+            if provisional is not None and provisional["public_key"] != public_key:
+                self._drop_pending(nonce)
+                return self._handshake_result(False, REASON_WRONG_PEER, peer_id)
+
+            return self._record_peer(nonce, peer_id, public_key)
+        finally:
+            # Prune AFTER evaluating, for the same reason complete_handshake
+            # does: pruning first would downgrade a precise rejection.
+            self.prune_expired()
+
     async def handshake(self, responder: "EurekaNode") -> Dict[str, Any]:
         """
-        Convenience driver that runs the full two-message exchange in process.
-        Real transports call create_challenge / answer_challenge /
-        complete_handshake separately across the network.
+        Convenience driver that runs the full three-message exchange in
+        process. Real transports call create_handshake_offer /
+        answer_handshake_offer / complete_handshake / confirm_handshake /
+        complete_mutual_handshake separately across the network.
+
+        Returns this node's own result. When the responder is the one that
+        rejects, its rejection is returned so the reason is not lost.
         """
-        challenge = self.create_challenge(responder.node_id)
-        response = responder.answer_challenge(challenge)
-        return await self.complete_handshake(response)
+        offer = self.create_handshake_offer(responder.node_id)
+
+        message_two = responder.answer_handshake_offer(offer)
+        if message_two.get("authenticated") is False:
+            # The responder refused message 1; we never get anything to
+            # verify, so neither side records anything.
+            return message_two
+
+        mine = await self.complete_handshake(message_two)
+        if not mine["authenticated"]:
+            return mine
+
+        confirmation = self.confirm_handshake(message_two)
+        theirs = await responder.complete_mutual_handshake(confirmation)
+        if not theirs["authenticated"]:
+            return theirs
+
+        mine["mutual"] = True
+        return mine
 
     async def assign(self, task_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Layer 4: Task negotiation and execution dispatch."""
