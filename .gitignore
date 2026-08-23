@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+logs/
+*.log
+*.key
+*.pem
+*_ed25519*
+.env
