@@ -47,14 +47,31 @@ def make_node(node_id, **kwargs):
     )
 
 
-@pytest.fixture
-def initiator():
-    return make_node("node_initiator")
+def trust(node, *peers):
+    """
+    Provision `node` to trust each peer's public key.
+
+    Trust is now a precondition of a successful handshake, so tests that are
+    about the handshake itself have to establish it explicitly -- the same
+    step an operator performs when deploying a trust file. This is a
+    provisioning action, never something the handshake does on its own.
+    """
+    for peer in peers:
+        node.trust_list.add(peer.node_id, peer.crypto.get_public_key_hex())
+    return node
 
 
 @pytest.fixture
 def responder():
     return make_node("node_responder")
+
+
+@pytest.fixture
+def initiator(responder):
+    # Trusts the responder, so these tests exercise the handshake rather than
+    # tripping over the allowlist. Tests about the allowlist itself live in
+    # test_trust.py and build their own nodes.
+    return trust(make_node("node_initiator"), responder)
 
 
 def authenticated_peers(node):
@@ -226,6 +243,8 @@ def test_freshness_window_is_configurable():
     strict = make_node("node_strict", freshness_seconds=5)
     lenient = make_node("node_lenient", freshness_seconds=300)
     peer = make_node("node_peer")
+    trust(strict, peer)
+    trust(lenient, peer)
 
     for node in (strict, lenient):
         challenge = node.create_challenge(peer.node_id)
@@ -739,6 +758,7 @@ def test_pruned_nonce_still_cannot_be_replayed(initiator, responder):
 def test_seen_nonces_are_capped():
     node = make_node("node_many", max_seen_nonces=32)
     peer = make_node("node_peer")
+    trust(node, peer)
 
     for _ in range(200):
         challenge = node.create_challenge(peer.node_id)

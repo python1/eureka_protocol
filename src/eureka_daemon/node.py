@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Any, Set
 from .crypto import EurekaCrypto
+from .trust import TrustList
 
 # Default window a challenge stays valid for, in seconds. A response that
 # arrives outside this window is rejected even if its signature is perfect,
@@ -56,6 +57,7 @@ REASON_STALE = "stale_timestamp"
 REASON_BAD_SIGNATURE = "signature_verification_failed"
 REASON_CHALLENGE_MISMATCH = "challenge_mismatch"
 REASON_WRONG_RESPONDER = "unexpected_responder"
+REASON_UNTRUSTED_KEY = "untrusted_key"
 
 
 def _utc_now() -> datetime:
@@ -80,7 +82,9 @@ class EurekaNode:
                  capabilities: List[str],
                  freshness_seconds: float = HANDSHAKE_FRESHNESS_SECONDS,
                  max_pending_challenges: int = MAX_PENDING_CHALLENGES,
-                 max_seen_nonces: int = MAX_SEEN_NONCES):
+                 max_seen_nonces: int = MAX_SEEN_NONCES,
+                 trust_path: Optional[str] = None,
+                 trust_list: Optional[TrustList] = None):
         self.crypto = crypto_async_wrapper(crypto_engine) if hasattr(self, 'crypto_async_wrapper') else crypto_engine
         # node_id=None means "name me after my key", so a node that reloads a
         # stored identity comes back under the same id instead of a fresh
@@ -92,6 +96,17 @@ class EurekaNode:
         self.active_tasks: Dict[str, Any] = {}
         self.event_log: List[Dict[str, Any]] = []
         self.session_id = f"urn:uuid:{uuid.uuid4()}"
+
+        # Who this node is willing to authenticate, loaded at construction.
+        # An absent trust file is a legitimate state and yields an empty
+        # allowlist -- which trusts nobody. A corrupt one raises TrustError
+        # rather than pretending to be empty. A caller may hand in a prebuilt
+        # TrustList instead of a path; an empty one is still empty, so this is
+        # a provisioning seam, not a bypass.
+        self.trust_list = (
+            trust_list if trust_list is not None
+            else TrustList.load_or_empty(trust_path)
+        )
 
         # Handshake state. freshness_seconds is per-node so a deployment can
         # tighten or loosen the replay window without touching the protocol.
@@ -427,6 +442,15 @@ class EurekaNode:
         #    replaying a legitimately signed challenge under another name.
         if response.get("responder_id") != peer_id:
             return self._handshake_result(False, REASON_WRONG_RESPONDER, peer_id)
+
+        # 7. Finally: a valid signature only proves the responder holds the
+        #    keypair it presented, and anyone can generate a keypair. The key
+        #    must be one we were told to trust. This runs last, so a bad
+        #    signature from a trusted key still reports the signature failure
+        #    rather than being masked by a trust decision.
+        if not self.trust_list.trusts(public_key):
+            print(f"[NODE {self.node_id}] Rejected handshake: untrusted key")
+            return self._handshake_result(False, REASON_UNTRUSTED_KEY, peer_id)
 
         # Every check passed: spend the nonce and record the peer.
         # Removing it from pending_challenges is what actually prevents reuse;
