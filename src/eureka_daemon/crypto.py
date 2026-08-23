@@ -2,8 +2,21 @@ import os
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.exceptions import InvalidSignature
+import binascii
 import json
 import base64
+
+
+def canonical_json_bytes(payload: dict) -> bytes:
+    """
+    Deterministic JSON encoding used for every signature in the protocol.
+
+    Keys are sorted and the separators carry no whitespace, so two
+    implementations that agree on the payload also agree on the exact bytes
+    that were signed. sign_json and verify_json MUST share this helper --
+    if they diverge, every signature silently fails to verify.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
 
 class EurekaCrypto:
     """
@@ -32,27 +45,38 @@ class EurekaCrypto:
 
     @staticmethod
     def verify_signature(public_key_hex: str, signature_base64: str, data: bytes) -> bool:
-        """Verifies a base64 encoded signature against a hex public key."""
+        """
+        Verifies a base64 encoded signature against a hex public key.
+
+        Returns False only for a genuine authentication failure: a bad
+        signature, an unparseable key, or malformed base64. Any other
+        exception is a bug and is allowed to propagate rather than being
+        silently downgraded into "not authenticated".
+        """
         try:
             pub_key = ed25519.Ed25519PublicKey.from_public_bytes(
                 bytes.fromhex(public_key_hex)
             )
-            signature = base64.b64decode(signature_base64)
+            # validate=True: without it b64decode discards non-alphabet
+            # characters, so "!!!!" would decode to b"" instead of raising.
+            signature = base64.b64decode(signature_base64, validate=True)
             pub_key.verify(signature, data)
             return True
-        except (InvalidSignature, Exception):
+        except (InvalidSignature, binascii.Error, ValueError):
+            # binascii.Error subclasses ValueError; both are listed to keep
+            # the intent (bad signature / bad encoding) explicit.
             return False
 
     def sign_json(self, payload: dict) -> str:
         """Helper to sign a JSON-serializable dictionary."""
-        canonical_data = json.dumps(payload, sort_keys=True).encode('utf-8')
-        return self.sign_data(canonical_data)
+        return self.sign_data(canonical_json_bytes(payload))
 
     @staticmethod
     def verify_json(public_key_hex: str, signature_base64: str, payload: dict) -> bool:
         """Helper to verify a signature against a JSON dictionary."""
-        canonical_data = json.dumps(payload, sort_keys=True).encode('utf-8')
-        return EurekaCrypto.verify_signature(public_key_hex, signature_base64, canonical_data)
+        return EurekaCrypto.verify_signature(
+            public_key_hex, signature_base64, canonical_json_bytes(payload)
+        )
 
 if __name__ == "__main__":
     # Quick unit test for the crypto module
