@@ -406,6 +406,14 @@ def test_user_home_is_expanded(monkeypatch):
 
 
 def test_no_test_touches_the_real_default_trust_path():
-    """The suite must never read or write the operator's real trust file."""
+    """
+    The suite must never read or write the operator's real trust file.
+
+    Asserted by showing the suite resolves somewhere else and loads nothing
+    from there -- NOT by asserting the default path is absent. On a deployed
+    node that file exists by design, and a test that fails because the host
+    it runs on is actually in service is testing the wrong thing.
+    """
     assert resolve_trust_path() != DEFAULT_TRUST_PATH
-    assert not DEFAULT_TRUST_PATH.exists()
+    # If the real allowlist were leaking in, this would carry its peers.
+    assert len(TrustList.load_or_empty()) == 0
