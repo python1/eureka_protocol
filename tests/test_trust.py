@@ -56,6 +56,19 @@ def let_responder_trust(responder, initiator):
 
 def write_trust_file(path, peers, version=TRUST_FILE_VERSION,
                      algorithm=TRUST_ALGORITHM):
+    """
+    Write a trust file.
+
+    `peers` maps name -> public key hex, or name -> a full entry dict. At the
+    current version a bare key is wrapped into an entry granting nothing,
+    which is what these tests mean when they name a peer without grants.
+    Pass version=1 to write the legacy bare-string shape verbatim.
+    """
+    if version == TRUST_FILE_VERSION:
+        peers = {
+            name: (value if isinstance(value, dict) else {"public_key": value})
+            for name, value in peers.items()
+        }
     path.write_text(json.dumps({
         "version": version,
         "algorithm": algorithm,

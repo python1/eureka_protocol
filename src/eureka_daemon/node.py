@@ -109,7 +109,7 @@ class EurekaNode:
         # a provisioning seam, not a bypass.
         self.trust_list = (
             trust_list if trust_list is not None
-            else TrustList.load_or_empty(trust_path)
+            else TrustList.load_or_empty(trust_path, advertised=self.capabilities)
         )
 
         # Handshake state. freshness_seconds is per-node so a deployment can
@@ -513,9 +513,53 @@ class EurekaNode:
             "public_key": public_key,
             "last_seen": time.time(),
             "status": "authenticated",
+            # A snapshot for introspection only. Authorisation decisions read
+            # the live trust list, so revoking a grant takes effect without
+            # waiting for the peer to handshake again.
+            "capabilities": sorted(self.trust_list.capabilities_for(public_key)),
         }
         print(f"[NODE {self.node_id}] Handshake established with {peer_id}")
         return self._handshake_result(True, REASON_OK, peer_id)
+
+    # ------------------------------------------------------------------
+    # Capability enforcement
+    # ------------------------------------------------------------------
+
+    def granted_capabilities(self, peer_id: object) -> Set[str]:
+        """
+        What an authenticated peer may actually ask of this node.
+
+        Two gates, both of which must pass:
+          1. the peer's key holds the grant in our trust list, and
+          2. this node actually offers that capability.
+
+        The second gate is why the advertised capability list stops being
+        decorative: a node cannot grant away something it does not have, so a
+        stale or over-broad trust file cannot widen what a peer can reach.
+
+        Reads the live trust list rather than the snapshot taken at handshake
+        time, so a revoked grant takes effect immediately.
+        """
+        if not isinstance(peer_id, str):
+            return set()
+        record = self.peers.get(peer_id)
+        # Default deny: unknown peer, or one not authenticated.
+        if not record or record.get("status") != "authenticated":
+            return set()
+        granted = self.trust_list.capabilities_for(record.get("public_key"))
+        return set(granted) & set(self.capabilities)
+
+    def is_permitted(self, peer_id: object, capability: object) -> bool:
+        """
+        Default-deny authorisation check for a single capability.
+
+        Everything unknown answers False: an unknown peer, an unauthenticated
+        one, an ungranted capability, and a capability this node does not
+        offer.
+        """
+        if not isinstance(capability, str) or not capability.strip():
+            return False
+        return capability.strip() in self.granted_capabilities(peer_id)
 
     def _evaluate_handshake_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """
