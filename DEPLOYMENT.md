@@ -87,15 +87,32 @@ Grants carry across. The old key is revoked, so it cannot be re-added later.
 
 ## Transport encryption (TLS)
 
-Off by default; the two-node deployment above still speaks plain HTTP. Turn it
-on per node:
+**CT 102 serves TLS on 8443 and plaintext on 8000, from one process.** TLS
+cannot share a port with plaintext -- an HTTPS socket answers a plain request
+with a handshake failure, not a manifest -- and wsl-hermes still runs an older
+client that speaks plain HTTP. So 8000 is untouched and TLS was added
+alongside, rather than asking every peer to cut over on the same day.
 
-    /root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server 8000 --tls
+    /root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
+        8000 --tls-port 8443 --tls-dir /var/lib/eureka
+
+One process, not two services: two processes under one identity would keep two
+independent replay tables, so a handshake nonce spent on one port would still
+be unspent on the other, and two peer tables, so `/v1/peers` would answer
+differently depending on which port you asked.
+
+`--no-plain` drops the plaintext listener, and is the last step of the
+migration -- **do not set it until every peer speaks TLS**, wsl-hermes
+included. `--tls` on its own is shorthand for TLS-only on the main port.
 
 The certificate is generated from the node's **existing** identity key and
 written beside it as `server-cert.pem` / `server-key.pem` (mode 0600). Nothing
 new has to be distributed: peers already hold the public key in their trust
 file, and that is exactly what the client pins.
+
+`require_tls` stays **off** while any peer still speaks plain HTTP. It governs
+whether a *plain* connection is allowed at all; a TLS connection is pinned
+either way, so leaving it off costs nothing for peers that do use TLS.
 
 The client opts in with `require_tls`:
 
@@ -162,7 +179,18 @@ a different node the day someone forgets to export a variable.
     systemctl restart eureka-daemon
     journalctl -u eureka-daemon -f
 
-Check: curl -s http://192.168.1.174:8000/v1/manifest
+Check both listeners:
+
+    curl -s  http://192.168.1.174:8000/v1/manifest     # plaintext, old peers
+    curl -sk https://192.168.1.174:8443/v1/manifest    # TLS
+
+`curl -k` skips chain verification, which is correct here and not a shortcut:
+the certificate is self-signed and identity lives in the key inside it, not in
+any chain. A real peer pins that key against its trust file. To check the
+served key by hand:
+
+    openssl s_client -connect 192.168.1.174:8443 </dev/null 2>/dev/null \
+      | openssl x509 -pubkey -noout
 
 The unit is version controlled at **`deploy/eureka-daemon.service`**, which is
 the canonical copy; `/etc/systemd/system/eureka-daemon.service` is an install
@@ -244,8 +272,16 @@ reprovisioning.
 Until then the unit is hardened instead: `NoNewPrivileges`, `PrivateTmp`,
 `ProtectSystem=full`, and `ProtectHome=read-only`. That last one is load
 bearing rather than decoration -- the daemon only ever *reads* `/root/.eureka`,
-so the service cannot modify its own key material. **Turning on `--tls` needs
-it relaxed**, because that writes a certificate next to the identity file.
+so the service cannot modify its own key material.
+
+**Turning TLS on did not require relaxing it.** The certificate could have gone
+next to the identity file, which would have meant making `/root` writable by
+the service; instead `--tls-dir` points at `StateDirectory=eureka`
+(`/var/lib/eureka`, mode 0700). What TLS actually needs is somewhere to write,
+not somewhere *inside the private key's directory* to write. The certificate
+and its key are derived from the identity and regenerated whenever they stop
+matching it, so that directory is disposable state and never a source of
+truth -- deleting it costs one restart.
 
 ## Run the handshake (WSL initiates)
 

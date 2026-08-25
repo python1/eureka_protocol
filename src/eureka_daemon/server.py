@@ -1,13 +1,29 @@
 """
 Daemon entry point.
 
-TLS is opt-in via --tls. When it is on, the certificate served is generated
-from the node's existing identity key, so peers pin the same key they already
-have in their trust file and nothing new has to be distributed.
+A node can serve plaintext, TLS, or both at once. Both matters during a
+migration: a peer still running an older client speaks plain HTTP, and TLS
+cannot share a port with it -- an HTTPS socket answers a plaintext request with
+a handshake failure, not a manifest. So the daemon listens twice rather than
+asking every peer to cut over on the same day.
+
+Both listeners are served from ONE process, sharing one EurekaNode. Running a
+second process for the TLS port would be simpler to wire and quietly wrong: two
+processes under one identity would keep two independent replay tables, so a
+handshake nonce spent on one port would still be unspent on the other, and two
+peer tables, so /v1/peers would answer differently depending on which port you
+asked. One node means one of each.
+
+The certificate served is generated from the node's existing identity key, so
+peers pin the same key they already have in their trust file and nothing new
+has to be distributed. node_id is derived from that key and does not change
+when TLS is switched on.
 """
 import argparse
 import asyncio
+import signal
 import ssl
+from typing import List, Optional
 
 import uvicorn
 
@@ -17,7 +33,7 @@ from .tls import ensure_server_materials
 
 def build_config(port: int, use_tls: bool, materials_dir=None) -> uvicorn.Config:
     """
-    The uvicorn config for this node, with TLS wired to its identity.
+    The uvicorn config for one listener, with TLS wired to this node's identity.
 
     Kept separate from main() so the wiring can be tested without binding a
     socket -- in particular that TLS actually serves the node's own key.
@@ -41,23 +57,103 @@ def build_config(port: int, use_tls: bool, materials_dir=None) -> uvicorn.Config
     return uvicorn.Config(**options)
 
 
+def build_configs(plain_port: Optional[int] = None,
+                  tls_port: Optional[int] = None,
+                  materials_dir=None) -> List[uvicorn.Config]:
+    """
+    Every listener this node should open. Either may be omitted, not both.
+
+    Refusing the empty case is the point: a typo that turns off plaintext
+    without turning on TLS would otherwise start a daemon that serves nothing
+    and looks perfectly healthy doing it.
+    """
+    if plain_port is None and tls_port is None:
+        raise ValueError("no listeners configured: give a plaintext port, "
+                         "a TLS port, or both")
+    if plain_port is not None and plain_port == tls_port:
+        # They cannot share a socket, and whichever bound second would fail
+        # with an address-in-use error that says nothing about the real cause.
+        raise ValueError(f"plaintext and TLS cannot share port {tls_port}")
+
+    configs = []
+    if plain_port is not None:
+        configs.append(build_config(plain_port, use_tls=False))
+    if tls_port is not None:
+        configs.append(build_config(tls_port, use_tls=True,
+                                    materials_dir=materials_dir))
+    return configs
+
+
+class _CoServer(uvicorn.Server):
+    """
+    A uvicorn server that leaves signal handling to whoever started it.
+
+    Two servers in one event loop would otherwise each install their own
+    SIGTERM handler, and the second would replace the first -- so a systemd
+    stop would shut down one listener and leave the other running until the
+    stop timed out and the process was killed.
+    """
+
+    def install_signal_handlers(self) -> None:
+        return
+
+
+async def serve(configs: List[uvicorn.Config]) -> None:
+    """Run every listener until a signal asks all of them to stop together."""
+    servers = [_CoServer(config) for config in configs]
+
+    def stop_all() -> None:
+        for server in servers:
+            server.should_exit = True
+
+    loop = asyncio.get_running_loop()
+    for signal_number in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signal_number, stop_all)
+
+    await asyncio.gather(*(server.serve() for server in servers))
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Eureka Protocol daemon")
-    parser.add_argument("port", nargs="?", type=int, default=8000)
+    parser.add_argument("port", nargs="?", type=int, default=8000,
+                        help="plaintext port (default 8000)")
+    parser.add_argument("--tls-port", type=int, default=None,
+                        help="also serve TLS on this port, using the node's "
+                             "own identity key")
+    parser.add_argument("--no-plain", action="store_true",
+                        help="do not serve plaintext (requires --tls-port)")
     parser.add_argument("--tls", action="store_true",
-                        help="serve HTTPS using the node's own identity key")
+                        help="serve TLS on the main port and nothing else; "
+                             "shorthand for --tls-port PORT --no-plain")
     parser.add_argument("--tls-dir", default=None,
                         help="where to write the certificate and key "
                              "(default: beside the identity file)")
     arguments = parser.parse_args()
 
-    config = build_config(arguments.port, arguments.tls, arguments.tls_dir)
-    scheme = "https" if arguments.tls else "http"
-    print(f"Starting Eureka Daemon API on {scheme}://0.0.0.0:{arguments.port} "
-          f"as {node_engine.node_id}")
+    tls_port = arguments.tls_port
+    serve_plain = not arguments.no_plain
     if arguments.tls:
-        print(f"Peers should pin: {node_engine.public_key_hex}")
-    await uvicorn.Server(config).serve()
+        if tls_port is not None:
+            parser.error("--tls and --tls-port are two ways to say the same "
+                         "thing; use one")
+        tls_port, serve_plain = arguments.port, False
+    if arguments.no_plain and tls_port is None:
+        parser.error("--no-plain leaves nothing to serve; add --tls-port")
+
+    configs = build_configs(
+        plain_port=arguments.port if serve_plain else None,
+        tls_port=tls_port,
+        materials_dir=arguments.tls_dir,
+    )
+
+    print(f"Starting Eureka Daemon API as {node_engine.node_id}")
+    for config in configs:
+        scheme = "https" if config.ssl_certfile else "http"
+        print(f"  listening on {scheme}://{config.host}:{config.port}")
+    if tls_port is not None:
+        print(f"  peers should pin: {node_engine.public_key_hex}")
+
+    await serve(configs)
 
 
 if __name__ == "__main__":

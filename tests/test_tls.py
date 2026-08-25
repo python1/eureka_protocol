@@ -14,6 +14,7 @@ startup, where reload_trust() could never reach it.
 import asyncio
 import datetime
 import socket
+import signal
 import ssl
 import stat
 import threading
@@ -559,3 +560,87 @@ def test_a_connection_swapped_before_the_confirmation_is_refused(daemon, monkeyp
 
     assert result["authenticated"] is False
     assert result["reason"] == REASON_UNTRUSTED_KEY
+
+
+def test_serving_both_opens_a_plaintext_and_a_tls_listener(tmp_path):
+    """
+    A migration needs both at once: TLS cannot share a port with a peer that
+    still speaks plain HTTP, so the daemon listens twice rather than making
+    every peer cut over on the same day.
+    """
+    from eureka_protocol.src.eureka_daemon.server import build_configs
+
+    plain, tls_config = build_configs(plain_port=8000, tls_port=8443,
+                                      materials_dir=tmp_path)
+
+    assert (plain.port, plain.ssl_certfile) == (8000, None)
+    assert tls_config.port == 8443
+    served = public_key_hex_from_cert(open(tls_config.ssl_certfile, "rb").read())
+    assert served == api.node_engine.public_key_hex
+
+
+def test_serving_both_shares_one_node(tmp_path):
+    """
+    One node means one replay table and one peer table. Two processes under a
+    single identity would keep two of each, so a nonce spent on one port would
+    still be unspent on the other.
+    """
+    from eureka_protocol.src.eureka_daemon.server import build_configs
+
+    configs = build_configs(plain_port=8000, tls_port=8443,
+                            materials_dir=tmp_path)
+
+    assert configs[0].app is configs[1].app
+
+
+def test_plaintext_only_is_still_available():
+    from eureka_protocol.src.eureka_daemon.server import build_configs
+
+    configs = build_configs(plain_port=8000)
+
+    assert len(configs) == 1
+    assert configs[0].ssl_certfile is None
+
+
+def test_tls_only_is_still_available(tmp_path):
+    from eureka_protocol.src.eureka_daemon.server import build_configs
+
+    configs = build_configs(tls_port=8443, materials_dir=tmp_path)
+
+    assert len(configs) == 1
+    assert configs[0].ssl_certfile is not None
+
+
+def test_a_daemon_with_no_listeners_is_refused():
+    """
+    A typo that turns off plaintext without turning on TLS would otherwise
+    start a daemon that serves nothing and looks healthy doing it.
+    """
+    from eureka_protocol.src.eureka_daemon.server import build_configs
+
+    with pytest.raises(ValueError, match="no listeners"):
+        build_configs()
+
+
+def test_the_two_listeners_cannot_share_a_port(tmp_path):
+    from eureka_protocol.src.eureka_daemon.server import build_configs
+
+    with pytest.raises(ValueError, match="cannot share port"):
+        build_configs(plain_port=8443, tls_port=8443, materials_dir=tmp_path)
+
+
+def test_co_servers_do_not_fight_over_signal_handlers():
+    """
+    Whichever server installed its handler second would otherwise win, and a
+    systemd stop would shut down one listener while the other ran on until the
+    stop timed out.
+    """
+    from eureka_protocol.src.eureka_daemon.server import _CoServer
+
+    config = uvicorn.Config(app=app, host="127.0.0.1", port=0)
+    server = _CoServer(config)
+
+    # The base class installs handlers here; this override must not.
+    before = signal.getsignal(signal.SIGTERM)
+    assert server.install_signal_handlers() is None
+    assert signal.getsignal(signal.SIGTERM) is before
