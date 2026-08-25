@@ -153,13 +153,80 @@ the thief into permanent trust, which is trust-on-first-use wearing a hat.
 
 ## Start the responder (CT 102)
 
+CT 102 runs the daemon under systemd as `eureka-daemon.service`, enabled at
+boot. It is no longer started by hand -- a daemon living in an SSH session dies
+with the session, and one that inherits its identity from a shell comes back as
+a different node the day someone forgets to export a variable.
+
+    systemctl status eureka-daemon
+    systemctl restart eureka-daemon
+    journalctl -u eureka-daemon -f
+
+Check: curl -s http://192.168.1.174:8000/v1/manifest
+
+Unit: `/etc/systemd/system/eureka-daemon.service`. Identity and trust paths are
+set in the unit, not inherited. Logs go to the journal under the identifier
+`eureka-daemon`.
+
+To run it by hand anyway -- debugging, or a second node on another port -- stop
+the service first so the port is free:
+
+    systemctl stop eureka-daemon
     cd /root/.openclaw/workspace
     EUREKA_IDENTITY_PATH=/root/.eureka/identity.key \
     EUREKA_TRUST_PATH=/root/.eureka/trust.json \
     /root/eureka_venv/bin/python -m uvicorn \
       eureka_protocol.src.eureka_daemon.api:app --host 0.0.0.0 --port 8000
 
-Check: curl -s http://192.168.1.174:8000/v1/manifest
+### The restart policy, and why it looks like that
+
+    Restart=on-failure       RestartSec=5s
+    RestartSteps=4           RestartMaxDelaySec=60s
+    StartLimitIntervalSec=300   StartLimitBurst=5
+
+A crash is recovered from; a broken config is **not** retried forever. Five
+start attempts inside five minutes and systemd gives up, leaving the unit in
+`failed` for a human to look at.
+
+That ceiling is the whole point. `ollama.service` on this box has
+`Restart=always` with `RestartSec=3` and no start-limit override, so it runs
+against systemd's default of 5 starts per 10 seconds. One start every three
+seconds is about 3.3 per window, which never reaches 5, so the limiter never
+trips -- it restarted 124,527 times over five days on a config error.
+
+**The rule: `StartLimitIntervalSec` must be comfortably longer than
+`RestartSec` x `StartLimitBurst`, or the guard is decorative.** Here five
+attempts with backoff span about 100 seconds against a 300 second window, so
+the limit is always reached before the window slides. Verified by running a
+unit with these exact directives against `/bin/false`: it stopped after 5
+restarts in 125s with "Start request repeated too quickly".
+
+`Restart=on-failure` rather than `always`, so a clean exit is treated as
+somebody stopping the daemon on purpose instead of something to fight.
+
+When the unit does give up, it stays down until told otherwise:
+
+    systemctl reset-failed eureka-daemon && systemctl start eureka-daemon
+
+### It runs as root, and it should not
+
+The identity and trust files are live, root-owned, mode 0600, and re-homing
+them under a service account is not a thing to do casually -- the identity
+loader refuses any key file that is group or world readable, so a migration
+that fumbles the mode takes the node down.
+
+The migration when someone wants it: create a system user, move
+`/root/.eureka` to `/var/lib/eureka` owned by that user with the key still
+0600, add `User=`/`Group=` plus `StateDirectory=eureka` to the unit, and point
+the two environment variables at the new path. The node_id does not change,
+because it is derived from the key and the key is the same file. Peers need no
+reprovisioning.
+
+Until then the unit is hardened instead: `NoNewPrivileges`, `PrivateTmp`,
+`ProtectSystem=full`, and `ProtectHome=read-only`. That last one is load
+bearing rather than decoration -- the daemon only ever *reads* `/root/.eureka`,
+so the service cannot modify its own key material. **Turning on `--tls` needs
+it relaxed**, because that writes a certificate next to the identity file.
 
 ## Run the handshake (WSL initiates)
 
