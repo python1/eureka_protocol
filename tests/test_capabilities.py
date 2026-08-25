@@ -279,7 +279,9 @@ def test_v2_file_may_not_carry_bare_keys(tmp_path):
 
 
 def test_unsupported_versions_are_still_rejected(tmp_path):
-    for version in (0, 3, 99, "2", None):
+    # One past the current version rather than a literal, so this keeps
+    # testing "the next version does not exist yet" after every bump.
+    for version in (0, TRUST_FILE_VERSION + 1, 99, "2", None):
         path = tmp_path / f"trust-{version}.json"
         path.write_text(json.dumps({
             "version": version, "algorithm": TRUST_ALGORITHM, "peers": {},

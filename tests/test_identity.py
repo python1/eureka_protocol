@@ -11,6 +11,7 @@ import stat
 
 import pytest
 
+from eureka_protocol.src.eureka_daemon import crypto as crypto_module
 from eureka_protocol.src.eureka_daemon.crypto import (
     DEFAULT_IDENTITY_PATH,
     IDENTITY_ALGORITHM,
@@ -280,3 +281,159 @@ def test_user_home_is_expanded(monkeypatch):
     resolved = resolve_identity_path()
     assert "~" not in str(resolved)
     assert resolved.is_absolute()
+
+
+# ---------------------------------------------------------------------------
+# Rotation
+#
+# Rotating replaces the node's keypair. The outgoing private key is archived
+# and never deleted -- it is the only thing that can still verify signatures
+# it made while it was live, and a rotation that destroys it cannot be undone.
+# ---------------------------------------------------------------------------
+
+def test_rotation_installs_a_new_key(identity_path):
+    original = EurekaCrypto.load_or_create(identity_path)
+    original_public = original.get_public_key_hex()
+
+    rotated, archive = EurekaCrypto.rotate(identity_path)
+
+    assert rotated.get_public_key_hex() != original_public
+    assert EurekaCrypto.load(identity_path).get_public_key_hex() == \
+        rotated.get_public_key_hex()
+
+
+def test_rotation_archives_the_outgoing_key(identity_path):
+    original = EurekaCrypto.load_or_create(identity_path)
+    original_private = original.get_private_key_hex()
+
+    _, archive = EurekaCrypto.rotate(identity_path)
+
+    assert archive.exists()
+    assert archive != identity_path
+    assert EurekaCrypto.load(archive).get_private_key_hex() == original_private
+
+
+def test_the_archived_key_is_still_private(identity_path):
+    """A retired private key is still a private key."""
+    EurekaCrypto.load_or_create(identity_path)
+
+    _, archive = EurekaCrypto.rotate(identity_path)
+
+    assert stat.S_IMODE(archive.stat().st_mode) == 0o600
+
+
+def test_signatures_made_before_rotation_still_verify(identity_path):
+    original = EurekaCrypto.load_or_create(identity_path)
+    payload = {"event": "handshake_challenge", "nonce": "abc"}
+    signature = original.sign_json(payload, domain=DOMAIN_HANDSHAKE)
+    original_public = original.get_public_key_hex()
+
+    rotated, _ = EurekaCrypto.rotate(identity_path)
+
+    assert EurekaCrypto.verify_json(
+        original_public, signature, payload, domain=DOMAIN_HANDSHAKE) is True
+    # And the new key is a genuinely different identity, not a re-wrap.
+    assert EurekaCrypto.verify_json(
+        rotated.get_public_key_hex(), signature, payload,
+        domain=DOMAIN_HANDSHAKE) is False
+
+
+def test_rotation_changes_the_node_id(identity_path):
+    """
+    The node_id is derived from the public key, so a rotated node comes back
+    as a different identity. Peers must be re-provisioned out of band; nothing
+    here pretends otherwise.
+    """
+    original = EurekaCrypto.load_or_create(identity_path)
+    rotated, _ = EurekaCrypto.rotate(identity_path)
+
+    assert rotated.derive_node_id() != original.derive_node_id()
+    assert EurekaNode.with_persistent_identity(
+        capabilities=[], identity_path=identity_path
+    ).node_id == rotated.derive_node_id()
+
+
+def test_rotating_when_there_is_no_identity_is_refused(identity_path):
+    """Creating one here would make a typo'd path mint a whole new node."""
+    with pytest.raises(IdentityError, match="no identity to rotate"):
+        EurekaCrypto.rotate(identity_path)
+
+    assert not identity_path.exists()
+
+
+def test_rotating_an_exposed_identity_is_refused(identity_path):
+    """Rotation must not be the operation that quietly accepts a leaked key."""
+    EurekaCrypto.load_or_create(identity_path)
+    identity_path.chmod(0o644)
+
+    with pytest.raises(IdentityError, match="group/world accessible"):
+        EurekaCrypto.rotate(identity_path)
+
+
+def test_a_refused_rotation_changes_nothing(identity_path):
+    original = EurekaCrypto.load_or_create(identity_path)
+    identity_path.chmod(0o644)
+
+    with pytest.raises(IdentityError):
+        EurekaCrypto.rotate(identity_path)
+
+    identity_path.chmod(0o600)
+    assert EurekaCrypto.load(identity_path).get_private_key_hex() == \
+        original.get_private_key_hex()
+    assert list(identity_path.parent.glob("*.retired-*")) == []
+
+
+def test_repeated_rotations_keep_every_retired_key(identity_path):
+    first = EurekaCrypto.load_or_create(identity_path)
+    second, first_archive = EurekaCrypto.rotate(identity_path)
+    third, second_archive = EurekaCrypto.rotate(identity_path)
+
+    assert first_archive != second_archive
+    assert EurekaCrypto.load(first_archive).get_public_key_hex() == \
+        first.get_public_key_hex()
+    assert EurekaCrypto.load(second_archive).get_public_key_hex() == \
+        second.get_public_key_hex()
+    assert EurekaCrypto.load(identity_path).get_public_key_hex() == \
+        third.get_public_key_hex()
+
+
+def test_rotation_never_overwrites_a_retired_key(identity_path, monkeypatch):
+    """
+    Two rotations cannot collide in practice -- the archive name carries
+    microseconds -- so this pins the suffix to force the collision the guard
+    exists for. Overwriting an archive would destroy the only copy of a
+    retired private key, which is the one thing rotation must never do.
+    """
+    monkeypatch.setattr(crypto_module, "RETIRED_SUFFIX", ".retired-fixed")
+    first = EurekaCrypto.load_or_create(identity_path)
+    second, archive = EurekaCrypto.rotate(identity_path)
+
+    with pytest.raises(IdentityError, match="refusing to overwrite"):
+        EurekaCrypto.rotate(identity_path)
+
+    # The first retired key is intact, and the refused rotation left the live
+    # identity alone rather than half-replacing it.
+    assert EurekaCrypto.load(archive).get_public_key_hex() == \
+        first.get_public_key_hex()
+    assert EurekaCrypto.load(identity_path).get_public_key_hex() == \
+        second.get_public_key_hex()
+
+
+def test_rotation_leaves_no_temporary_files_behind(identity_path):
+    EurekaCrypto.load_or_create(identity_path)
+    EurekaCrypto.rotate(identity_path)
+
+    assert list(identity_path.parent.glob("*.tmp")) == []
+
+
+def test_rotation_honours_the_environment_variable(tmp_path, monkeypatch):
+    configured = tmp_path / "configured.key"
+    monkeypatch.setenv(IDENTITY_PATH_ENV_VAR, str(configured))
+    original = EurekaCrypto.load_or_create()
+
+    rotated, archive = EurekaCrypto.rotate()
+
+    assert archive.parent == tmp_path
+    assert EurekaCrypto.load(configured).get_public_key_hex() == \
+        rotated.get_public_key_hex()
+    assert rotated.get_public_key_hex() != original.get_public_key_hex()

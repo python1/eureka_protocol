@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Any, Set
 from .crypto import EurekaCrypto
-from .trust import TrustList
+from .trust import TrustError, TrustList
 
 # Default window a challenge stays valid for, in seconds. A response that
 # arrives outside this window is rejected even if its signature is perfect,
@@ -58,6 +58,13 @@ REASON_BAD_SIGNATURE = "signature_verification_failed"
 REASON_CHALLENGE_MISMATCH = "challenge_mismatch"
 REASON_WRONG_RESPONDER = "unexpected_responder"
 REASON_UNTRUSTED_KEY = "untrusted_key"
+# A revoked key is already absent from the allowlist, so it would be refused as
+# untrusted anyway. This reason exists to say *which* refusal it was: "we
+# revoked you" and "we have never heard of you" call for very different
+# operator responses, and a log full of untrusted_key cannot tell them apart.
+# It does disclose to the holder of a revoked key that it was specifically
+# revoked -- accepted deliberately, since losing access reveals as much.
+REASON_REVOKED_KEY = "revoked_key"
 # The same check sequence runs on both sides of the exchange, so the
 # "responder" in this reason is really "the peer we addressed". Same value,
 # readable name for the responder-side call.
@@ -111,6 +118,12 @@ class EurekaNode:
             trust_list if trust_list is not None
             else TrustList.load_or_empty(trust_path, advertised=self.capabilities)
         )
+        # Where reload_trust() should read from. An injected list with no
+        # explicit path has no file behind it, and resolving the default would
+        # silently swap in a completely different allowlist -- so that case
+        # refuses to reload rather than guessing.
+        self.trust_path = trust_path
+        self._trust_list_injected = trust_list is not None and trust_path is None
 
         # Handshake state. freshness_seconds is per-node so a deployment can
         # tighten or loosen the replay window without touching the protocol.
@@ -495,6 +508,11 @@ class EurekaNode:
         #    one we were told to trust. This runs last, so a bad signature from
         #    a trusted key still reports the signature failure rather than
         #    being masked by a trust decision.
+        if self.trust_list.is_revoked(public_key):
+            print(f"[NODE {self.node_id}] Rejected handshake: revoked key")
+            return (self._handshake_result(False, REASON_REVOKED_KEY, peer_id),
+                    nonce, public_key, peer_id)
+
         if not self.trust_list.trusts(public_key):
             print(f"[NODE {self.node_id}] Rejected handshake: untrusted key")
             return (self._handshake_result(False, REASON_UNTRUSTED_KEY, peer_id),
@@ -548,6 +566,51 @@ class EurekaNode:
             return set()
         granted = self.trust_list.capabilities_for(record.get("public_key"))
         return set(granted) & set(self.capabilities)
+
+    def reload_trust(self) -> Dict[str, Any]:
+        """
+        Re-read the trust file, applying revocations to live sessions.
+
+        This is how a revocation reaches a running daemon. Peers whose key is
+        now revoked -- or simply no longer listed -- are dropped from the peer
+        table, so a revoked peer is not left sitting there marked
+        "authenticated" with an empty grant set.
+
+        On a bad file the old list is kept and TrustError is raised. That is
+        the honest failure: the caller must treat it as an error and not as a
+        warning, because the revocation it was trying to apply has NOT been
+        applied. Keeping the old list only avoids adding a second failure --
+        dropping every peer -- on top of the first.
+        """
+        if self._trust_list_injected:
+            raise TrustError(
+                "this node's trust list was injected directly; "
+                "there is no trust file to reload"
+            )
+        # Raises before anything is swapped in, so a corrupt file leaves the
+        # node exactly as it was.
+        reloaded = TrustList.load_or_empty(
+            self.trust_path, advertised=self.capabilities
+        )
+        self.trust_list = reloaded
+
+        dropped = []
+        for peer_id, record in list(self.peers.items()):
+            public_key = record.get("public_key")
+            if reloaded.is_revoked(public_key):
+                dropped.append({"peer_id": peer_id, "reason": REASON_REVOKED_KEY})
+                del self.peers[peer_id]
+            elif not reloaded.trusts(public_key):
+                dropped.append({"peer_id": peer_id, "reason": REASON_UNTRUSTED_KEY})
+                del self.peers[peer_id]
+        for entry in dropped:
+            print(f"[NODE {self.node_id}] Dropped peer {entry['peer_id']}: "
+                  f"{entry['reason']}")
+        return {
+            "peers": len(reloaded),
+            "revoked": len(list(reloaded.revocations())),
+            "dropped": dropped,
+        }
 
     def is_permitted(self, peer_id: object, capability: object) -> bool:
         """
@@ -643,6 +706,10 @@ class EurekaNode:
             return self._handshake_result(False, REASON_WRONG_PEER, peer_id)
 
         # Trust last, same as everywhere else.
+        if self.trust_list.is_revoked(public_key):
+            print(f"[NODE {self.node_id}] Rejected offer: revoked key")
+            return self._handshake_result(False, REASON_REVOKED_KEY, peer_id)
+
         if not self.trust_list.trusts(public_key):
             print(f"[NODE {self.node_id}] Rejected offer: untrusted key")
             return self._handshake_result(False, REASON_UNTRUSTED_KEY, peer_id)

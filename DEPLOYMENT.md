@@ -21,16 +21,83 @@ identity ~/.eureka/identity.key, trust ~/.eureka/trust.json
 
 ## Trust file format
 
-peers maps NAME -> PUBLIC KEY. Lookups are by key; the name is a human label.
+peers maps NAME -> an entry. Lookups are by key; the name is a human label.
 
     {
-      "version": 1,
+      "version": 3,
       "algorithm": "ed25519",
-      "peers": { "<name>": "<64 hex chars>" }
+      "peers": {
+        "<name>": {
+          "public_key": "<64 hex chars>",
+          "capabilities": ["fast-inference"]
+        }
+      },
+      "revoked": [
+        {"public_key": "<64 hex chars>",
+         "reason": "laptop stolen",
+         "revoked_at": "2026-08-24T09:00:00+00:00"}
+      ]
     }
 
 Each node trusts the other's public key. Empty or absent file trusts nobody.
 No trust-on-first-use, no bypass.
+
+Older versions still load: v1 (peers maps name -> bare key string) grants
+nothing, v2 adds capabilities. Both are read-only history at this point --
+neither can express a revocation, and a `revoked` list in a file declaring
+version 1 or 2 is a load error rather than a field that is quietly ignored.
+Get that wrong silently and an operator believes a compromised key is dead
+when it is still authenticating.
+
+A grant naming a capability the node does not advertise is also a load error,
+so a typo fails at startup instead of sitting in the file looking effective.
+
+## Revoking a peer
+
+Revoking is not the same as deleting the entry. A deleted key comes back the
+moment someone restores an old trust file from a backup; a revoked key stays
+refused, and records why.
+
+    /root/eureka_venv/bin/python -c "
+    import sys, json; sys.path.insert(0, '/root/.openclaw/workspace')
+    from eureka_protocol.src.eureka_daemon.trust import TrustList
+    path = '/root/.eureka/trust.json'
+    trust = TrustList.load(path)
+    trust.revoke('<64 hex chars>', reason='laptop stolen')
+    open(path, 'w').write(json.dumps(trust.to_document(), indent=2))
+    "
+
+A running daemon picks it up with `node.reload_trust()`, which applies the
+revocation to live sessions: a peer whose key was revoked -- or simply removed
+-- is dropped from the peer table rather than left marked authenticated. If
+the file is corrupt the reload raises and keeps the old list, which means the
+revocation has NOT been applied; treat that as an error, not a warning.
+
+Without a reload, a revocation still takes effect on the next handshake, and
+authorisation reads the live trust list rather than a handshake-time snapshot.
+
+## Rotating a peer's key
+
+One step, not two -- adding the new key and revoking the old one separately
+leaves a window in which both authenticate:
+
+    trust.rotate('<name>', '<new 64 hex chars>')
+
+Grants carry across. The old key is revoked, so it cannot be re-added later.
+
+## Rotating this node's own key
+
+    EurekaCrypto.rotate('/root/.eureka/identity.key')
+
+The outgoing private key is archived beside the live one as
+`identity.key.retired-<timestamp>` at mode 0600 and never deleted -- it is the
+only thing that can still verify signatures it made while it was live.
+
+**The node_id changes.** It is derived from the public key, so a rotated node
+comes back as a different identity and every peer must be re-provisioned with
+the new key out of band. There is deliberately no signed "here is my new key"
+message that peers act on by themselves: a stolen key could use it to rotate
+the thief into permanent trust, which is trust-on-first-use wearing a hat.
 
 ## Start the responder (CT 102)
 
@@ -76,5 +143,6 @@ Verify from the responder: curl -s http://localhost:8000/v1/peers
 ## Not yet done
 
 DHT discovery (addresses are still configured by hand), NAT traversal, WAN,
-key rotation/revocation, the assign endpoint (deliberately unimplemented —
-code-exec over a network with no sandbox).
+transport encryption (evaluate mutual TLS before building anything custom),
+the assign endpoint (deliberately unimplemented — code-exec over a network
+with no sandbox).

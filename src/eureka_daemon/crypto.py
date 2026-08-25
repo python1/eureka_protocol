@@ -23,6 +23,12 @@ DEFAULT_IDENTITY_PATH = Path.home() / ".eureka" / "identity.key"
 IDENTITY_FILE_VERSION = 1
 IDENTITY_ALGORITHM = "ed25519"
 
+# A rotated-out identity is archived next to the live one under this suffix.
+# Microseconds are in the stamp so two rotations in the same second do not
+# collide -- a collision would mean refusing to rotate, or worse, overwriting
+# the only copy of a retired key.
+RETIRED_SUFFIX = ".retired-%Y%m%dT%H%M%S.%f"
+
 
 class IdentityError(RuntimeError):
     """Raised when a stored identity cannot be loaded or safely written."""
@@ -202,8 +208,10 @@ class EurekaCrypto:
                 f"(pass overwrite=True to replace it)"
             )
 
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        document = {
+        return self._write_document(target, self._identity_document())
+
+    def _identity_document(self) -> dict:
+        return {
             "version": IDENTITY_FILE_VERSION,
             "algorithm": IDENTITY_ALGORITHM,
             "private_key_hex": self.get_private_key_hex(),
@@ -212,6 +220,16 @@ class EurekaCrypto:
             "created": datetime.now(timezone.utc).isoformat(),
         }
 
+    @staticmethod
+    def _write_document(target: Path, document: dict) -> Path:
+        """
+        Write an identity document atomically at mode 0600.
+
+        Shared by save() and by rotate()'s archive step so a retired key is
+        stored under exactly the same protections as a live one -- an archive
+        written any other way is a private key with weaker permissions.
+        """
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Write-then-rename so a crash mid-write cannot leave a truncated
         # identity behind; the key is never briefly world-readable because
         # the temp file is created 0600 in the destination directory.
@@ -232,6 +250,54 @@ class EurekaCrypto:
                 os.unlink(temp_name)
             raise
         return target
+
+    @classmethod
+    def rotate(cls, path: Optional[Union[str, Path]] = None) -> tuple:
+        """
+        Replace this node's identity with a fresh keypair.
+
+        Returns (new_crypto, archive_path). The outgoing private key is copied
+        to the archive path and never deleted: a retired key is still the only
+        thing that can verify signatures it made while it was live, and a
+        rotation that destroys it is unrecoverable if the new key turns out to
+        be the wrong one.
+
+        Note what this does NOT do. The node_id is derived from the public key,
+        so rotating changes it -- the node comes back as a different identity,
+        and every peer must be re-provisioned with the new key out of band.
+        There is deliberately no signed "here is my new key" message that peers
+        act on by themselves: a stolen key could use it to rotate the thief
+        into permanent trust, which is trust-on-first-use wearing a hat.
+
+        Refuses when there is no identity to rotate. Creating one here would
+        make a typo'd path silently mint a brand new node instead of rotating
+        the real one.
+        """
+        target = resolve_identity_path(path)
+        if not target.exists():
+            raise IdentityError(
+                f"no identity to rotate at {target}; nothing was changed"
+            )
+        # Loading first also enforces the 0600 check, so a rotation is never
+        # the thing that quietly accepts an exposed key file.
+        outgoing = cls.load(target)
+
+        stamp = datetime.now(timezone.utc).strftime(RETIRED_SUFFIX)
+        archive = target.with_name(target.name + stamp)
+        if archive.exists():
+            raise IdentityError(
+                f"refusing to overwrite retired identity at {archive}"
+            )
+
+        # Archive the outgoing key BEFORE writing the new one. If this crashes
+        # in between, the live identity is still the old one and the archive is
+        # a harmless duplicate -- the rotation simply did not happen. The other
+        # order risks a window with no copy of the outgoing key at all.
+        outgoing._write_document(archive, outgoing._identity_document())
+
+        replacement = cls()
+        replacement.save(target, overwrite=True)
+        return replacement, archive
 
     def sign_data(self, data: bytes) -> str:
         """Signs bytes and returns a base64 encoded signature."""
