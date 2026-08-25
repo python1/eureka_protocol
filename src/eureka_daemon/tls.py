@@ -183,6 +183,23 @@ def pinning_ssl_context() -> ssl.SSLContext:
     return context
 
 
+def pinning_client(base_url: str = "", timeout: float = 10.0):
+    """
+    An httpx.AsyncClient that pins the peer's key instead of chaining to a CA.
+
+    Exists because the obvious thing fails in a dangerous way. There is no
+    certificate authority anywhere in this protocol, so a default httpx client
+    verifying against the system store rejects every peer with
+    CERTIFICATE_VERIFY_FAILED -- and the fix an operator reaches for next is
+    verify=False, which switches off the pin along with the chain and leaves
+    the connection genuinely unauthenticated. This is the thing to reach for
+    instead.
+    """
+    import httpx
+    return httpx.AsyncClient(base_url=base_url, verify=pinning_ssl_context(),
+                             timeout=timeout)
+
+
 def peer_key_from_response(response) -> Optional[str]:
     """
     The server's ed25519 public key for the connection a response arrived on,

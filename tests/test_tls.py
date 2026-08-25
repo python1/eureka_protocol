@@ -644,3 +644,102 @@ def test_co_servers_do_not_fight_over_signal_handlers():
     before = signal.getsignal(signal.SIGTERM)
     assert server.install_signal_handlers() is None
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+# ---------------------------------------------------------------------------
+# The client an operator actually gets
+# ---------------------------------------------------------------------------
+
+def test_a_bare_https_url_pins_instead_of_chaining(daemon, tls_server):
+    """
+    The trap this closes: a default httpx client verifies against the system
+    CA store, there is no CA anywhere in this protocol, so every peer is
+    rejected with CERTIFICATE_VERIFY_FAILED -- and the obvious workaround,
+    verify=False, switches off the pin along with the chain. Passing no client
+    at all must therefore pin, not chain.
+    """
+    initiator = make_node("node_bare_url")
+    daemon.trust_list.add(initiator.node_id, initiator.public_key_hex)
+    initiator.trust_list.add(daemon.node_id, daemon.public_key_hex)
+
+    result = run(handshake_over_http(initiator, tls_server, require_tls=True))
+
+    assert result["authenticated"] is True
+    assert result["mutual"] is True
+
+
+def test_a_bare_https_url_still_refuses_an_untrusted_key(daemon, tls_server):
+    """Pinning by default is not trusting by default."""
+    initiator = make_node("node_bare_url_untrusted")
+    daemon.trust_list.add(initiator.node_id, initiator.public_key_hex)
+    # The initiator does not trust the daemon's key.
+
+    result = run(handshake_over_http(initiator, tls_server, require_tls=True))
+
+    assert result["authenticated"] is False
+    assert result["reason"] == REASON_UNTRUSTED_KEY
+
+
+@pytest.fixture(scope="module")
+def plain_server():
+    """The same app over plaintext, so http:// can be shown to stay http://."""
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    server = uvicorn.Server(uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 20
+    while not server.started and time.time() < deadline:
+        time.sleep(0.05)
+    if not server.started:
+        pytest.fail("plaintext server did not start")
+
+    yield f"http://127.0.0.1:{port}"
+
+    server.should_exit = True
+    thread.join(timeout=10)
+
+
+def test_a_plain_http_url_does_not_get_a_tls_client(daemon, plain_server):
+    """
+    http:// stays http://. Dialling a dead port would not show this -- a plain
+    client and a TLS client both fail there -- so this talks to a real
+    plaintext server, which a TLS client could not complete a handshake with.
+    """
+    initiator = make_node("node_plain_url")
+    daemon.trust_list.add(initiator.node_id, initiator.public_key_hex)
+    initiator.trust_list.add(daemon.node_id, daemon.public_key_hex)
+
+    result = run(handshake_over_http(initiator, plain_server))
+
+    assert result["authenticated"] is True
+    assert result["mutual"] is True
+
+
+def test_the_pinning_client_carries_the_pinning_context(monkeypatch):
+    """
+    Asserting base_url here would test nothing: swapping the context for
+    verify=False leaves base_url untouched, and with it the TLS 1.3 floor and
+    every other property the pinning context carries.
+    """
+    from eureka_protocol.src.eureka_daemon import tls as tls_module
+
+    used = []
+    real = tls_module.pinning_ssl_context
+
+    def spy():
+        context = real()
+        used.append(context)
+        return context
+
+    monkeypatch.setattr(tls_module, "pinning_ssl_context", spy)
+    client = tls_module.pinning_client("https://example.invalid")
+
+    assert len(used) == 1, "the client was built without the pinning context"
+    assert used[0].verify_mode == ssl.CERT_NONE
+    assert used[0].minimum_version == ssl.TLSVersion.TLSv1_3
+    assert client.base_url == "https://example.invalid"

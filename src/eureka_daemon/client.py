@@ -134,7 +134,15 @@ async def handshake_over_http(
     """
     owns_client = http is None
     if owns_client:
-        http = httpx.AsyncClient(base_url=base_url, timeout=timeout)
+        # An https peer gets a pinning client, never a CA-verifying one. There
+        # is no certificate authority in this protocol: chaining to the system
+        # store rejects every peer, and the obvious workaround for that
+        # (verify=False) would switch the pin off too. Pinning is both the
+        # stricter choice and the only one that works.
+        if base_url.strip().lower().startswith("https://"):
+            http = tls.pinning_client(base_url, timeout)
+        else:
+            http = httpx.AsyncClient(base_url=base_url, timeout=timeout)
         base_url = ""
     try:
         tls_key = None

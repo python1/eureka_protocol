@@ -285,21 +285,27 @@ truth -- deleting it costs one restart.
 
 ## Run the handshake (WSL initiates)
 
-    cd ~/eureka
-    EUREKA_IDENTITY_PATH=~/.eureka/identity.key \
-    EUREKA_TRUST_PATH=~/.eureka/trust.json \
-    ./venv/bin/python -c "
-    import sys, asyncio, json
-    sys.path.insert(0, '.')
-    from eureka_protocol.src.eureka_daemon.node import EurekaNode
-    from eureka_protocol.src.eureka_daemon.client import handshake_over_http
-    node = EurekaNode.with_persistent_identity(capabilities=['fast-inference'])
-    result = asyncio.run(handshake_over_http(node, 'http://192.168.1.174:8000'))
-    print(json.dumps(result, indent=2))
-    "
+`demo.sh` in this repo is the end-to-end check. It is version controlled, so
+both hosts run the same one:
 
-Expect authenticated: true, mutual: true.
-Verify from the responder: curl -s http://localhost:8000/v1/peers
+    cd ~/eureka/eureka_protocol
+    ./demo.sh                                # TLS to CT 102 on 8443
+    ./demo.sh http://192.168.1.174:8000      # plaintext, while 8000 listens
+
+Expect `authenticated: true` and `mutual: true`; it exits non-zero otherwise.
+Verify from the responder: `curl -s http://localhost:8000/v1/peers`.
+
+Nothing has to be passed to make TLS work. An `https://` URL builds a client
+that **pins** the peer's key against the trust file instead of chaining to a
+certificate authority -- there is no CA in this protocol, so a default HTTP
+client rejects every peer with CERTIFICATE_VERIFY_FAILED. If you ever see
+that, something is constructing its own client; the fix is
+`tls.pinning_client()`, **never** `verify=False`, which switches the pin off
+along with the chain and leaves the connection unauthenticated.
+
+`demo.sh` picks its interpreter from `$EUREKA_PYTHON`, then `../venv`, then
+CT 102's venv -- and checks each candidate can actually import the
+dependencies, because more than one venv sits next to this repo on some hosts.
 
 ## Gotchas
 
