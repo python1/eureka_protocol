@@ -34,6 +34,37 @@ class IdentityError(RuntimeError):
     """Raised when a stored identity cannot be loaded or safely written."""
 
 
+def write_private_file(target: Path, data: bytes) -> Path:
+    """
+    Write secret bytes atomically at mode 0600, creating the directory 0700.
+
+    Every private file this daemon writes goes through here -- the identity
+    file and the TLS key alike. A second implementation somewhere else is how
+    one of them ends up world-readable while the other stays correct.
+
+    Write-then-rename, so a crash mid-write cannot leave a truncated secret
+    behind; the bytes are never briefly world-readable because the temp file is
+    created 0600 in the destination directory.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=".identity-", suffix=".tmp"
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+    except BaseException:
+        # Never leave a stray copy of a secret lying around.
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+        raise
+    return target
+
+
 def resolve_identity_path(path: Optional[Union[str, Path]] = None) -> Path:
     """
     Explicit argument wins, then $EUREKA_IDENTITY_PATH, then the default.
@@ -229,27 +260,9 @@ class EurekaCrypto:
         stored under exactly the same protections as a live one -- an archive
         written any other way is a private key with weaker permissions.
         """
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # Write-then-rename so a crash mid-write cannot leave a truncated
-        # identity behind; the key is never briefly world-readable because
-        # the temp file is created 0600 in the destination directory.
-        fd, temp_name = tempfile.mkstemp(
-            dir=str(target.parent), prefix=".identity-", suffix=".tmp"
+        return write_private_file(
+            target, (json.dumps(document, indent=2) + "\n").encode("utf-8")
         )
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w") as handle:
-                json.dump(document, handle, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, target)
-        except BaseException:
-            # Never leave a stray copy of the private key lying around.
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
-            raise
-        return target
 
     @classmethod
     def rotate(cls, path: Optional[Union[str, Path]] = None) -> tuple:

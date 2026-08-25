@@ -85,6 +85,58 @@ leaves a window in which both authenticate:
 
 Grants carry across. The old key is revoked, so it cannot be re-added later.
 
+## Transport encryption (TLS)
+
+Off by default; the two-node deployment above still speaks plain HTTP. Turn it
+on per node:
+
+    /root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server 8000 --tls
+
+The certificate is generated from the node's **existing** identity key and
+written beside it as `server-cert.pem` / `server-key.pem` (mode 0600). Nothing
+new has to be distributed: peers already hold the public key in their trust
+file, and that is exactly what the client pins.
+
+The client opts in with `require_tls`:
+
+    await handshake_over_http(node, "https://192.168.1.174:8000", require_tls=True)
+
+What is checked, on every response and not just the first:
+
+- the key that terminated TLS must be on the trust list and not revoked, and
+- it must be the same key that signs handshake message 2.
+
+The second check is the one that matters: without it a peer you trust could
+terminate TLS and relay a *different* trusted peer's handshake, leaving you
+authenticated to one identity over a channel held by another. A connection
+swapped part-way through the exchange is refused for the same reason.
+
+`require_tls=False` (the default) allows a plain connection; it does not
+disable the pin. A TLS connection is always checked.
+
+### What this does and does not cover
+
+Covered: confidentiality and integrity of the channel, and authentication of
+the server by key pinning. TLS 1.3 only, and no certificate authority is
+trusted at all — chain verification is replaced by the pin, which is narrower
+than the default context's several hundred public CAs.
+
+Not covered: **client certificates.** Callers are authenticated by the ed25519
+handshake, so an unauthenticated caller can still open a connection and read
+`/v1/manifest`, exactly as it can today over plain HTTP. That is deliberate.
+mTLS was evaluated first and rejected: uvicorn does not expose the client
+certificate to the application, so peer identity would have to move into a CA
+bundle read once at startup — a second place to revoke a key, which
+`reload_trust()` could not reach and which would need a restart to change.
+One identity, one trust file, one revocation.
+
+### After rotating an identity
+
+The certificate is regenerated automatically on the next start, because it no
+longer wraps the current key. Peers must be re-provisioned with the new public
+key out of band — the same requirement rotation already had, since `node_id`
+and the pin are both the key.
+
 ## Rotating this node's own key
 
     EurekaCrypto.rotate('/root/.eureka/identity.key')
@@ -143,6 +195,6 @@ Verify from the responder: curl -s http://localhost:8000/v1/peers
 ## Not yet done
 
 DHT discovery (addresses are still configured by hand), NAT traversal, WAN,
-transport encryption (evaluate mutual TLS before building anything custom),
 the assign endpoint (deliberately unimplemented — code-exec over a network
-with no sandbox).
+with no sandbox). Mutual TLS is evaluated and deliberately not planned; see
+the TLS section above for why.

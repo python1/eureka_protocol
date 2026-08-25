@@ -65,6 +65,13 @@ REASON_UNTRUSTED_KEY = "untrusted_key"
 # It does disclose to the holder of a revoked key that it was specifically
 # revoked -- accepted deliberately, since losing access reveals as much.
 REASON_REVOKED_KEY = "revoked_key"
+# Transport-level refusals from the pinning client. tls_required is a
+# deployment saying it will not speak in the clear; tls_identity_mismatch is
+# the serious one -- the key that terminated TLS is not the key that signed the
+# handshake, which is what a trusted peer relaying someone else's exchange
+# looks like from the inside.
+REASON_TLS_REQUIRED = "tls_required"
+REASON_TLS_IDENTITY_MISMATCH = "tls_identity_mismatch"
 # The same check sequence runs on both sides of the exchange, so the
 # "responder" in this reason is really "the peer we addressed". Same value,
 # readable name for the responder-side call.
