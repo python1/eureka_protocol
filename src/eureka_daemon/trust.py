@@ -268,6 +268,10 @@ class TrustList:
     def names(self) -> Iterator[str]:
         return iter(self._by_key.values())
 
+    def public_keys(self) -> Iterator[str]:
+        """Every trusted key. Revoked keys are not here -- they never are."""
+        return iter(self._by_key)
+
     def __contains__(self, public_key_hex: object) -> bool:
         return self.trusts(public_key_hex)
 

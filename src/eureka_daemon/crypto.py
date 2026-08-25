@@ -111,6 +111,11 @@ DOMAIN_HANDSHAKE_OFFER = b"eureka/handshake/offer/v1"      # message 1
 DOMAIN_HANDSHAKE = b"eureka/handshake/v1"                  # message 2
 DOMAIN_HANDSHAKE_CONFIRM = b"eureka/handshake/confirm/v1"  # message 3
 DOMAIN_AUDIT_LOG = b"eureka/audit-log/v1"
+# Discovery queries get their own tag like everything else, so a signature
+# harvested from a handshake cannot be presented as a request for addresses.
+# Only the query is signed; the answer is not, because an address is advice
+# that a handshake either confirms or does not -- see discovery.py.
+DOMAIN_DISCOVERY_QUERY = b"eureka/discovery/query/v1"
 
 
 def domain_separated_bytes(domain: bytes, payload: dict) -> bytes:
@@ -394,6 +399,18 @@ class EurekaCrypto:
     def verify_handshake(public_key_hex: str, signature_base64: str, payload: dict) -> bool:
         return EurekaCrypto.verify_json(
             public_key_hex, signature_base64, payload, domain=DOMAIN_HANDSHAKE
+        )
+
+    def sign_discovery_query(self, payload: dict) -> str:
+        """A request for peer addresses, signed so the responder knows who asks."""
+        return self.sign_json(payload, domain=DOMAIN_DISCOVERY_QUERY)
+
+    @staticmethod
+    def verify_discovery_query(public_key_hex: str, signature_base64: str,
+                               payload: dict) -> bool:
+        return EurekaCrypto.verify_json(
+            public_key_hex, signature_base64, payload,
+            domain=DOMAIN_DISCOVERY_QUERY,
         )
 
     def sign_audit_log(self, payload: dict) -> str:

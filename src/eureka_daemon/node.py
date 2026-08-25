@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Any, Set
 from .crypto import EurekaCrypto
+from .address_book import AddressBook
 from .trust import TrustError, TrustList
 
 # Default window a challenge stays valid for, in seconds. A response that
@@ -150,6 +151,11 @@ class EurekaNode:
         # pending_challenges so it is pruned and capped in lockstep, which is
         # what stops initiators that never finish from accumulating state.
         self.pending_peers: Dict[str, Dict[str, Any]] = {}
+        # Where peers might be, as opposed to who they are. Bounded, and it
+        # holds addresses only for keys this node already trusts, so it can
+        # never grow into a second and looser notion of who is known.
+        # Populated by discovery.py; nothing in the handshake reads it.
+        self.address_book = AddressBook()
         
         # Manifest of this node's capabilities
         self.manifest = {
