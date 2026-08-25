@@ -1,0 +1,72 @@
+[Unit]
+Description=Eureka Protocol daemon
+Documentation=file:///root/.openclaw/workspace/eureka_protocol/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+# --- Crash-loop guard -------------------------------------------------------
+# The whole point of these two lines. Five start attempts inside five minutes
+# and systemd gives up permanently, leaving the unit in `failed` for a human.
+#
+# This is the mistake ollama.service makes on this box: Restart=always with
+# RestartSec=3 against the DEFAULT ceiling of 5 starts per 10s. One start every
+# three seconds is ~3.3 per window, which never reaches 5, so the limiter never
+# trips and the unit retries forever -- 124,527 times over five days.
+#
+# The rule: StartLimitIntervalSec must be comfortably LONGER than
+# RestartSec x StartLimitBurst, or the guard is decorative. Here the five
+# attempts (with backoff) span ~100s against a 300s window, so the limit is
+# always reached before the window slides.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+
+# Explicit, not inherited from whatever shell happened to start it. A daemon
+# that picks up its identity from an operator's environment is a daemon that
+# comes back as a different node when someone forgets to export a variable.
+Environment=EUREKA_IDENTITY_PATH=/root/.eureka/identity.key
+Environment=EUREKA_TRUST_PATH=/root/.eureka/trust.json
+WorkingDirectory=/root/.openclaw/workspace
+
+ExecStart=/root/eureka_venv/bin/python -m uvicorn \
+    eureka_protocol.src.eureka_daemon.api:app \
+    --host 0.0.0.0 --port 8000
+
+# on-failure, not always: a clean exit 0 is somebody stopping the daemon on
+# purpose, and restarting it would fight them.
+Restart=on-failure
+RestartSec=5s
+# Back off 5s -> 60s across successive failures, so a slow dependency gets
+# more room than a hard config error. The start limit above is still the
+# thing that eventually says no.
+RestartSteps=4
+RestartMaxDelaySec=60s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eureka-daemon
+
+# --- Hardening --------------------------------------------------------------
+# Runs as root: the identity and trust files are live, root-owned 0600, and
+# re-homing them under a service account is not something to do unasked. See
+# DEPLOYMENT.md for the non-root migration this should get.
+#
+# ProtectHome=read-only is doing real work here rather than being boilerplate:
+# the daemon only ever READS /root/.eureka, so this makes the live key material
+# unwritable by the service itself. Turning on --tls would need it relaxed,
+# because that writes a certificate next to the identity file.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

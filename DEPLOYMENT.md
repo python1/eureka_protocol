@@ -164,9 +164,28 @@ a different node the day someone forgets to export a variable.
 
 Check: curl -s http://192.168.1.174:8000/v1/manifest
 
-Unit: `/etc/systemd/system/eureka-daemon.service`. Identity and trust paths are
-set in the unit, not inherited. Logs go to the journal under the identifier
-`eureka-daemon`.
+The unit is version controlled at **`deploy/eureka-daemon.service`**, which is
+the canonical copy; `/etc/systemd/system/eureka-daemon.service` is an install
+of it. Identity and trust paths are set in the unit, not inherited. Logs go to
+the journal under the identifier `eureka-daemon`.
+
+Install, or reinstall after editing:
+
+    cd /root/.openclaw/workspace/eureka_protocol
+    install -m 0644 deploy/eureka-daemon.service /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable --now eureka-daemon
+
+Edit the repo copy and reinstall -- never edit the installed file directly, or
+the two drift and the one under version control becomes fiction. To check they
+have not:
+
+    diff deploy/eureka-daemon.service /etc/systemd/system/eureka-daemon.service
+
+A `systemctl edit eureka-daemon` drop-in is the exception: it lands in
+`/etc/systemd/system/eureka-daemon.service.d/` and deliberately survives a
+reinstall, which is what you want for a host-specific tweak. `systemctl cat
+eureka-daemon` shows the unit and every drop-in together.
 
 To run it by hand anyway -- debugging, or a second node on another port -- stop
 the service first so the port is free:
