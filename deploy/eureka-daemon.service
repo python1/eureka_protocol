@@ -34,15 +34,18 @@ Environment=EUREKA_IDENTITY_PATH=/root/.eureka/identity.key
 Environment=EUREKA_TRUST_PATH=/root/.eureka/trust.json
 WorkingDirectory=/root/.openclaw/workspace
 
-# Two listeners, one process. TLS cannot share a port with plaintext, and the
-# WSL peer still speaks plain HTTP, so 8000 stays exactly as it was and TLS is
-# added alongside on 8443. One process rather than two services because two
-# processes under one identity would keep two replay tables and two peer
-# tables -- a nonce spent on one port would still be unspent on the other.
+# TLS only. Plaintext on 8000 was dropped once wsl-hermes (node_ef0a1f59) was
+# verified handshaking over 8443 in both directions -- in that order, because
+# doing it the other way round strands the peer: an HTTPS socket answers a
+# plain request with a handshake failure, not a manifest.
 #
-# When every peer speaks TLS, add --no-plain and drop the 8000 argument.
+# --no-plain refuses to start without --tls-port, so a half-edit here cannot
+# produce a daemon that listens on nothing and looks healthy doing it.
+#
+# To put plaintext back for a new peer, add the port number as the first
+# argument and drop --no-plain.
 ExecStart=/root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-    8000 --tls-port 8443 --tls-dir /var/lib/eureka
+    --tls-port 8443 --no-plain --tls-dir /var/lib/eureka
 
 # on-failure, not always: a clean exit 0 is somebody stopping the daemon on
 # purpose, and restarting it would fight them.

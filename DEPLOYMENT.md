@@ -87,36 +87,50 @@ Grants carry across. The old key is revoked, so it cannot be re-added later.
 
 ## Transport encryption (TLS)
 
-**CT 102 serves TLS on 8443 and plaintext on 8000, from one process.** TLS
-cannot share a port with plaintext -- an HTTPS socket answers a plain request
-with a handshake failure, not a manifest -- and wsl-hermes still runs an older
-client that speaks plain HTTP. So 8000 is untouched and TLS was added
-alongside, rather than asking every peer to cut over on the same day.
+**CT 102 serves TLS on 8443 and nothing else. Plaintext is gone.**
 
     /root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-        8000 --tls-port 8443 --tls-dir /var/lib/eureka
+        --tls-port 8443 --no-plain --tls-dir /var/lib/eureka
 
-One process, not two services: two processes under one identity would keep two
-independent replay tables, so a handshake nonce spent on one port would still
-be unspent on the other, and two peer tables, so `/v1/peers` would answer
-differently depending on which port you asked.
+The daemon can serve both at once -- pass a port number as the first argument
+and drop `--no-plain` -- and it did during the migration, because TLS cannot
+share a port with plaintext: an HTTPS socket answers a plain request with a
+handshake failure, not a manifest. Both listeners run in one process, not two
+services, because two processes under one identity would keep two independent
+replay tables (a nonce spent on one port still unspent on the other) and two
+peer tables (`/v1/peers` answering differently depending which port you asked).
 
-`--no-plain` drops the plaintext listener, and is the last step of the
-migration -- **do not set it until every peer speaks TLS**, wsl-hermes
-included. `--tls` on its own is shorthand for TLS-only on the main port.
+**The order is the whole trick.** Adding TLS beside plaintext is safe at any
+time; removing plaintext strands every peer that has not moved yet. So:
+
+1. Get current code onto the peer.
+2. Verify the peer handshakes over TLS, mutually, while plaintext still runs.
+3. Only then drop plaintext on this side.
+4. Confirm plaintext is refused and TLS still works.
+
+Done for wsl-hermes on 2026-08-25: verified at step 2 with `mutual: true` and
+`node_ef0a1f59` unchanged, then plaintext dropped. Adding a new peer that
+cannot speak TLS yet means putting 8000 back for the duration, not turning TLS
+off.
+
+`--no-plain` refuses to start without `--tls-port`, so a half-edit cannot
+produce a daemon listening on nothing that looks healthy doing it. `--tls` on
+its own is shorthand for TLS-only on the main port.
 
 The certificate is generated from the node's **existing** identity key and
-written beside it as `server-cert.pem` / `server-key.pem` (mode 0600). Nothing
-new has to be distributed: peers already hold the public key in their trust
-file, and that is exactly what the client pins.
+written to `/var/lib/eureka` as `server-cert.pem` / `server-key.pem` (mode
+0600) -- not beside the identity file, so that `ProtectHome=read-only` did not
+have to be relaxed to turn TLS on. Nothing new has to be distributed: peers
+already hold the public key in their trust file, and that is exactly what the
+client pins.
 
-`require_tls` stays **off** while any peer still speaks plain HTTP. It governs
-whether a *plain* connection is allowed at all; a TLS connection is pinned
-either way, so leaving it off costs nothing for peers that do use TLS.
+`require_tls` governs whether a *plain* connection is allowed at all; a TLS
+connection is pinned either way. `demo.sh` sets it for `https://` URLs. Now
+that CT 102 refuses plaintext outright, a client that omits it fails at the
+transport rather than at the check -- so the flag is a belt to the transport's
+braces, not the thing keeping the channel encrypted:
 
-The client opts in with `require_tls`:
-
-    await handshake_over_http(node, "https://192.168.1.174:8000", require_tls=True)
+    await handshake_over_http(node, "https://192.168.1.174:8443", require_tls=True)
 
 What is checked, on every response and not just the first:
 
@@ -139,8 +153,10 @@ trusted at all — chain verification is replaced by the pin, which is narrower
 than the default context's several hundred public CAs.
 
 Not covered: **client certificates.** Callers are authenticated by the ed25519
-handshake, so an unauthenticated caller can still open a connection and read
-`/v1/manifest`, exactly as it can today over plain HTTP. That is deliberate.
+handshake, so an unauthenticated caller can still complete a TLS handshake and
+read `/v1/manifest`. Dropping plaintext did not change that -- the listener
+still answers anyone, and it is the *protocol* that refuses them one message
+later. That is deliberate.
 mTLS was evaluated first and rejected: uvicorn does not expose the client
 certificate to the application, so peer identity would have to move into a CA
 bundle read once at startup — a second place to revoke a key, which
@@ -181,8 +197,8 @@ a different node the day someone forgets to export a variable.
 
 Check both listeners:
 
-    curl -s  http://192.168.1.174:8000/v1/manifest     # plaintext, old peers
-    curl -sk https://192.168.1.174:8443/v1/manifest    # TLS
+    curl -sk https://192.168.1.174:8443/v1/manifest    # TLS (the only listener)
+    curl -s  http://192.168.1.174:8000/v1/manifest     # refused: nothing there
 
 `curl -k` skips chain verification, which is correct here and not a shortcut:
 the certificate is self-signed and identity lives in the key inside it, not in
@@ -222,8 +238,11 @@ the service first so the port is free:
     cd /root/.openclaw/workspace
     EUREKA_IDENTITY_PATH=/root/.eureka/identity.key \
     EUREKA_TRUST_PATH=/root/.eureka/trust.json \
-    /root/eureka_venv/bin/python -m uvicorn \
-      eureka_protocol.src.eureka_daemon.api:app --host 0.0.0.0 --port 8000
+    /root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
+      --tls-port 8443 --no-plain --tls-dir /var/lib/eureka
+
+Add a port number as the first argument to get plaintext back alongside it,
+which is what debugging a peer that cannot do TLS looks like.
 
 ### The restart policy, and why it looks like that
 
@@ -290,10 +309,31 @@ both hosts run the same one:
 
     cd ~/eureka/eureka_protocol
     ./demo.sh                                # TLS to CT 102 on 8443
-    ./demo.sh http://192.168.1.174:8000      # plaintext, while 8000 listens
 
-Expect `authenticated: true` and `mutual: true`; it exits non-zero otherwise.
-Verify from the responder: `curl -s http://localhost:8000/v1/peers`.
+It runs the same exchange twice, and **the contrast is the point**:
+
+| scenario | identity and trust | expected |
+|---|---|---|
+| trusted | this host's real files | `authenticated`, `mutual: true` |
+| untrusted | a throwaway identity, empty trust list | refused, `untrusted_key` |
+
+A green handshake on its own does not show that anything was checked. It only
+means something next to an identical exchange that gets refused, and refused
+for the one reason that should refuse it -- the untrusted run insists on
+`untrusted_key` specifically, so an unreachable peer (`malformed_response`)
+fails the check rather than passing it by accident.
+
+The throwaway identity is created under a temp directory and deleted
+afterwards; the real identity and trust file are neither read nor written by
+that scenario. Its trust path deliberately names a file that does not exist,
+because an absent trust file is an empty allowlist -- the state under test,
+reached without writing anything.
+
+Exits non-zero unless both scenarios come out as expected.
+Verify from the responder: `curl -sk https://localhost:8443/v1/peers`.
+
+It takes a URL if you need a different peer or a plaintext one, though CT 102
+no longer serves plaintext: `./demo.sh http://host:port`.
 
 Nothing has to be passed to make TLS work. An `https://` URL builds a client
 that **pins** the peer's key against the trust file instead of chaining to a
