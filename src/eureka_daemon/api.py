@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
 import uvicorn
-from . import discovery
+from . import discovery, reads
 from .node import EurekaNode, EurekaState, REASON_MALFORMED
 from .crypto import EurekaCrypto
 
@@ -20,13 +20,15 @@ class TaskRequest(BaseModel):
     task_name: str
     payload: Dict[str, Any]
 
-class PeerInfo(BaseModel):
-    peer_id: str
-    status: str
-
 class NodeManifest(BaseModel):
+    """
+    The open manifest. Deliberately two fields.
+
+    node_id and runtime only. The capability list moved to the authenticated
+    read (POST /v1/manifest), because it says what this node can be asked to
+    do and nothing in the handshake needs it.
+    """
     node_id: str
-    capabilities: List[str]
     runtime: str
 
 def create_app(node_engine: EurekaNode) -> FastAPI:
@@ -49,20 +51,39 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
 
     @app.get("/v1/manifest", response_model=NodeManifest)
     async def get_manifest():
-        """Returns the capability manifest of this local node."""
+        """
+        This node's identity, readable without authenticating. The one open
+        endpoint, and it stays open on purpose.
+
+        Requiring authentication here would be circular: a caller fetches the
+        manifest to learn the node_id it must address its handshake offer to,
+        so gating it behind a completed handshake would mean no first contact
+        could ever happen. That is the acceptance criterion this route exists
+        to satisfy.
+
+        What it discloses is bounded to two things, and neither is a secret
+        this daemon was holding:
+
+          * node_id, which is a pure function of the public key -- sha256 of
+            it, truncated. Over TLS the certificate hands that same public key
+            to anyone who completes a connection, so node_id tells a stranger
+            nothing the transport has not already told them. Withholding it
+            would hide nothing and break first contact.
+          * runtime, a constant string identical on every node.
+
+        What it no longer discloses is the capability list. That was a real
+        leak -- it told any caller what this node can be asked to do -- and
+        nothing in the handshake reads it: client.py takes node_id from here
+        and granted_capabilities() intersects locally, on the responder. It is
+        served to authenticated peers by POST to this same path.
+
+        The peer table is not here and never was reachable from here. Learning
+        that this node exists is not learning who it talks to.
+        """
         return {
             "node_id": node_engine.node_id,
-            "capabilities": node_engine.capabilities,
             "runtime": "eureka-daemon-mvd"
         }
-
-    @app.get("/v1/peers", response_model=List[PeerInfo])
-    async def get_peers():
-        """Returns a list of all authenticated peers in the registry."""
-        return [
-            {"peer_id": pid, "status": info["status"]} 
-            for pid, info in node_engine.peers.items()
-        ]
 
     @app.post("/v1/assign")
     async def assign_task(request: TaskRequest):
@@ -211,10 +232,62 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
                 content=discovery.rejected(REASON_MALFORMED),
             )
 
-    @app.get("/v1/logs")
-    async def get_logs():
-        """Retrietes the cryptographically signed EUREKA-LOG entries."""
-        return {"logs": node_engine.event_log}
+    # ---------------------------------------------------------------------------
+    # Authenticated reads
+    #
+    # POST, not GET, for the same reason discovery is a POST: the request
+    # carries a signed body, and a signature is what makes the caller someone.
+    # A GET on these paths gets a 405 from the router before any handler runs,
+    # which is the strongest possible answer to an unauthenticated read --
+    # nothing about this node's records is consulted to produce it.
+    #
+    # Each returns 200 whatever the verdict, exactly as the handshake does: a
+    # refusal is a protocol outcome, not a transport error, and a status code
+    # that varied with the verdict would be a side channel of its own.
+    # ---------------------------------------------------------------------------
+
+    async def _authenticated_read(request: Request, event: str) -> JSONResponse:
+        """Shared plumbing for the three read routes."""
+        document, error = await _read_json_body(request)
+        if error is not None:
+            # A body that is not well-formed at all never reached the protocol.
+            # Answer in the read vocabulary rather than the handshake's.
+            return JSONResponse(status_code=error.status_code,
+                                content=reads.rejected(event, REASON_MALFORMED))
+        try:
+            return JSONResponse(
+                status_code=200,
+                content=reads.ANSWER[event](node_engine, document),
+            )
+        except Exception as exc:
+            print(f"[API] Unhandled error in read {event}: "
+                  f"{type(exc).__name__}: {exc}")
+            # The refusal is built from the event alone, so even this path
+            # cannot leak whether there was anything to read.
+            return JSONResponse(status_code=200,
+                                content=reads.rejected(event, REASON_MALFORMED))
+
+    @app.post("/v1/peers")
+    async def read_peers(request: Request):
+        """
+        The peer table, to an authenticated caller, for the keys it named.
+
+        This is the endpoint the whole change is about. The peer table is the
+        record of who this node talks to, and publishing it to any caller that
+        could reach the port contradicted the one property the protocol claims
+        -- in the running daemon, which is the only place it counts.
+        """
+        return await _authenticated_read(request, reads.PEERS_EVENT)
+
+    @app.post("/v1/logs")
+    async def read_logs(request: Request):
+        """Audit-log entries attributable to the calling peer, and no others."""
+        return await _authenticated_read(request, reads.LOGS_EVENT)
+
+    @app.post("/v1/manifest")
+    async def read_manifest(request: Request):
+        """The full manifest, capability list included, for an authenticated peer."""
+        return await _authenticated_read(request, reads.MANIFEST_EVENT)
 
     return app
 

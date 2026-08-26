@@ -116,6 +116,14 @@ DOMAIN_AUDIT_LOG = b"eureka/audit-log/v1"
 # Only the query is signed; the answer is not, because an address is advice
 # that a handshake either confirms or does not -- see discovery.py.
 DOMAIN_DISCOVERY_QUERY = b"eureka/discovery/query/v1"
+# Authenticated reads of this node's own records -- the peer table, the audit
+# log, the full manifest. Its own tag, so a discovery query cannot be replayed
+# as a request to read the peer table: the two carry the same envelope fields
+# and would otherwise verify over identical bytes. Which record is being asked
+# for is pinned by the `event` field INSIDE the signed payload, exactly as the
+# discovery query pins its own, so a signature minted to read one record does
+# not read another.
+DOMAIN_READ_QUERY = b"eureka/read/query/v1"
 
 
 def domain_separated_bytes(domain: bytes, payload: dict) -> bytes:
@@ -411,6 +419,18 @@ class EurekaCrypto:
         return EurekaCrypto.verify_json(
             public_key_hex, signature_base64, payload,
             domain=DOMAIN_DISCOVERY_QUERY,
+        )
+
+    def sign_read_query(self, payload: dict) -> str:
+        """A request to read one of this node's records, signed by the caller."""
+        return self.sign_json(payload, domain=DOMAIN_READ_QUERY)
+
+    @staticmethod
+    def verify_read_query(public_key_hex: str, signature_base64: str,
+                          payload: dict) -> bool:
+        return EurekaCrypto.verify_json(
+            public_key_hex, signature_base64, payload,
+            domain=DOMAIN_READ_QUERY,
         )
 
     def sign_audit_log(self, payload: dict) -> str:

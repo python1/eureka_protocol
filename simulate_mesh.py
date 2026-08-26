@@ -115,12 +115,12 @@ class EurekaSimulator:
                 print("\n[STEP 1] Verifying Node A Manifest...")
                 resp_a = await client.get(f"{self.node_a_url}/v1/manifest")
                 manifest_a = resp_a.json()
-                print(f"✅ Node A Identity: {manifest_a['node_id']} | Caps: {manifest_a['capabilities']}")
+                print(f"✅ Node A Identity: {manifest_a['node_id']}")
 
                 print("\n[STEP 2] Verifying Node B Manifest...")
                 resp_b = await client.get(f"{self.node_b_url}/v1/manifest")
                 manifest_b = resp_b.json()
-                print(f"✅ Node B Identity: {manifest_b['node_id']} | Caps: {manifest_b['capabilities']}")
+                print(f"✅ Node B Identity: {manifest_b['node_id']}")
 
                 print("\n[STEP 3] Performing Handshake (Simulated via Peer Registration)...")
                 # In our MVD, we simulate the discovery by having Node A 'learn' of Node B
@@ -150,9 +150,15 @@ class EurekaSimulator:
                     print(f"❌ Task Failed: {result}")
 
                 print("\n[STEP 5] Verifying EUREKA-LOG Audit Trail...")
-                logs_resp = await client.get(f"{self.node_a_url}/v1/logs")
-                logs = logs_resp.json()["logs"]
-                
+                # The audit log is no longer a public GET. It is served only to
+                # an authenticated peer, and only for entries attributed to
+                # that peer -- this simulator never handshakes, so it has no
+                # standing to read anything. The entries are in each node's own
+                # stdout, which _dump_node_log already captures.
+                print("ℹ️  Audit log is not readable without an authenticated "
+                      "handshake; see the node log for entries.")
+                logs = []
+
                 if logs:
                     latest_log = logs[-1]
                     print("✨ FINAL EUREKA-LOG ENTRY FOUND:")

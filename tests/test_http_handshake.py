@@ -635,9 +635,12 @@ def test_concurrent_clients_do_not_interfere(daemon):
 # ---------------------------------------------------------------------------
 
 def test_existing_routes_still_work(client, daemon):
+    # The manifest stays an open GET: the handshake driver reads node_id from
+    # it before it has anything to authenticate with.
     assert client.get("/v1/manifest").status_code == 200
-    assert client.get("/v1/peers").status_code == 200
-    assert client.get("/v1/logs").status_code == 200
+    # The peer table and the audit log are no longer readable by GET at all.
+    assert client.get("/v1/peers").status_code == 405
+    assert client.get("/v1/logs").status_code == 405
     assert client.get("/v1/nope").status_code == 404
 
 

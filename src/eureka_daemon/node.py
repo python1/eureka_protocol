@@ -840,8 +840,21 @@ class EurekaNode:
         await self.log_event(task_payload, result)
         return result
 
-    async def log_event(self, task_info: Dict[str, Any], result_info: Dict[str, Any]):
-        """Layer 5: Cryptographically signed audit trail generation."""
+    async def log_event(self, task_info: Dict[str, Any], result_info: Dict[str, Any],
+                        peer: Optional[str] = None):
+        """
+        Layer 5: Cryptographically signed audit trail generation.
+
+        `peer` names the authenticated peer this work was done for, and is part
+        of the signed payload. It decides who may read the entry back: reads.py
+        discloses an entry only to the peer it names, because a record of what
+        this node did for one peer is not another peer's to read.
+
+        None means the entry is not attributable to any peer -- work this node
+        did for itself -- and no remote caller can read it at all. That is the
+        current state of every entry, since assign() is a stub with no
+        requesting peer.
+        """
         await self.transition_to(EurekaState.LOG)
         
         log_entry = {
@@ -850,6 +863,7 @@ class EurekaNode:
             "session_id": self.session_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "initiator_node": self.node_id,
+            "peer": peer,
             "task_summary": task_info.get("task_name", "unknown"),
             "result": result_info["status"]
         }

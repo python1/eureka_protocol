@@ -64,6 +64,8 @@ from .node import (
     REASON_STALE,
     REASON_UNTRUSTED_KEY,
 )
+from . import signed_request
+from .signed_request import REASON_NOT_AUTHENTICATED
 
 # A query naming more keys than this is refused rather than truncated. A
 # truncated query would answer a different question than the one asked.
@@ -74,9 +76,10 @@ QUERY_EVENT = "discovery_query"
 ANSWER_EVENT = "discovery_answer"
 REJECTED_EVENT = "discovery_rejected"
 
-# Discovery-specific refusal. The rest are shared with the handshake so an
-# operator reads one vocabulary across the whole protocol.
-REASON_NOT_AUTHENTICATED = "not_authenticated"
+# REASON_NOT_AUTHENTICATED is re-exported from signed_request above: the gate
+# that produces it lives there now, and a second definition here would be a
+# second thing to keep in step. The rest of the reasons are shared with the
+# handshake so an operator reads one vocabulary across the whole protocol.
 
 QUERY_REQUIRED_KEYS = frozenset(
     ("protocol", "event", "requester_id", "timestamp", "keys")
@@ -135,6 +138,12 @@ def rejected(reason: str) -> Dict[str, Any]:
     return {"event": REJECTED_EVENT, "reason": reason, "addresses": {}}
 
 
+def _query_body_is_valid(query: dict) -> bool:
+    """The one field a discovery query has beyond the shared envelope."""
+    requested = query.get("keys")
+    return isinstance(requested, list) and len(requested) <= MAX_QUERY_KEYS
+
+
 def answer_query(node: EurekaNode, document: Any,
                  now: Optional[datetime] = None) -> Dict[str, Any]:
     """
@@ -145,53 +154,18 @@ def answer_query(node: EurekaNode, document: Any,
     actually completed a handshake with us. Gossip is not public: an
     unauthenticated caller gets nothing, whatever it asks for.
     """
-    if not isinstance(document, dict):
-        return rejected(REASON_MALFORMED)
+    reason, _public_key, _requester_id = signed_request.verify(
+        node, document,
+        event=QUERY_EVENT,
+        verify_signature=EurekaCrypto.verify_discovery_query,
+        required_keys=QUERY_REQUIRED_KEYS,
+        validate_body=_query_body_is_valid,
+        now=now,
+    )
+    if reason is not None:
+        return rejected(reason)
 
-    query = document.get("query")
-    public_key = normalise_key(document.get("public_key"))
-    signature = document.get("signature")
-    if (not isinstance(query, dict) or public_key is None
-            or not isinstance(signature, str)):
-        return rejected(REASON_MALFORMED)
-    if set(query) != QUERY_REQUIRED_KEYS:
-        return rejected(REASON_MALFORMED)
-    if query.get("protocol") != DISCOVERY_PROTOCOL or query.get("event") != QUERY_EVENT:
-        return rejected(REASON_MALFORMED)
-
-    requester_id = query.get("requester_id")
-    if not isinstance(requester_id, str) or not requester_id:
-        return rejected(REASON_MALFORMED)
-    if document.get("requester_id") != requester_id:
-        # The envelope and the signed body must agree about who is asking.
-        return rejected(REASON_MALFORMED)
-
-    requested = query.get("keys")
-    if not isinstance(requested, list) or len(requested) > MAX_QUERY_KEYS:
-        return rejected(REASON_MALFORMED)
-
-    if not EurekaCrypto.verify_discovery_query(public_key, signature, query):
-        return rejected(REASON_BAD_SIGNATURE)
-
-    # Reuse the handshake's clock-skew handling rather than growing a second
-    # implementation of freshness that could drift from it.
-    age = node._challenge_age_seconds(query.get("timestamp"))
-    if age is None:
-        return rejected(REASON_MALFORMED)
-    if abs(age) > node.freshness_seconds:
-        return rejected(REASON_STALE)
-
-    if node.trust_list.is_revoked(public_key):
-        return rejected(REASON_REVOKED_KEY)
-    if not node.trust_list.trusts(public_key):
-        return rejected(REASON_UNTRUSTED_KEY)
-
-    # A trusted key is not enough. Gossip is served only to a peer that has
-    # completed a handshake, and only under the key that handshake proved.
-    record = node.peers.get(requester_id)
-    if (not record or record.get("status") != "authenticated"
-            or normalise_key(record.get("public_key")) != public_key):
-        return rejected(REASON_NOT_AUTHENTICATED)
+    requested = document["query"]["keys"]
 
     return {
         "event": ANSWER_EVENT,

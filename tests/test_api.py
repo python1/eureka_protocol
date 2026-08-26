@@ -11,23 +11,32 @@ def client():
 
 
 def test_manifest_shape(client):
+    """
+    The open manifest carries identity and nothing else.
+
+    It stays open because first contact needs it -- a caller reads node_id
+    here to address its handshake offer. What changed is that the capability
+    list is no longer in it: that said what this node can be asked to do, and
+    told it to anyone who could reach the port.
+    """
     r = client.get("/v1/manifest")
     assert r.status_code == 200
     body = r.json()
     assert body["node_id"]
-    assert isinstance(body["capabilities"], list)
     assert body["runtime"]
+    assert "capabilities" not in body
 
 
-def test_peers_returns_list(client):
-    r = client.get("/v1/peers")
-    assert r.status_code == 200
-    assert isinstance(r.json(), list)
+def test_peers_rejects_unauthenticated_get(client):
+    """
+    Reading the peer table is a POST carrying a signature. A GET is refused by
+    the router, before any handler consults anything.
+    """
+    assert client.get("/v1/peers").status_code == 405
 
 
-def test_logs_reachable(client):
-    r = client.get("/v1/logs")
-    assert r.status_code == 200
+def test_logs_rejects_unauthenticated_get(client):
+    assert client.get("/v1/logs").status_code == 405
 
 
 def test_unknown_route_404(client):

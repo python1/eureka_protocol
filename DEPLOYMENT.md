@@ -208,6 +208,12 @@ Check both listeners:
     curl -sk https://192.168.1.174:8443/v1/manifest    # TLS (the only listener)
     curl -s  http://192.168.1.174:8000/v1/manifest     # refused: nothing there
 
+That manifest carries `node_id` and `runtime` and nothing else. It is the only
+endpoint that answers an unauthenticated caller, and it stays that way because
+first contact needs it -- a peer reads node_id from here to address its
+handshake offer. The capability list moved behind authentication; the peer
+table was never reachable from here.
+
 `curl -k` skips chain verification, which is correct here and not a shortcut:
 the certificate is self-signed and identity lives in the key inside it, not in
 any chain. A real peer pins that key against its trust file. To check the
@@ -374,7 +380,11 @@ because an absent trust file is an empty allowlist -- the state under test,
 reached without writing anything.
 
 Exits non-zero unless both scenarios come out as expected.
-Verify from the responder: `curl -sk https://localhost:8443/v1/peers`.
+
+Verify from the responder with the journal, not with curl -- `/v1/peers` is no
+longer an open GET (see below):
+
+    journalctl -u eureka-daemon | grep "Handshake established"
 
 It takes a URL if you need a different peer or a plaintext one, though CT 102
 no longer serves plaintext: `./demo.sh http://host:port`.
@@ -390,6 +400,46 @@ along with the chain and leaves the connection unauthenticated.
 `demo.sh` picks its interpreter from `$EUREKA_PYTHON`, then `../venv`, then
 CT 102's venv -- and checks each candidate can actually import the
 dependencies, because more than one venv sits next to this repo on some hosts.
+
+## Reading the peer table and the audit log
+
+`/v1/peers` and `/v1/logs` used to be open GETs. Anything that could reach the
+port could list every peer this node had authenticated, which is the record the
+protocol exists not to publish -- so an operator habit of `curl -sk .../v1/peers`
+was, in effect, a demonstration of the leak.
+
+Both are now POST endpoints that take a signed request, and both refuse anything
+else. The rules:
+
+- A GET gets 405 from the router. Nothing is consulted to produce it.
+- An unsigned, badly signed, stale, untrusted or revoked request gets a refusal
+  carrying an empty result. The refusal is built from the request's event and
+  the rejection reason alone, so it is identical whether or not this node has
+  peers -- it cannot be used to ask whether the node talks to anybody.
+- Completing TLS is not authentication. The daemon asks for no client
+  certificate, so a TLS caller is anonymous to it; only the three-message
+  handshake makes a caller someone. Being on the trust list is not enough
+  either.
+- An authenticated peer sees only what it names: the caller lists the public
+  keys it is asking about, and the answer covers only the ones this node also
+  has as authenticated peers. A peer the caller did not name is not disclosed,
+  so authenticating to this node does not enumerate the mesh behind it.
+- Audit-log entries are disclosed only to the peer they are attributed to.
+  Nothing attributes entries today (`assign()` is a stub with no requesting
+  peer), so over the network the log reads empty to everyone. The entries are
+  in the journal, which is where an operator should read them.
+
+**For the operator, use the journal, not the network.** It is not gated by the
+trust file, it is protected by the OS, and it already records every handshake:
+
+    journalctl -u eureka-daemon | grep "Handshake established"
+    journalctl -u eureka-daemon | grep "EUREKA-LOG"
+
+To read a peer's table from another node, that node must have handshaked first;
+`reads.build_read_query` builds the signed request and `POST /v1/peers` takes
+it. Revoking a peer ends its read access at the same moment as everything else,
+because the gate consults the live trust list and `reload_trust()` drops revoked
+peers from the table it checks against.
 
 ## Gotchas
 

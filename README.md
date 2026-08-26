@@ -37,7 +37,7 @@ is the trade this design accepts in return for having no directory anywhere.
 
 ## What works today
 
-The suite is 476 tests, all passing. Each item below is implemented and
+The suite is 503 tests, all passing. Each item below is implemented and
 covered; where something is narrower than its name suggests, that is stated.
 
 ### Identity
@@ -210,6 +210,38 @@ but the initiating round is a library function with no daemon loop, schedule,
 or bootstrap configuration behind it. Deployed nodes are still pointed at each
 other by hand.
 
+### Authenticated reads
+
+The peer table, the audit log and the full manifest are served only to a
+caller that has completed a handshake, through the same gate discovery uses —
+one implementation, in `signed_request.py`, rather than a second copy that
+could grow a hole the first one does not have. A read is a POST carrying a
+signed query, because a signature is what makes a caller someone; a GET on
+those paths is refused by the router before any handler consults anything.
+
+Three properties hold, and each is pinned by a test that has been watched
+fail:
+
+  * **A refusal discloses nothing.** It is built from the requested event and
+    the rejection reason alone, without the peer table, the log, or their
+    sizes being consulted. Two nodes identical but for their peer tables —
+    one with peers, one that has never seen anyone — return byte-identical
+    refusals to the same stranger.
+  * **An authenticated caller sees only what it already knows about.** This is
+    discovery's rule applied to the peer table: the caller names the public
+    keys it is asking about and the answer covers only those, so
+    authenticating to one node does not enumerate the mesh behind it. An
+    audit-log entry is disclosed only to the peer its signed payload names.
+  * **A connection is not an identity.** Terminating TLS proves only that a
+    caller holds some key, and the daemon requests no client certificate, so
+    on the server side a TLS peer is anonymous. Being on the trust list is not
+    enough either: a trusted peer that has not handshaked is refused, and a
+    peer that handshaked under one key cannot read under another.
+
+Read access ends when trust does. The gate consults the live trust list, and
+`reload_trust()` drops revoked peers from the table it checks against, so a
+revocation closes reads at the same moment it closes everything else.
+
 ## What it deliberately does not do
 
 **No trust-on-first-use.** A key is trusted because an operator put it in the
@@ -272,15 +304,29 @@ for keys the caller does *not* trust, breaking the rule it was meant to serve.
 A private set intersection would fix it properly and needs cryptography this
 project does not currently depend on.
 
-Two smaller disclosures are worth stating in the same breath, since they are
-not fixed. A refused handshake distinguishes "we revoked you" from "we have
-never heard of you", which tells the holder of a revoked key that it was
-specifically revoked — accepted deliberately, on the grounds that losing access
-reveals as much. And the daemon's `/v1/manifest`, `/v1/peers` and `/v1/logs`
-endpoints are unauthenticated reads: anyone who can reach the port can list
-this node's advertised capabilities and the ids of peers it has authenticated.
-For a protocol whose premise is that the peer graph is sensitive, that is a
-gap, and it is a gap in the deployed daemon rather than in the design.
+One smaller disclosure is worth stating in the same breath, since it is
+deliberate rather than merely unfixed: a refused handshake distinguishes "we
+revoked you" from "we have never heard of you", which tells the holder of a
+revoked key that it was specifically revoked — accepted on the grounds that
+losing access reveals as much.
+
+An earlier version of this document named a second one, and it is now closed.
+The daemon served `/v1/peers` and `/v1/logs` as open GETs, so anyone who could
+reach the port could list the ids of every peer this node had authenticated —
+the peer graph, published by the running daemon, whatever the design said.
+Both are authenticated reads now; see above for what replaced them.
+
+What stays open is `GET /v1/manifest`, and only because first contact needs
+it: a caller reads the `node_id` there to address its handshake offer, so
+gating it behind a completed handshake would mean no peer could ever make one.
+It discloses two things. `node_id` is a truncated hash of the public key, and
+over TLS the certificate hands that same public key to anyone who completes a
+connection — so withholding it would hide nothing the transport has not
+already given away, while breaking every first handshake. `runtime` is a
+constant string, identical on every node. The capability list used to be there
+and no longer is: it said what this node can be asked to do, nothing in the
+handshake reads it, and it is now served only to authenticated peers. Learning
+that this node exists remains a long way from learning who it talks to.
 
 ## Status
 
@@ -314,8 +360,10 @@ src/eureka_daemon/
   server.py         plaintext and TLS listeners in one process
   tls.py            certificates from the node's own key; pinning client
   discovery.py      signed caller-driven address gossip
+  reads.py          authenticated reads of the peer table, log and manifest
+  signed_request.py the one gate every authenticated request passes through
   address_book.py   bounded address table with expiry
-tests/              476 tests
+tests/              503 tests
 demo.sh             trusted and untrusted handshake, side by side
 ```
 
