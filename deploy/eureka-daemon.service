@@ -30,9 +30,14 @@ Type=exec
 # startup lines -- including the public key peers have to pin -- sit in a
 # buffer instead of reaching the journal.
 Environment=PYTHONUNBUFFERED=1
-Environment=EUREKA_IDENTITY_PATH=/root/.eureka/identity.key
-Environment=EUREKA_TRUST_PATH=/root/.eureka/trust.json
-WorkingDirectory=/root/.openclaw/workspace
+# These two are load bearing in a way that is easy to miss. The identity loader
+# CREATES a key when the file it is pointed at does not exist, so a typo here
+# does not fail -- it quietly mints a new identity, and the node comes back
+# under a different node_id that no peer trusts. They are set explicitly, and
+# they are the first thing to check if node_id ever changes.
+Environment=EUREKA_IDENTITY_PATH=/var/lib/eureka/identity.key
+Environment=EUREKA_TRUST_PATH=/var/lib/eureka/trust.json
+WorkingDirectory=/opt/eureka
 
 # TLS only. Plaintext on 8000 was dropped once wsl-hermes (node_ef0a1f59) was
 # verified handshaking over 8443 in both directions -- in that order, because
@@ -44,8 +49,8 @@ WorkingDirectory=/root/.openclaw/workspace
 #
 # To put plaintext back for a new peer, add the port number as the first
 # argument and drop --no-plain.
-ExecStart=/root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-    --tls-port 8443 --no-plain --tls-dir /var/lib/eureka
+ExecStart=/opt/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
+    --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls
 
 # on-failure, not always: a clean exit 0 is somebody stopping the daemon on
 # purpose, and restarting it would fight them.
@@ -61,24 +66,28 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=eureka-daemon
 
+# --- Identity ---------------------------------------------------------------
+# A dedicated system user, no shell, no home of its own beyond the state
+# directory. systemd chowns StateDirectory to this user on every start, which
+# is also why the ownership cannot be pre-staged by hand: with no User= set,
+# systemd chowns it straight back to root.
+User=eureka
+Group=eureka
+
 # --- Hardening --------------------------------------------------------------
-# Runs as root: the identity and trust files are live, root-owned 0600, and
-# re-homing them under a service account is not something to do unasked. See
-# DEPLOYMENT.md for the non-root migration this should get.
+# ProtectHome=yes, not read-only. The daemon used to live under /root -- key
+# material, interpreter and code all of it -- so /root had to stay reachable.
+# Now the key material is in /var/lib/eureka and the runtime is in /opt/eureka,
+# so the service has no reason to see /root, /home or /run/user at all.
 #
-# ProtectHome=read-only is doing real work here rather than being boilerplate:
-# the daemon only ever READS /root/.eureka, so this makes the live key material
-# unwritable by the service itself -- including by the TLS code, which would
-# otherwise write a certificate next to the identity file.
-#
-# That is exactly why --tls-dir points at the StateDirectory below instead.
-# Writing the certificate to /var/lib/eureka means ProtectHome did NOT have to
-# be relaxed to turn TLS on: the one thing TLS needs is somewhere to write, and
-# it does not need that somewhere to be inside the private key's directory.
+# Opening /root up instead was the alternative, and it was rejected: /root is
+# 0700 but /root/.openclaw beneath it is 0755, so making /root traversable
+# would have handed the whole agent workspace to this service account and
+# undone most of the point of dropping privileges.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
-ProtectHome=read-only
+ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

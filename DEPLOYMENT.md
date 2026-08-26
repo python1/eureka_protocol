@@ -13,8 +13,11 @@ Private keys live in each host's identity file, mode 0600, never copied.
 
 ## Paths
 
-CT 102: repo /root/.openclaw/workspace/eureka_protocol, venv /root/eureka_venv,
-identity /root/.eureka/identity.key, trust /root/.eureka/trust.json
+CT 102: repo /root/.openclaw/workspace/eureka_protocol (source of truth),
+deployed runtime /opt/eureka, identity /var/lib/eureka/identity.key,
+trust /var/lib/eureka/trust.json, all owned by the `eureka` system user.
+The repo venv /root/eureka_venv is for development and the test suite; the
+service runs /opt/eureka/venv.
 
 WSL: repo ~/eureka/eureka_protocol, venv ~/eureka/venv,
 identity ~/.eureka/identity.key, trust ~/.eureka/trust.json
@@ -58,14 +61,19 @@ Revoking is not the same as deleting the entry. A deleted key comes back the
 moment someone restores an old trust file from a backup; a revoked key stays
 refused, and records why.
 
-    /root/eureka_venv/bin/python -c "
-    import sys, json; sys.path.insert(0, '/root/.openclaw/workspace')
+    runuser -u eureka -- /opt/eureka/venv/bin/python -c "
+    import json
     from eureka_protocol.src.eureka_daemon.trust import TrustList
-    path = '/root/.eureka/trust.json'
+    path = '/var/lib/eureka/trust.json'
     trust = TrustList.load(path)
     trust.revoke('<64 hex chars>', reason='laptop stolen')
     open(path, 'w').write(json.dumps(trust.to_document(), indent=2))
     "
+
+Run it as `eureka`, not root. Editing in place preserves the file's owner and
+mode either way, but a command that creates the file fresh -- a redirect, an
+editor that writes a new inode -- leaves it root-owned and unreadable by the
+daemon.
 
 A running daemon picks it up with `node.reload_trust()`, which applies the
 revocation to live sessions: a peer whose key was revoked -- or simply removed
@@ -89,8 +97,8 @@ Grants carry across. The old key is revoked, so it cannot be re-added later.
 
 **CT 102 serves TLS on 8443 and nothing else. Plaintext is gone.**
 
-    /root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-        --tls-port 8443 --no-plain --tls-dir /var/lib/eureka
+    /opt/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
+        --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls
 
 The daemon can serve both at once -- pass a port number as the first argument
 and drop `--no-plain` -- and it did during the migration, because TLS cannot
@@ -172,7 +180,7 @@ and the pin are both the key.
 
 ## Rotating this node's own key
 
-    EurekaCrypto.rotate('/root/.eureka/identity.key')
+    EurekaCrypto.rotate('/var/lib/eureka/identity.key')
 
 The outgoing private key is archived beside the live one as
 `identity.key.retired-<timestamp>` at mode 0600 and never deleted -- it is the
@@ -235,11 +243,12 @@ To run it by hand anyway -- debugging, or a second node on another port -- stop
 the service first so the port is free:
 
     systemctl stop eureka-daemon
-    cd /root/.openclaw/workspace
-    EUREKA_IDENTITY_PATH=/root/.eureka/identity.key \
-    EUREKA_TRUST_PATH=/root/.eureka/trust.json \
-    /root/eureka_venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-      --tls-port 8443 --no-plain --tls-dir /var/lib/eureka
+    cd /opt/eureka
+    runuser -u eureka -- env \
+      EUREKA_IDENTITY_PATH=/var/lib/eureka/identity.key \
+      EUREKA_TRUST_PATH=/var/lib/eureka/trust.json \
+      /opt/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
+      --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls
 
 Add a port number as the first argument to get plaintext back alongside it,
 which is what debugging a peer that cannot do TLS looks like.
@@ -274,33 +283,68 @@ When the unit does give up, it stays down until told otherwise:
 
     systemctl reset-failed eureka-daemon && systemctl start eureka-daemon
 
-### It runs as root, and it should not
+### It runs as a system user, not root
 
-The identity and trust files are live, root-owned, mode 0600, and re-homing
-them under a service account is not a thing to do casually -- the identity
-loader refuses any key file that is group or world readable, so a migration
-that fumbles the mode takes the node down.
+    User=eureka   Group=eureka
 
-The migration when someone wants it: create a system user, move
-`/root/.eureka` to `/var/lib/eureka` owned by that user with the key still
-0600, add `User=`/`Group=` plus `StateDirectory=eureka` to the unit, and point
-the two environment variables at the new path. The node_id does not change,
-because it is derived from the key and the key is the same file. Peers need no
+State in `/var/lib/eureka` (mode 0700, owned by that user):
+
+| path | what | mode |
+|---|---|---|
+| `identity.key` | the node's private key -- **precious, back this up** | 0600 |
+| `trust.json` | the peer allowlist | 0600 |
+| `tls/` | certificate and its key, **derived and disposable** | 0600 |
+
+Only `tls/` is disposable: it is regenerated from the identity whenever it
+stops matching, so deleting it costs one restart. Deleting the directory
+*above* it destroys the node.
+
+`node_id` did not change, because it derives from the key and the key is the
+same bytes -- verified after the move, not assumed, and no peer needed
 reprovisioning.
 
-Until then the unit is hardened instead: `NoNewPrivileges`, `PrivateTmp`,
-`ProtectSystem=full`, and `ProtectHome=read-only`. That last one is load
-bearing rather than decoration -- the daemon only ever *reads* `/root/.eureka`,
-so the service cannot modify its own key material.
+**The runtime had to move too, and that is the part the old plan missed.**
+`/root` is mode 0700, so a non-root service cannot traverse it -- and the
+interpreter (`/root/eureka_venv`) and the code (`/root/.openclaw/workspace`)
+both lived under it. Opening `/root` up was the obvious fix and is the wrong
+one: `/root/.openclaw` beneath it is 0755, so making `/root` traversable would
+hand the entire agent workspace to this service account and undo most of the
+point of dropping privileges.
 
-**Turning TLS on did not require relaxing it.** The certificate could have gone
-next to the identity file, which would have meant making `/root` writable by
-the service; instead `--tls-dir` points at `StateDirectory=eureka`
-(`/var/lib/eureka`, mode 0700). What TLS actually needs is somewhere to write,
-not somewhere *inside the private key's directory* to write. The certificate
-and its key are derived from the identity and regenerated whenever they stop
-matching it, so that directory is disposable state and never a source of
-truth -- deleting it costs one restart.
+So the runtime is deployed to `/opt/eureka`, root-owned and world-readable,
+which the service reads and cannot write:
+
+    /opt/eureka/venv               interpreter and dependencies
+    /opt/eureka/eureka_protocol    the code the daemon runs
+    /opt/eureka/DEPLOYED_COMMIT    which commit that is
+
+The repo under `/root/.openclaw/workspace` stays the source of truth. Refresh
+the deployment from it the same way the unit is installed -- copy, then check:
+
+    rsync -a --delete --exclude '.git' --exclude '__pycache__' \
+      --exclude '.pytest_cache' \
+      /root/.openclaw/workspace/eureka_protocol/ /opt/eureka/eureka_protocol/
+    git -C /root/.openclaw/workspace/eureka_protocol rev-parse HEAD \
+      > /opt/eureka/DEPLOYED_COMMIT
+    chown -R root:root /opt/eureka && chmod -R u=rwX,go=rX /opt/eureka
+    systemctl restart eureka-daemon
+
+The venv carries a `.pth` naming the directory the package is imported from.
+In `/opt/eureka/venv` it says `/opt/eureka`; the one under `/root` still says
+`/root/.openclaw/workspace`. Copying a venv without fixing that gives an
+interpreter that silently imports the *other* tree.
+
+Because nothing the service needs lives under `/root` any more,
+`ProtectHome=read-only` became **`ProtectHome=yes`**: `/root`, `/home` and
+`/run/user` are masked outright in the service's mount namespace. Verified by
+listing `/root` inside it -- zero entries. Alongside `NoNewPrivileges`,
+`PrivateTmp` and `ProtectSystem=full`.
+
+**Watch the two environment variables.** The identity loader *creates* a key
+when the file it is pointed at does not exist, so a typo in
+`EUREKA_IDENTITY_PATH` does not fail -- it quietly mints a new identity and the
+node comes back under a node_id no peer trusts. They are set explicitly in the
+unit, and they are the first thing to check if `node_id` ever changes.
 
 ## Run the handshake (WSL initiates)
 
