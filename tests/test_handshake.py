@@ -789,6 +789,9 @@ def test_pruning_is_deterministic_and_needs_no_threads():
         "pending_evicted": 0,
         "nonces_expired": 0,
         "nonces_evicted": 0,
+        # The assign endpoint's replay table prunes in the same pass.
+        "assign_nonces_expired": 0,
+        "assign_nonces_evicted": 0,
     }
 
 

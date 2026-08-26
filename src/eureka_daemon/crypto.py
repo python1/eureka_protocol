@@ -124,6 +124,11 @@ DOMAIN_DISCOVERY_QUERY = b"eureka/discovery/query/v1"
 # discovery query pins its own, so a signature minted to read one record does
 # not read another.
 DOMAIN_READ_QUERY = b"eureka/read/query/v1"
+# A request to run a task. Separate from the read domain even though the
+# envelope is the same shape, because the stakes are not: a read discloses,
+# an assign *does*. A signature minted to look at the peer table must be
+# structurally unusable as a request to execute anything.
+DOMAIN_ASSIGN_QUERY = b"eureka/assign/query/v1"
 
 
 def domain_separated_bytes(domain: bytes, payload: dict) -> bytes:
@@ -431,6 +436,18 @@ class EurekaCrypto:
         return EurekaCrypto.verify_json(
             public_key_hex, signature_base64, payload,
             domain=DOMAIN_READ_QUERY,
+        )
+
+    def sign_assign_query(self, payload: dict) -> str:
+        """A request to run a task on a peer, signed by the caller."""
+        return self.sign_json(payload, domain=DOMAIN_ASSIGN_QUERY)
+
+    @staticmethod
+    def verify_assign_query(public_key_hex: str, signature_base64: str,
+                            payload: dict) -> bool:
+        return EurekaCrypto.verify_json(
+            public_key_hex, signature_base64, payload,
+            domain=DOMAIN_ASSIGN_QUERY,
         )
 
     def sign_audit_log(self, payload: dict) -> str:

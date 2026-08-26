@@ -1,11 +1,11 @@
 import json
 import traceback
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
 import uvicorn
-from . import discovery, reads
+from . import assign, discovery, reads
 from .node import EurekaNode, EurekaState, REASON_MALFORMED
 from .crypto import EurekaCrypto
 
@@ -16,10 +16,6 @@ from .crypto import EurekaCrypto
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 
 # Define API Request/Response Schemas
-class TaskRequest(BaseModel):
-    task_name: str
-    payload: Dict[str, Any]
-
 class NodeManifest(BaseModel):
     """
     The open manifest. Deliberately two fields.
@@ -84,18 +80,6 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
             "node_id": node_engine.node_id,
             "runtime": "eureka-daemon-mvd"
         }
-
-    @app.post("/v1/assign")
-    async def assign_task(request: TaskRequest):
-        """Dispatches a new task to the engine for execution."""
-        if not request.task_name:
-            raise HTTPException(status_code=400, detail="task_name is required")
-    
-        try:
-            result = await node_engine.assign({"task_name": request.task_name, "payload": request.payload})
-            return {"status": "success", "execution_result": result}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
 
     # ---------------------------------------------------------------------------
     # Handshake transport
@@ -288,6 +272,33 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
     async def read_manifest(request: Request):
         """The full manifest, capability list included, for an authenticated peer."""
         return await _authenticated_read(request, reads.MANIFEST_EVENT)
+
+    @app.post("/v1/assign")
+    async def assign_task(request: Request):
+        """
+        Run a task: signed request, authenticated peer, capability grant.
+
+        This was the last open endpoint on the daemon -- an unauthenticated
+        POST straight into the dispatch stub. It now passes the same gate the
+        reads do, plus authorization and a single-use nonce; see assign.py for
+        the order and why it matters. The stub behind it still executes
+        nothing.
+        """
+        document, error = await _read_json_body(request)
+        if error is not None:
+            return JSONResponse(status_code=error.status_code,
+                                content=assign.rejected(REASON_MALFORMED))
+        try:
+            return JSONResponse(
+                status_code=200,
+                content=await assign.answer_assign(node_engine, document),
+            )
+        except Exception as exc:
+            print(f"[API] Unhandled error in assign: "
+                  f"{type(exc).__name__}: {exc}")
+            # Built from the reason alone; even this path discloses nothing.
+            return JSONResponse(status_code=200,
+                                content=assign.rejected(REASON_MALFORMED))
 
     return app
 

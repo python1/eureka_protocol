@@ -37,7 +37,7 @@ is the trade this design accepts in return for having no directory anywhere.
 
 ## What works today
 
-The suite is 503 tests, all passing. Each item below is implemented and
+The suite is 525 tests, all passing. Each item below is implemented and
 covered; where something is narrower than its name suggests, that is stated.
 
 ### Identity
@@ -124,9 +124,41 @@ Authorisation reads the live trust list, not the snapshot taken when the peer
 handshaked, so withdrawing a grant takes effect without waiting for the peer to
 reconnect.
 
-Stated plainly: this is a decision function with no caller in any request path.
-Nothing on the network is gated by it yet, because there is nothing to gate —
-see the section on task execution below.
+This function now has a real caller: the assign endpoint consults it on every
+request, after authentication and before anything is dispatched — see the
+next section. Task execution itself is still a stub; what the grants gate is
+who may reach that stub.
+
+### The assign gate
+
+`/v1/assign` was the last open endpoint on the daemon. It now takes a signed,
+single-use request through the same gate the reads use, and adds the two
+things a read does not need. First, authorization after authentication: the
+request names a capability, and `is_permitted` — default deny, both of its
+gates — decides whether this caller may run it. An authenticated, trusted
+peer without the grant is refused with its own distinct reason, and a grant
+for one capability confers nothing about another. Second, replay protection:
+every request carries a nonce, spent on first authenticated sighting whatever
+the verdict, so a captured request cannot be executed twice and a captured
+refusal cannot be resubmitted to probe whether a grant has since appeared.
+Within the freshness window the nonce table refuses the replay; past it, the
+timestamp is already stale. The table is separate from the handshake's, so an
+assign request quoting a handshake nonce cannot poison the handshake's own
+replay protection.
+
+The refusal discloses the decision and nothing else — no echo of what was
+asked, no capability list, and no distinction between "not granted" and "not
+offered", so it cannot be used to enumerate what this node advertises. Every
+decision about an authenticated caller lands in the audit log attributed to
+that caller, granted or refused, and a peer can read its own refusals back
+through the log endpoint; unauthenticated noise is not logged, because an
+unverified requester_id is a claim and attributing entries to claims would let
+anyone write history under anyone's name.
+
+The request has its own signing domain. An assign signature verifies in no
+other domain and no other domain's signature verifies as an assign — a
+signature minted to look at the peer table must be structurally unusable as a
+request to execute something.
 
 ### Revocation and rotation
 
@@ -261,11 +293,13 @@ hidden: provisioning is manual, there is no place to look a peer up, and a mesh
 of any size becomes an operator's problem.
 
 **No task execution.** `EurekaNode.assign` returns a canned result after a
-short sleep; the `/v1/assign` endpoint dispatches to it and executes nothing.
-The capability machinery is finished ahead of the thing it will gate, on
-purpose. Running code a peer asked for, over a network, with no sandbox is the
-one part of this design that fails catastrophically rather than gracefully, and
-it stays a stub until there is an isolation boundary to put it behind.
+short sleep and executes nothing. The endpoint in front of it is now fully
+gated — authenticated, authorized, replay-protected — but the gate guards
+a stub, on purpose, and in that order: an execution endpoint that grows
+authentication later starts life as the hole in the fence. Running code a peer
+asked for, over a network, with no sandbox is the one part of this design that
+fails catastrophically rather than gracefully, and it stays a stub until there
+is an isolation boundary to put it behind.
 
 **No public DHT, and no bootstrap server or well-known address.** A node with
 an empty bootstrap list dials nothing at all; there is no fallback, because
@@ -361,9 +395,10 @@ src/eureka_daemon/
   tls.py            certificates from the node's own key; pinning client
   discovery.py      signed caller-driven address gossip
   reads.py          authenticated reads of the peer table, log and manifest
+  assign.py         the assign gate: authorization and single-use requests
   signed_request.py the one gate every authenticated request passes through
   address_book.py   bounded address table with expiry
-tests/              503 tests
+tests/              525 tests
 demo.sh             trusted and untrusted handshake, side by side
 ```
 

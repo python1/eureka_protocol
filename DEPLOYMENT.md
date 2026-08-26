@@ -454,9 +454,29 @@ peers from the table it checks against.
 - Run from the parent of eureka_protocol so the package resolves. On CT 102 a
   .pth in the venv handles this; on WSL use sys.path.insert or cd ~/eureka.
 
+## Dispatching a task (/v1/assign)
+
+The endpoint is gated the same way the reads are, plus authorization and a
+single-use nonce; what it dispatches to is still a stub that executes nothing.
+An unsigned or unauthenticated POST gets a refusal that discloses nothing. An
+authenticated peer must hold a grant for the capability its request names --
+`capability_not_granted` otherwise, including when the capability is not
+offered here at all; the two are deliberately indistinguishable from outside.
+A replayed request is refused as `replayed_nonce` and every decision about an
+authenticated caller is in the audit log under that peer's name, readable back
+by that peer alone through POST /v1/logs.
+
+`assign.build_assign_query(node, capability, task_name, payload)` builds the
+signed request. Grants live in the trust file exactly as before; nothing about
+provisioning changed.
+
+The WSL peer's client is unaffected: it calls the handshake endpoints and GET
+/v1/manifest only.
+
 ## Not yet done
 
 DHT discovery (addresses are still configured by hand), NAT traversal, WAN,
-the assign endpoint (deliberately unimplemented — code-exec over a network
-with no sandbox). Mutual TLS is evaluated and deliberately not planned; see
-the TLS section above for why.
+task execution behind the assign gate (the gate is real, the stub executes
+nothing -- code-exec over a network with no sandbox stays unbuilt until there
+is a sandbox). Mutual TLS is evaluated and deliberately not planned; see the
+TLS section above for why.

@@ -151,6 +151,12 @@ class EurekaNode:
         # pending_challenges so it is pruned and capped in lockstep, which is
         # what stops initiators that never finish from accumulating state.
         self.pending_peers: Dict[str, Dict[str, Any]] = {}
+        # Assign nonces already spent, kept apart from the handshake's
+        # seen_nonces on purpose: one shared table would let an authenticated
+        # peer spend a handshake nonce by quoting it in an assign request,
+        # turning replay protection on one protocol into a denial of service
+        # against the other. Same bound, same pruning discipline.
+        self.seen_assign_nonces: Dict[str, datetime] = {}
         # Where peers might be, as opposed to who they are. Bounded, and it
         # holds addresses only for keys this node already trusts, so it can
         # never grow into a second and looser notion of who is known.
@@ -402,6 +408,18 @@ class EurekaNode:
             del self.seen_nonces[nonce]
             nonces_expired += 1
 
+        # The assign-nonce table ages out on the same window. Safe for the
+        # same reason as seen_nonces: past the window the request's own
+        # timestamp is stale, so the freshness check refuses the replay
+        # before the nonce table is ever consulted.
+        assign_nonces_expired = 0
+        while self.seen_assign_nonces:
+            nonce = next(iter(self.seen_assign_nonces))
+            if self.seen_assign_nonces[nonce] >= cutoff:
+                break
+            del self.seen_assign_nonces[nonce]
+            assign_nonces_expired += 1
+
         return {
             "pending_expired": pending_expired,
             "pending_evicted": self._evict_oldest_pending(
@@ -410,6 +428,10 @@ class EurekaNode:
             "nonces_expired": nonces_expired,
             "nonces_evicted": self._evict_oldest(
                 self.seen_nonces, self.max_seen_nonces
+            ),
+            "assign_nonces_expired": assign_nonces_expired,
+            "assign_nonces_evicted": self._evict_oldest(
+                self.seen_assign_nonces, self.max_seen_nonces
             ),
         }
 
@@ -820,8 +842,17 @@ class EurekaNode:
         mine["mutual"] = True
         return mine
 
-    async def assign(self, task_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Layer 4: Task negotiation and execution dispatch."""
+    async def assign(self, task_payload: Dict[str, Any],
+                     peer: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Layer 4: Task negotiation and execution dispatch.
+
+        Still a stub: nothing is executed, and nothing will be until there is
+        a sandbox to execute it in. What changed is who can reach it -- the
+        endpoint in front of this now requires an authenticated peer holding a
+        capability grant -- and that `peer` carries the caller into the audit
+        entry, so the log records who a granted request came from.
+        """
         await self.transition_to(EurekaState.ASSIGN)
         task_id = str(uuid.uuid4())
         print(f"[NODE {self.node_id}] Dispatching task: {task_payload.get('task_name', 'unnamed')}")
@@ -837,7 +868,7 @@ class EurekaNode:
         }
         
         # Trigger the Log layer immediately after assignment completion
-        await self.log_event(task_payload, result)
+        await self.log_event(task_payload, result, peer=peer)
         return result
 
     async def log_event(self, task_info: Dict[str, Any], result_info: Dict[str, Any],
@@ -851,9 +882,10 @@ class EurekaNode:
         this node did for one peer is not another peer's to read.
 
         None means the entry is not attributable to any peer -- work this node
-        did for itself -- and no remote caller can read it at all. That is the
-        current state of every entry, since assign() is a stub with no
-        requesting peer.
+        did for itself -- and no remote caller can read it at all. Entries
+        from the assign endpoint are attributed: a granted request logs under
+        the peer that made it, and so does a refused one, because "we said no
+        to X" is part of the record of what this node did about X.
         """
         await self.transition_to(EurekaState.LOG)
         

@@ -137,17 +137,22 @@ class EurekaSimulator:
                 }
                 
                 print(f"📤 Sending payload: {task_payload['task_name']}...")
+                # /v1/assign now requires a signed request from an
+                # authenticated peer holding a capability grant. This
+                # simulator never handshakes, so the correct outcome of this
+                # step is a refusal that discloses nothing -- the gate
+                # working is the demonstration.
                 dispatch_resp = await client.post(
                     f"{self.node_a_url}/v1/assign", 
                     json=task_payload
                 )
                 result = dispatch_resp.json()
 
-                if result["status"] == "success":
-                    print("✅ Task Execution Successful!")
-                    print(f"📄 Result Output: {result['execution_result']['output']}")
+                if result.get("event") == "assign_rejected" and result.get("result") == {}:
+                    print("✅ Unauthenticated dispatch refused, nothing disclosed "
+                          f"(reason: {result.get('reason')})")
                 else:
-                    print(f"❌ Task Failed: {result}")
+                    print(f"❌ ERROR: unauthenticated assign was not refused: {result}")
 
                 print("\n[STEP 5] Verifying EUREKA-LOG Audit Trail...")
                 # The audit log is no longer a public GET. It is served only to
@@ -157,15 +162,6 @@ class EurekaSimulator:
                 # stdout, which _dump_node_log already captures.
                 print("ℹ️  Audit log is not readable without an authenticated "
                       "handshake; see the node log for entries.")
-                logs = []
-
-                if logs:
-                    latest_log = logs[-1]
-                    print("✨ FINAL EUREKA-LOG ENTRY FOUND:")
-                    print(json.dumps(latest_log, indent=2))
-                    print("\n✅ PROTOCOL INTEGRITY VERIFIED.")
-                else:
-                    print("❌ ERROR: No EUREKA-LOG entry found in audit trail!")
 
         except NodeStartupError as e:
             # Node log has already been printed by _dump_node_log().
