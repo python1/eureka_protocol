@@ -383,9 +383,12 @@ which the service reads and cannot write:
     /opt/eureka/eureka_protocol    the code the daemon runs
     /opt/eureka/DEPLOYED_COMMIT    which commit that is
 
-The `macbook` git remote is the shared source of truth across hosts; on CT 101
-the working copy is `/root/eureka_protocol`. Refresh the deployment from it the
-same way the unit is installed -- copy, then check:
+The `macbook` git remote is the shared source of truth across hosts, but only
+CT 102 and the MacBook itself can reach it -- CT 101 cannot, and reports that by
+doing nothing rather than by failing. See "Advancing CT 101 to a new commit"
+below before assuming a fetch there did something. On CT 101 the working copy is
+`/root/eureka_protocol`. Refresh the deployment from it the same way the unit is
+installed -- copy, then check:
 
     rsync -a --delete --exclude '.git' --exclude '__pycache__' \
       --exclude '.pytest_cache' \
@@ -399,6 +402,58 @@ same way the unit is installed -- copy, then check:
 rsync and the `rev-parse` describe the same tree: refresh with a dirty working
 copy and the file names a commit the deployed code does not match. `git status
 --short` before, or accept that the record is decoration.
+
+### Advancing CT 101 to a new commit
+
+**`git fetch origin` on CT 101 is a silent no-op.** Its `origin` is not the
+MacBook -- it is `/root/migrate/eureka.bundle`, the one-shot file the host was
+seeded from during the move. Fetching re-reads that same frozen file, finds
+nothing new, and exits 0. Nothing warns you; the repo simply stays where it is
+while `origin/master` keeps naming the commit it was seeded at.
+
+Repointing `origin` at the MacBook is not currently possible without widening
+access. CT 101 has no private key at all (`/root/.ssh` holds `authorized_keys`
+and nothing else) and does not resolve the name `macbook`. The MacBook's port 22
+is reachable from CT 101, so this is an authentication gap, not a network one --
+closing it means generating a keypair on CT 101 and authorizing it on the
+MacBook, which adds an inbound credential and makes a link that is deliberately
+one-way into a round trip. Until someone decides to do that, commits reach
+CT 101 as bundles.
+
+An incremental bundle carries only the range, and names the commit it must be
+applied onto, so it refuses to apply to the wrong history instead of guessing:
+
+    # 1. on CT 102, from a clean working copy.
+    #    OLD is what CT 101 is on now -- ask it, do not assume:
+    #    ssh macbook "ssh root@192.168.1.180 'git -C /root/eureka_protocol rev-parse HEAD'"
+    OLD=<CT 101's HEAD>   NEW=<short sha of master>
+    cd /root/.openclaw/workspace/eureka_protocol
+    git status --short                      # must be empty, per the note above
+    git bundle create /tmp/eureka-$OLD-$NEW.bundle $OLD..master
+    git bundle verify /tmp/eureka-$OLD-$NEW.bundle
+
+    # 2. hop it across -- CT 102 -> MacBook -> CT 101, the same route as the move
+    scp /tmp/eureka-$OLD-$NEW.bundle macbook:/tmp/
+    ssh macbook "scp /tmp/eureka-$OLD-$NEW.bundle root@192.168.1.180:/root/migrate/"
+
+    # 3. on CT 101: verify the prerequisite is present, then fast-forward
+    B=/root/migrate/eureka-$OLD-$NEW.bundle
+    git -C /root/eureka_protocol bundle verify $B
+    git -C /root/eureka_protocol fetch $B master:refs/remotes/origin/master
+    git -C /root/eureka_protocol merge --ff-only refs/remotes/origin/master
+
+Fetch into `refs/remotes/origin/master`, not just into `FETCH_HEAD`. The
+tracking ref is the only thing on CT 101 that claims to know where the shared
+history is, and if the bundle advances `master` while `origin/master` stays put,
+`git status` starts reporting the branch as ahead of a remote it has never
+actually spoken to. `--ff-only` is what keeps this a transport rather than a
+merge: if it refuses, CT 101 has commits of its own and that is a fact to
+resolve, not to force past.
+
+Then refresh `/opt/eureka` with the rsync above, so `DEPLOYED_COMMIT` moves with
+the repo. Keep the bundles in `/root/migrate` named by range -- the filenames
+are the record of how CT 101 got from one commit to the next, which is the only
+audit trail a host with no reachable remote has.
 
 The venv carries a `.pth` naming the directory the package is imported from.
 In `/opt/eureka/venv` it says `/opt/eureka`; CT 102's development venv under
@@ -539,6 +594,69 @@ dependencies, because more than one venv sits next to this repo on some hosts.
 On CT 101 neither fallback exists, so run it with
 `EUREKA_PYTHON=/opt/eureka/venv/bin/python`.
 
+### demo.sh needs the identity paths too, and fails soft without them
+
+**Set `EUREKA_IDENTITY_PATH` and `EUREKA_TRUST_PATH` on every run, or the
+trusted scenario quietly tests a node that did not exist until you ran it.**
+
+The trusted scenario calls `with_persistent_identity()` with no path, so the
+identity resolves exactly the way the daemon's does: explicit argument, then
+`$EUREKA_IDENTITY_PATH`, then `~/.eureka/identity.key`. The daemon is handed
+those two variables by the unit (`Environment=` lines, not defaults); a login
+shell inherits neither. A run without them therefore falls through to the
+default path -- where `EurekaCrypto.load_or_create` **creates a key when it
+finds none** rather than failing.
+
+That is the same shape as the trap the non-root move hit: a step that
+manufactures what it was supposed to find, and reports success for it. The
+create-on-miss behaviour is right for the daemon, because it is how a node gets
+an identity on first boot. It is exactly wrong for a verification run, whose
+entire purpose is to prove that one *specific* key still works. Nothing errors,
+nothing is logged, and the summary line prints
+
+    node_id   : node_XXXXXXXX  (must not change across runs)
+
+with a value that looks perfectly well-formed and is meaningless.
+
+Exporting `HOME` to reach the state directory makes it worse rather than better:
+`HOME=/var/lib/eureka` lands the throwaway at
+`/var/lib/eureka/.eureka/identity.key` -- beside the real key, owned by the same
+user, where it reads as node state instead of litter. Seen on 2026-08-28; the
+stray file was deleted and the real `identity.key` and `trust.json` were
+untouched, because `load_or_create` only ever writes the path it resolved. Check
+for a stray `.eureka/` under `/var/lib/eureka` after any run that reported an
+unfamiliar node_id.
+
+The full invocation on CT 101:
+
+    cd /opt/eureka/eureka_protocol
+    runuser -u eureka -- env \
+      EUREKA_PYTHON=/opt/eureka/venv/bin/python \
+      EUREKA_IDENTITY_PATH=/var/lib/eureka/identity.key \
+      EUREKA_TRUST_PATH=/var/lib/eureka/trust.json \
+      bash demo.sh https://<peer>:8443
+
+Read `local node` on the first scenario before reading anything else: it must
+say `node_a2ed8dc7`. If it says anything else the environment did not arrive,
+and the rest of the run describes a node nobody has ever trusted.
+
+Only the trusted scenario is exposed to this. The untrusted one passes explicit
+paths into a temp directory, and an explicit argument beats the environment --
+so it keeps passing, correctly, while the trusted one is silently wrong. A run
+that reports `untrusted: PASS` and `trusted: FAIL` is the signature of a missing
+environment at least as often as it is a real protocol failure.
+
+### CT 101 cannot run the trusted scenario against itself
+
+Pointing `demo.sh` at CT 101 *from* CT 101 fails the trusted leg every time,
+with `untrusted_key` / "the key terminating TLS is not trusted". That is correct
+behaviour, not a regression: CT 101's trust list contains one peer, `wsl-hermes`,
+and a node does not carry its own key in its own allowlist, so pinning the
+responder's TLS key against it cannot succeed. There is no self-handshake in
+this protocol. The trusted scenario has to be initiated from the WSL peer; run
+locally on CT 101, `demo.sh` proves the listener is up and the refusal path
+works, and nothing more.
+
 ## Reading the peer table and the audit log
 
 `/v1/peers` and `/v1/logs` used to be open GETs. Anything that could reach the
@@ -598,6 +716,12 @@ peers from the table it checks against.
   drop-in is applied (status=243/CREDENTIALS). See "journald in an
   unprivileged container" -- until then every journal check here reads empty
   and proves nothing.
+- `git fetch origin` on CT 101 fetches from `/root/migrate/eureka.bundle`, not
+  from the MacBook, and succeeds without doing anything. New commits get there
+  by bundle -- see "Advancing CT 101 to a new commit".
+- `demo.sh` without `EUREKA_IDENTITY_PATH`/`EUREKA_TRUST_PATH` creates a
+  throwaway identity instead of failing, and reports a node_id that never
+  existed. See "demo.sh needs the identity paths too".
 
 ## Dispatching a task (/v1/assign)
 
