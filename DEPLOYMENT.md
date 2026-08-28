@@ -644,6 +644,56 @@ when the file it is pointed at does not exist, so a typo in
 node comes back under a node_id no peer trusts. They are set explicitly in the
 unit, and they are the first thing to check if `node_id` ever changes.
 
+### What the run produced on CT 101, 2026-08-28: d8dddc9 -> 7929bc3
+
+The fifth incremental bundle in `/root/migrate`, and the first deploy that
+changes what the node *advertises* rather than only what it does: `7929bc3` is
+the handler registry and `web-retrieval`.
+
+CT 101's HEAD was asked for, not assumed -- `d8dddc9`, working copy clean. The
+bundle is `/root/migrate/eureka-d8dddc9-7929bc3.bundle`, 35 KB, verified on both
+sides: built and verified on CT 102, verified again on CT 101 before the fetch.
+Then `fetch` + `merge --ff-only` off `FETCH_HEAD`, no ref invented under
+`origin`, and the rsync to `/opt/eureka` with `DEPLOYED_COMMIT` written from the
+repo's HEAD afterwards. Repo, deployment and the file all read `7929bc3`.
+
+**Validated before the restart, and the validation is the interesting part.**
+Step 3 of "Granting a capability" was run against the untouched live trust file,
+and printed:
+
+    this node advertises: ['web-retrieval']
+    grants: ['web-retrieval'] | web-retrieval: True | code-exec: False
+
+That first line is new, and it is what this commit is for: the advertised list
+now comes from the handler registry, so `code-exec` and `data-analysis` are gone
+from it. Nothing in the trust file grants either, which is why the deploy was
+uneventful -- but the failure mode has moved. A grant naming a capability with
+no handler is now a **load error**, so a file that used to sit there being
+refused per request will instead stop the daemon from starting. That is the
+intended direction and it is a sharper edge than it was yesterday.
+
+The suite was also run on CT 101 under `/opt/eureka/venv` -- the service
+interpreter, not a development one -- and passed 616. Worth doing here rather
+than trusting CT 102's run: the `.pth` above means that interpreter imports
+`/opt/eureka`, so this exercised the deployed tree, which is the one that
+matters.
+
+Restart was clean: `active`, `enabled`, `NRestarts=0`, PID 1284 -> 1823, no
+errors in the journal. The daemon came back as `node_a2ed8dc7` and served the
+same TLS key -- the certificate's raw ed25519 key was pulled from the live
+listener and compared against the pin the journal prints, `a718592f...`, and
+matched exactly. No peer needs reprovisioning, and neither the identity nor the
+trust file was touched by any of this.
+
+**What is still not proven is the same thing that was not proven yesterday, and
+it now matters more.** There is no self-handshake, so CT 101 cannot ask itself
+for `web-retrieval`; only a signed `/v1/assign` from `wsl-hermes` proves a peer
+on the far side sees what the local allowlist says. Until this deploy that
+outstanding check would have returned a canned string either way. Now it would
+return a real fetched page, which makes it the first assign that could actually
+distinguish a working executor from a working gate. The Alienware is still
+powered off.
+
 ## Moving the responder to another host
 
 Done on 2026-08-28, CT 102 -> CT 101, at commit 3854f00. The node kept
