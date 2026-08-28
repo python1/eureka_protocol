@@ -78,19 +78,33 @@ A grant naming a capability the node does not advertise is also a load error,
 so a typo fails at startup instead of sitting in the file looking effective.
 
 **Which capabilities are legal is a property of the node reading the file, not
-of the peer named in it.** The daemon advertises exactly three, set where the
-node is constructed (`api.py`):
+of the peer named in it.** The daemon advertises exactly one:
 
-    code-exec    web-retrieval    data-analysis
+    web-retrieval
 
-Granting anything outside that set makes the trust file unloadable *for this
-node*, and the daemon refuses to start rather than run without the allowlist it
-was told to enforce -- five attempts, then `failed`. Note that `demo.sh` builds
-its client node with `capabilities=["fast-inference"]`, which is that node's own
-advertised set and has nothing to do with what the daemon accepts; the two lists
-are unrelated, and using one where the other belongs is the easiest way to write
-a file that fails at startup. **Validate before restarting** -- see "Granting a
-capability".
+**It used to advertise three** -- `code-exec`, `web-retrieval` and
+`data-analysis` -- written out by hand in `api.py`. They are gone because the
+list is no longer written anywhere: it is derived from the handler registry,
+which is the only thing that knows what this node can actually do. `code-exec`
+and `data-analysis` have no handler, so advertising them was the node claiming
+work it could not do, and the discovery of that came at request time to a peer
+every gate had already told yes.
+
+**This narrows what the trust file may grant.** A file granting `code-exec` or
+`data-analysis` loaded fine before and does not load now, and an unloadable
+trust file does not degrade the daemon, it stops it -- five attempts, then
+`failed`. CT 101's file grants `wsl-hermes` exactly `web-retrieval`, so it is
+unaffected; check any other file before deploying, with the load in step 3 of
+"Granting a capability", which now takes its advertised list from the registry
+rather than repeating it.
+
+Note that `demo.sh` builds its client node with
+`capabilities=["fast-inference"]`, which is that node's own advertised set and
+has nothing to do with what the daemon accepts. That still works and is still
+unrelated: a client node is built without a registry, so it advertises what it
+was told and executes nothing. Using one list where the other belongs remains
+the easiest way to write a file that fails at startup. **Validate before
+restarting** -- see "Granting a capability".
 
 ## Granting a capability (and migrating v1 -> v3)
 
@@ -129,10 +143,15 @@ depending on a file nobody has loaded yet:
     "
 
     # 3. load it the way the daemon will, BEFORE restarting. Raises if wrong.
+    #    The advertised list comes from the handler registry, not from a list
+    #    typed here: typing one is how this check drifts from the daemon and
+    #    starts passing files the daemon will refuse.
     runuser -u eureka -- /opt/eureka/venv/bin/python -c "
     from eureka_protocol.src.eureka_daemon.trust import TrustList
-    t = TrustList.load('/var/lib/eureka/trust.json',
-                       advertised=['code-exec','web-retrieval','data-analysis'])
+    from eureka_protocol.src.eureka_daemon.handlers import default_registry
+    advertised = sorted(default_registry().names())
+    print('this node advertises:', advertised)
+    t = TrustList.load('/var/lib/eureka/trust.json', advertised=advertised)
     k = t.key_for('wsl-hermes')
     print('grants:', sorted(t.capabilities_for(k)),
           '| web-retrieval:', t.grants(k, 'web-retrieval'),
@@ -153,9 +172,11 @@ daemon that will not start, and the node is off the mesh until someone reads the
 journal. If it raises, restore the backup and fix the grant before restarting.
 
 Grant the narrowest capability that does the job. `code-exec` is deliberately
-not granted to anyone: the assign gate is real but what it dispatches to is a
-stub, and the day that stub becomes an executor, every standing grant becomes
-live at once. A grant written now is a decision taken now.
+not granted to anyone, and is now not even advertised: there is no handler for
+it, because there is no sandbox to put one behind, and registering one is the
+act that would make every standing grant for it live at once. A grant written
+now is a decision taken now -- and today a `code-exec` grant is not a dormant
+decision but a file that will not load.
 
 ### What the run produced on CT 101, 2026-08-28
 
@@ -170,6 +191,12 @@ Ask step 3 about a capability that must be *absent* as well as the one being
 granted -- a check that only ever prints True cannot fail. It printed:
 
     grants: ['web-retrieval'] | web-retrieval: True | code-exec: False
+
+Run today it also prints `this node advertises: ['web-retrieval']`, because the
+daemon stopped advertising `code-exec` and `data-analysis` when the executor
+landed. The `False` above was already the right answer; it is now the only
+possible one, since a `code-exec` grant would fail to load rather than sit in
+the file being refused.
 
 The first is the grant as the daemon will read it; the second is the gate
 answering for it; the third is the one to keep re-reading. `code-exec` is still
@@ -887,11 +914,18 @@ peers from the table it checks against.
   drop-in is applied (status=243/CREDENTIALS). See "journald in an
   unprivileged container" -- until then every journal check here reads empty
   and proves nothing.
-- A capability grant is validated against what *this* node advertises
-  (`code-exec`, `web-retrieval`, `data-analysis`), not against what the peer
-  claims. `fast-inference` is `demo.sh`'s client-side list and is **not** one
-  of them -- granting it makes the daemon refuse to start. See "Granting a
-  capability".
+- A capability grant is validated against what *this* node advertises, which
+  is now `web-retrieval` and nothing else -- derived from the handler registry,
+  not typed into `api.py`. Granting `code-exec` or `data-analysis` used to load
+  and now does not, and an unloadable trust file stops the daemon. So does
+  `fast-inference`, which is `demo.sh`'s client-side list and was never one of
+  ours. See "Granting a capability".
+- `web-retrieval` cannot reach anything on this LAN, on purpose: loopback,
+  private, link-local and CGNAT addresses are all refused, after DNS
+  resolution and again on every redirect. If a fetch that should work comes
+  back `address_not_allowed`, the target really does resolve into one of those
+  ranges -- that is the check working, not a bug. See "web-retrieval, and what
+  it refuses".
 - CT 101 has no git remote, on purpose: its `origin` was the seed bundle, and
   a bare fetch force-rewound `origin/master` to the seed commit. New commits
   get there by bundle -- see "Advancing CT 101 to a new commit". Do not add a
@@ -907,14 +941,14 @@ peers from the table it checks against.
 ## Dispatching a task (/v1/assign)
 
 The endpoint is gated the same way the reads are, plus authorization and a
-single-use nonce; what it dispatches to is still a stub that executes nothing.
-An unsigned or unauthenticated POST gets a refusal that discloses nothing. An
-authenticated peer must hold a grant for the capability its request names --
-`capability_not_granted` otherwise, including when the capability is not
-offered here at all; the two are deliberately indistinguishable from outside.
-A replayed request is refused as `replayed_nonce` and every decision about an
-authenticated caller is in the audit log under that peer's name, readable back
-by that peer alone through POST /v1/logs.
+single-use nonce. An unsigned or unauthenticated POST gets a refusal that
+discloses nothing. An authenticated peer must hold a grant for the capability
+its request names -- `capability_not_granted` otherwise, including when the
+capability is not offered here at all; the two are deliberately
+indistinguishable from outside. A replayed request is refused as
+`replayed_nonce` and every decision about an authenticated caller is in the
+audit log under that peer's name, readable back by that peer alone through
+POST /v1/logs.
 
 `assign.build_assign_query(node, capability, task_name, payload)` builds the
 signed request. Grants live in the trust file exactly as before; nothing about
@@ -923,10 +957,126 @@ provisioning changed.
 The WSL peer's client is unaffected: it calls the handshake endpoints and GET
 /v1/manifest only.
 
+### What is behind the gate now
+
+**The stub is gone.** It slept half a second and returned `Processed by
+<node_id>`. A granted peer now reaches a handler registry -- capability name to
+the code that runs it -- and for this daemon that means `web-retrieval` and
+nothing else.
+
+The advertised list comes from that registry (`handlers.default_registry()`),
+which is what makes a capability with no implementation impossible to
+advertise. To see what this node offers, ask the registry rather than reading
+`api.py`:
+
+    cd /opt/eureka
+    runuser -u eureka -- /opt/eureka/venv/bin/python -c "
+    from eureka_protocol.src.eureka_daemon.handlers import default_registry
+    print(sorted(default_registry().names()))
+    "
+
+The answer is on the wire too, but only to an authenticated peer: POST
+/v1/manifest carries the capability list, the open GET does not.
+
+A granted request returns `reason: authenticated` with a `result` and a
+`result_signature`. The result is signed by this node in the assign-result
+domain -- distinct from assign queries, reads, handshake messages and audit
+entries -- over a payload that includes the request's nonce and requester, so
+it is evidence about one request and cannot be lifted onto another. Refusals
+are not signed: they are a constant built from the reason alone, and signing
+one would make refusals tellable apart without attesting to anything.
+
+**The gate's verdict and the work's verdict are separate.** `reason` stays
+`authenticated` whenever the request was accepted and run; whether the work
+succeeded is inside the result, under `status` and its own `reason`. A fetch
+that timed out is a request this node accepted and could not complete, which is
+a different fact from a peer that may not ask -- collapsing them would tell a
+peer its grant had been withdrawn every time a web server was slow.
+
+    result.status    completed | failed
+    result.reason    ok | timeout | address_not_allowed | scheme_not_allowed
+                     | body_too_large | too_many_redirects | connection_failed
+                     | dns_resolution_failed | invalid_payload
+                     | capability_not_implemented | handler_error
+
+### web-retrieval, and what it refuses
+
+Payload is `{"url": "https://..."}`. It returns `http_status`, `content_type`,
+`body`, `bytes`, `truncated`, `final_url` and `redirects`. GET only. A 500 from
+the target is a *successful* fetch of a failing page -- `status: completed`
+with `http_status: 500` -- because "could not fetch" and "fetched, and it said
+500" are different answers and the caller needs both.
+
+The limits, all because the peer chooses the URL: 1 MiB body, 10 second fetch
+timeout, 3 redirects, http and https only, and a 30 second wall-clock deadline
+plus a cap of 8 concurrent handlers imposed by the registry itself. An
+oversized body is refused outright when the target declares the size
+(`body_too_large`) and truncated with `truncated: true` when it does not, so a
+short page is never confusable with a cut one.
+
+**The address policy is the part to understand before granting this to
+anyone.** Asking a daemon to fetch a URL somebody else chose is server-side
+request forgery by construction: the peer cannot reach this network, and this
+node can. So only globally routable unicast addresses may be fetched. Refused:
+
+    loopback          127.0.0.0/8, ::1
+    private           10/8, 172.16/12, 192.168/16, fc00::/7
+    link-local        169.254/16 (the cloud metadata address), fe80::/10
+    CGNAT             100.64/10
+    multicast, reserved, unspecified, and IPv4-mapped forms of any of these
+
+CT 101's own API is covered by that without a special case: it answers on
+192.168.1.180 and on loopback, both refused. So is CT 102 on 192.168.1.174, and
+so is everything else on the LAN -- **a `web-retrieval` grant does not let a
+peer reach anything inside this perimeter, which is the only reason it is safe
+to grant to a peer outside it.**
+
+The check runs on resolved addresses, never on the URL text, and every address
+a name resolves to must pass rather than just the first. It runs a second time
+on the address actually connected to, read off the socket before any body is
+read, because the HTTP client resolves the name again when it connects and a
+name can answer differently the second time. And it runs again on every
+redirect -- hops are followed by hand for exactly that reason, so a URL that
+passes and then 302s to `http://169.254.169.254/` is refused at the hop.
+
+To see the policy for yourself on the deployed node:
+
+    cd /opt/eureka
+    runuser -u eureka -- /opt/eureka/venv/bin/python -c "
+    from eureka_protocol.src.eureka_daemon.handlers import AddressPolicy
+    p = AddressPolicy()
+    for a in ('127.0.0.1','192.168.1.180','169.254.169.254','93.184.216.34'):
+        print(a, p.refusal(a) or 'allowed')
+    "
+
+### What the audit log records, and what it must not
+
+Each dispatch writes one entry, attributed to the requesting peer, carrying the
+capability, the task name and the outcome -- `completed`, or the distinct
+reason it was not.
+
+    journalctl -u eureka-daemon | grep "EUREKA-LOG"
+
+**It does not record the body, and it must not start.** For web-retrieval the
+body is somebody else's page: copying it into the log would republish it under
+this node's signature, keep it for as long as the log is kept, and hand it to
+that peer again through /v1/logs. The URL is not recorded either -- it is the
+peer's business, and the entry is a record of what this node did, not of what
+the peer was looking for. The entry is built from named scalars rather than
+from the result dict, which is the thing that keeps it that way.
+
 ## Not yet done
 
-DHT discovery (addresses are still configured by hand), NAT traversal, WAN,
-task execution behind the assign gate (the gate is real, the stub executes
-nothing -- code-exec over a network with no sandbox stays unbuilt until there
-is a sandbox). Mutual TLS is evaluated and deliberately not planned; see the
-TLS section above for why.
+DHT discovery (addresses are still configured by hand), NAT traversal, WAN.
+`code-exec` and `data-analysis` remain unimplemented and are no longer
+advertised: code execution a peer asked for, over a network, with no sandbox
+stays unbuilt until there is a sandbox, and the node now refuses to claim it
+rather than gating a stub. Task execution itself is no longer on this list --
+`web-retrieval` runs end to end behind the gate.
+
+Not yet confirmed against the WSL peer: no peer has exercised the grant or the
+executor over the wire. See "What the run produced on CT 101" -- the same
+outstanding check, now with more behind it to check.
+
+Mutual TLS is evaluated and deliberately not planned; see the TLS section above
+for why.

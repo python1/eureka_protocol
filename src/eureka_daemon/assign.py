@@ -1,11 +1,13 @@
 """
 The assign endpoint's gate: who may ask this node to run something.
 
-The stub behind this gate executes nothing, and keeps executing nothing until
-there is a sandbox to put real work behind. The gate is built first anyway,
-because the order matters: an execution endpoint that grows authentication
-later starts life as the hole in the fence, and this one was exactly that --
-an open POST that anything reaching the port could call.
+The gate was built before the executor, and that order was the point: an
+execution endpoint that grows authentication later starts life as the hole in
+the fence, and this one was exactly that -- an open POST that anything
+reaching the port could call. Behind it now is a real handler registry rather
+than a stub, so a granted peer's request is dispatched to code that does the
+work. Nothing about the gate changed to allow that; what changed is what is on
+the other side of it.
 
 Reads share a gate with discovery; assign shares it too, plus two things a
 read does not need:
@@ -30,11 +32,30 @@ hint whether the named capability exists here at all. is_permitted already
 folds "not offered" and "not granted" into one False, so the refusal cannot be
 used to enumerate what this node advertises.
 
+What the answer carries: the result, and a signature over it in the
+assign-result domain. The signature is the responder saying "this is what I
+did", in a domain nothing else in the protocol can mint -- so a peer keeps
+evidence of the answer rather than a string it has to take on trust, and a
+result cannot be lifted onto a different request because the nonce it was
+signed over belongs to the first one.
+
+A refusal is deliberately NOT signed. It is a constant built from the reason
+alone -- identical for every caller and every question -- so a signature over
+it would attest to nothing the refused caller could not compute for itself,
+while making refusals distinguishable by their signature is exactly the side
+channel the constant exists to close.
+
+The protocol-level `reason` stays "authenticated" whenever the request was
+accepted and run. Whether the *work* succeeded lives in the result, under its
+own status and reason: a fetch that times out is a request this node accepted,
+ran, and could not complete, and collapsing that into a gate refusal would
+tell the caller its grant had been taken away.
+
 What the audit log records: every decision about an authenticated caller,
-attributed to it -- granted requests through the stub's own log entry, refused
-ones here with status "refused". "We said no to X" is part of the record of
-what this node did about X, and X can read its own refusals back through
-/v1/logs. Unauthenticated noise is not logged: an unverified requester_id is a
+attributed to it -- granted requests through the dispatch's own log entry,
+refused ones here with status "refused" and the reason that refused them. "We
+said no to X" is part of the record of what this node did about X, and X can
+read its own refusals back through /v1/logs. Unauthenticated noise is not logged: an unverified requester_id is a
 claim, and attributing log entries to claims would let anyone write history
 under anyone's name.
 """
@@ -110,14 +131,20 @@ async def answer_assign(node: EurekaNode, document: Any,
                         now: Optional[datetime] = None) -> Dict[str, Any]:
     """
     Decide one assign request: authenticate, then check replay, then
-    authorize, then -- and only then -- dispatch to the stub.
+    authorize, then -- and only then -- dispatch.
 
     The order is the design. Replay is checked before authorization so a
     captured request cannot be resubmitted to probe whether a grant has since
-    appeared; authorization is checked before dispatch so the stub is never
+    appeared; authorization is checked before dispatch so no handler is ever
     reached by a caller that may not run anything; and the nonce is spent on
     the first authenticated sighting, whatever the verdict, so a refused
     request cannot be replayed either.
+
+    Dispatch is awaited, not fired and forgotten: the answer carries the
+    result, so the request is open for as long as the work takes. It does not
+    block anything else -- the handler is async and the registry caps how many
+    run at once -- but it does mean a slow fetch is a slow response, which is
+    the honest shape for a call whose whole purpose is to return what it got.
     """
     reason, _public_key, peer_id = signed_request.verify(
         node, document,
@@ -144,7 +171,9 @@ async def answer_assign(node: EurekaNode, document: Any,
     node.prune_expired(now)
     if nonce in node.seen_assign_nonces:
         await node.log_event({"task_name": task_name},
-                             {"status": "refused"}, peer=peer_id)
+                             {"status": "refused",
+                              "reason": REASON_REPLAYED_NONCE},
+                             peer=peer_id, capability=capability)
         return rejected(REASON_REPLAYED_NONCE)
     node.seen_assign_nonces[nonce] = now or datetime.now(timezone.utc)
     # Enforce the cap after inserting, so the table never sits above it even
@@ -157,15 +186,21 @@ async def answer_assign(node: EurekaNode, document: Any,
     # the refusal from disclosing the inventory.
     if not node.is_permitted(peer_id, capability):
         await node.log_event({"task_name": task_name},
-                             {"status": "refused"}, peer=peer_id)
+                             {"status": "refused",
+                              "reason": REASON_NOT_PERMITTED},
+                             peer=peer_id, capability=capability)
         return rejected(REASON_NOT_PERMITTED)
 
+    # Dispatch. The nonce travels into the result so the signature below binds
+    # the answer to this one request and no other.
     result = await node.assign(
-        {"task_name": task_name, "payload": query["payload"]}, peer=peer_id,
+        {"task_name": task_name, "payload": query["payload"]},
+        peer=peer_id, capability=capability, nonce=nonce,
     )
     return {
         "event": ANSWER_EVENT,
         "responder_id": node.node_id,
         "reason": REASON_OK,
         "result": result,
+        "result_signature": node.crypto.sign_assign_result(result),
     }

@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
 import uvicorn
 from . import assign, discovery, reads
+from .handlers import default_registry
 from .node import EurekaNode, EurekaState, REASON_MALFORMED
 from .crypto import EurekaCrypto
 
@@ -281,8 +282,13 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
         This was the last open endpoint on the daemon -- an unauthenticated
         POST straight into the dispatch stub. It now passes the same gate the
         reads do, plus authorization and a single-use nonce; see assign.py for
-        the order and why it matters. The stub behind it still executes
-        nothing.
+        the order and why it matters. Behind the gate is the handler registry,
+        which for this daemon means web-retrieval and nothing else.
+
+        The answer carries a signature over the result in the assign-result
+        domain. The catch-all below cannot: it is the same constant refusal
+        every other endpoint falls back to, and signing a constant would say
+        nothing while making refusals tellable apart by their signature.
         """
         document, error = await _read_json_body(request)
         if error is not None:
@@ -306,9 +312,18 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
 # The identity is loaded from disk (created on first run), so restarting the
 # daemon brings the same node back rather than minting a new one. Override the
 # location with $EUREKA_IDENTITY_PATH.
-node_engine = EurekaNode.with_persistent_identity(
-    capabilities=["code-exec", "web-retrieval", "data-analysis"]
-)
+#
+# The advertised capability list is NOT written here any more. It is derived
+# from the handler registry, which is the only thing that knows what this node
+# can actually do -- so the list cannot drift from the code, and a capability
+# with no handler cannot be advertised at all. That is why this line no longer
+# says code-exec and data-analysis: nothing here runs them.
+#
+# Passing an explicit list alongside a registry is still allowed and is
+# validated against it, which is the startup error this arrangement exists to
+# produce: add "code-exec" here and the daemon does not start, rather than
+# telling a granted peer yes and handing it nothing.
+node_engine = EurekaNode.with_persistent_identity(handlers=default_registry())
 crypto_engine = node_engine.crypto
 app = create_app(node_engine)
 

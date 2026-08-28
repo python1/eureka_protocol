@@ -37,7 +37,7 @@ is the trade this design accepts in return for having no directory anywhere.
 
 ## What works today
 
-The suite is 525 tests, all passing. Each item below is implemented and
+The suite is 616 tests, all passing. Each item below is implemented and
 covered; where something is narrower than its name suggests, that is stated.
 
 ### Identity
@@ -126,10 +126,17 @@ reconnect.
 
 This function now has a real caller: the assign endpoint consults it on every
 request, after authentication and before anything is dispatched — see the
-next section. Task execution itself is still a stub; what the grants gate is
-who may reach that stub.
+next section. What sits behind it is no longer a stub either: the grant gates
+a registry of handlers, and one capability, `web-retrieval`, is implemented.
 
-### The assign gate
+The advertised list is not written down twice. A node built with a handler
+registry takes its capabilities from that registry, or is checked against it —
+advertising something with no handler behind it is a construction error, which
+on the daemon path is a startup error. A node cannot claim what it cannot do,
+so the second gate above is now a statement about running code rather than
+about a list somebody maintained by hand.
+
+### The assign gate, and the executor behind it
 
 `/v1/assign` was the last open endpoint on the daemon. It now takes a signed,
 single-use request through the same gate the reads use, and adds the two
@@ -158,7 +165,57 @@ anyone write history under anyone's name.
 The request has its own signing domain. An assign signature verifies in no
 other domain and no other domain's signature verifies as an assign — a
 signature minted to look at the peer table must be structurally unusable as a
-request to execute something.
+request to execute something. The answer has a domain of its own in the other
+direction: the responder signs the result it produced, so a peer keeps evidence
+of what it was told rather than a string it has to take on trust, and the
+signed payload carries the request's nonce and requester so a result cannot be
+lifted onto a different request. Refusals stay unsigned — they are a constant
+built from the reason alone, and a signature would make them tellable apart
+without attesting to anything.
+
+Behind the gate is a handler registry: capability name to the code that runs
+it. A handler failure is an outcome rather than an exception — a timeout, a
+refused URL, an upstream 500 and a handler that raised each come back as a
+structured result with its own reason, and nothing propagates to the caller.
+The gate's verdict and the work's verdict stay separate: a fetch this node
+declined to make is still a request it accepted, which is a different fact from
+a peer that may not ask.
+
+Every decision lands in the audit log with the capability, the requesting peer
+and the outcome — and never the result body. For `web-retrieval` that body is
+somebody else's web page, and copying it into a signed, peer-readable log would
+republish it under this node's name.
+
+### web-retrieval
+
+The one implemented capability. It fetches a URL a peer names and returns the
+status, content type and body, under limits that exist because the peer chooses
+the URL: a body cap, a wall-clock timeout, a redirect cap, and http/https only.
+A body over the cap is refused when the target declares the size and truncated
+with a flag when it does not, so a short page and a cut one are never
+confusable.
+
+Pointing a daemon at a URL somebody else chose is server-side request forgery
+waiting to happen — the peer cannot reach the network this node sits in, but
+this node can. **The policy is that only globally routable unicast addresses
+may be fetched:** loopback, private ranges, link-local (including the cloud
+metadata address), carrier-grade NAT, multicast, reserved and unspecified
+addresses are refused, in IPv4 and IPv6 and in IPv4-mapped form. The daemon's
+own API needs no special case, since every address it answers on is already in
+one of those ranges.
+
+That check runs on addresses, never on the URL string: a hostname resolving
+into a blocked range is the whole attack, so every address the name resolves to
+must pass, not merely the first. It runs again on the address actually
+connected to, read back from the open socket before any body is read, because
+the HTTP client resolves the name a second time and a name can answer
+differently the second time. And it runs again on every redirect — hops are
+followed by hand precisely so that a URL which passes and then redirects into
+the private network is refused at the hop.
+
+`code-exec` and `data-analysis` have no handlers, deliberately, and so are not
+advertised at all. Registering a handler is the act that makes a standing grant
+live; see the note below.
 
 ### Revocation and rotation
 
@@ -292,14 +349,16 @@ existing, rather than by promising not to look. The cost is real and is not
 hidden: provisioning is manual, there is no place to look a peer up, and a mesh
 of any size becomes an operator's problem.
 
-**No task execution.** `EurekaNode.assign` returns a canned result after a
-short sleep and executes nothing. The endpoint in front of it is now fully
-gated — authenticated, authorized, replay-protected — but the gate guards
-a stub, on purpose, and in that order: an execution endpoint that grows
-authentication later starts life as the hole in the fence. Running code a peer
-asked for, over a network, with no sandbox is the one part of this design that
-fails catastrophically rather than gracefully, and it stays a stub until there
-is an isolation boundary to put it behind.
+**No code execution.** `web-retrieval` is implemented; `code-exec` is not, and
+is not advertised. Running code a peer asked for, over a network, with no
+sandbox is the one part of this design that fails catastrophically rather than
+gracefully, and it stays unbuilt until there is an isolation boundary to put it
+behind. The gate in front of it has been real for some time — the order was
+deliberate, since an execution endpoint that grows authentication later starts
+life as the hole in the fence — but a gate is not a sandbox, and the day a
+handler is registered for that name is the day every standing grant for it
+becomes live at once. Which is why there is no handler, and why the node
+refuses to advertise the name it cannot honour.
 
 **No public DHT, and no bootstrap server or well-known address.** A node with
 an empty bootstrap list dials nothing at all; there is no fallback, because
@@ -396,6 +455,7 @@ src/eureka_daemon/
   discovery.py      signed caller-driven address gossip
   reads.py          authenticated reads of the peer table, log and manifest
   assign.py         the assign gate: authorization and single-use requests
+  handlers.py       the executor: handler registry, fetch policy, web-retrieval
   signed_request.py the one gate every authenticated request passes through
   address_book.py   bounded address table with expiry
 tests/              525 tests

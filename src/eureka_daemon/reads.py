@@ -180,13 +180,20 @@ def answer_logs(node: EurekaNode, document: Any,
     this node's activity that no caller is entitled to in full. So an entry is
     disclosed only when its signed payload names this caller.
 
-    Today that filter returns nothing to anyone, because the only thing that
-    writes entries is assign(), which is a stub with no requesting peer to
-    attribute work to. That is the correct empty rather than an accidental one:
-    when assign() grows a real implementation it will attribute entries to the
-    peer that asked, and this rule already says who may read them. An operator
-    reading the local log is not affected -- that path is the journal, not the
-    network.
+    That filter used to return nothing to anyone, because the only thing
+    writing entries was a stub with no requesting peer to attribute work to.
+    It now returns something: assign() dispatches to real handlers and
+    attributes every entry -- granted or refused -- to the peer that asked, so
+    a peer reads back its own history here and nobody else's.
+
+    What an entry holds is deliberately thin: the capability, the task name,
+    and the outcome. Not the result. For web-retrieval the result is somebody
+    else's web page, and disclosing it here would hand it back out under this
+    node's signature every time the log is read. node.log_event is where that
+    is enforced; this function only decides who may read what is there.
+
+    An operator reading the local log is not affected by any of this -- that
+    path is the journal, not the network.
     """
     rejection, _public_key, peer_id = _authenticate(node, document, LOGS_EVENT, now)
     if rejection is not None:

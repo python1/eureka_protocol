@@ -129,6 +129,16 @@ DOMAIN_READ_QUERY = b"eureka/read/query/v1"
 # an assign *does*. A signature minted to look at the peer table must be
 # structurally unusable as a request to execute anything.
 DOMAIN_ASSIGN_QUERY = b"eureka/assign/query/v1"
+# The answer to one of those: what this node did, signed by the node that did
+# it. Its own tag, in the other direction from the query -- a responder signs
+# results and an initiator signs requests, and neither signature is usable as
+# the other. Without the separation a result harvested from this node could be
+# presented back to it as a request to run something, since both are a signed
+# dict of protocol fields; with it, the bytes differ before the key is ever
+# consulted. It is also what makes a result evidence: the peer keeps a
+# signature over what this node returned, in a domain nothing else in the
+# protocol can mint.
+DOMAIN_ASSIGN_RESULT = b"eureka/assign/result/v1"
 
 
 def domain_separated_bytes(domain: bytes, payload: dict) -> bytes:
@@ -448,6 +458,18 @@ class EurekaCrypto:
         return EurekaCrypto.verify_json(
             public_key_hex, signature_base64, payload,
             domain=DOMAIN_ASSIGN_QUERY,
+        )
+
+    def sign_assign_result(self, payload: dict) -> str:
+        """The responder's signature over the result of a task it ran."""
+        return self.sign_json(payload, domain=DOMAIN_ASSIGN_RESULT)
+
+    @staticmethod
+    def verify_assign_result(public_key_hex: str, signature_base64: str,
+                             payload: dict) -> bool:
+        return EurekaCrypto.verify_json(
+            public_key_hex, signature_base64, payload,
+            domain=DOMAIN_ASSIGN_RESULT,
         )
 
     def sign_audit_log(self, payload: dict) -> str:

@@ -8,9 +8,15 @@ an authenticated caller may run (its first caller on a request path), and a
 nonce making every request single-use, because replaying a read discloses what
 was already disclosed while replaying an assign would run the task again.
 
-The stub still executes nothing. What is under test is who can reach it.
+What is behind the gate is no longer a stub. Most of these tests still only
+care who can reach it, so the daemon fixture registers a trivial handler for
+the capabilities they use -- a node with no executor would refuse every one of
+them for the wrong reason, and the gate is what is under test here. The tests
+at the end of this file are the other half: a real capability, fetched over a
+real socket, through the whole gate.
 """
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -27,6 +33,15 @@ from eureka_protocol.src.eureka_daemon.assign import (
     rejected,
 )
 from eureka_protocol.src.eureka_daemon.crypto import EurekaCrypto
+from eureka_protocol.src.eureka_daemon.handlers import (
+    AddressPolicy,
+    HandlerRegistry,
+    REASON_ADDRESS_NOT_ALLOWED,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    WebRetrieval,
+    completed,
+)
 from eureka_protocol.src.eureka_daemon.node import (
     EurekaNode,
     REASON_MALFORMED,
@@ -37,15 +52,47 @@ from eureka_protocol.src.eureka_daemon.node import (
 from eureka_protocol.src.eureka_daemon.reads import LOGS_EVENT, build_read_query, answer_logs
 from eureka_protocol.src.eureka_daemon.signed_request import PROTOCOL
 from eureka_protocol.src.eureka_daemon.trust import TrustList
+# The origin server these tests fetch from is the one test_handlers.py builds:
+# one real HTTP server, defined once, rather than two that can drift apart.
+from eureka_protocol.tests.test_handlers import origin   # noqa: F401  (fixture)
 
 
 def run(coro):
     return asyncio.run(coro)
 
 
-def make_node(node_id, capabilities=("code-exec", "data-analysis")):
+async def _trivial(payload, context):
+    """
+    Stands in for whatever a capability does, so these tests can be about the
+    gate rather than about any particular work. It returns the string the old
+    stub returned, which is why the assertions below still read the way they
+    did when the stub was the only thing there was.
+    """
+    return completed(f"Processed by {context.node_id}")
+
+
+def stub_registry(capabilities):
+    """A registry that can run exactly what the node advertises."""
+    registry = HandlerRegistry()
+    for capability in capabilities:
+        registry.register(capability, _trivial)
+    return registry
+
+
+def make_node(node_id, capabilities=("code-exec", "data-analysis"),
+              handlers=None):
+    """
+    A node with an executor for what it advertises.
+
+    Every node here gets one now: a node built without a registry cannot
+    execute at all, so a gate test on one would pass through every gate and
+    then be refused by the empty executor -- green for the wrong reason.
+    """
+    capabilities = list(capabilities)
     return EurekaNode(node_id=node_id, crypto_engine=EurekaCrypto(),
-                      capabilities=list(capabilities), trust_list=TrustList())
+                      capabilities=capabilities, trust_list=TrustList(),
+                      handlers=handlers if handlers is not None
+                      else stub_registry(capabilities))
 
 
 def handshaked(caller, daemon, grants=()):
@@ -130,13 +177,15 @@ def test_refusal_is_built_from_the_reason_alone(daemon, granted):
 # Authorization: authenticated is not authorized
 # ---------------------------------------------------------------------------
 
-def test_authenticated_peer_with_the_grant_reaches_the_stub(daemon, granted):
+def test_authenticated_peer_with_the_grant_reaches_its_handler(daemon, granted):
     answer = run(answer_assign(daemon, build_assign_query(
         granted, "code-exec", "compute", {"n": 1})))
 
     assert answer["reason"] == REASON_OK
-    # The stub's behaviour is unchanged: canned result, completed status.
+    # Dispatched to the handler registered for that capability, and its
+    # outcome is what comes back.
     assert answer["result"]["status"] == "completed"
+    assert answer["result"]["capability"] == "code-exec"
     assert answer["result"]["output"] == f"Processed by {daemon.node_id}"
     # And the audit entry is attributed to the requesting peer.
     entries = audit_entries_for(daemon, granted.node_id)
@@ -409,3 +458,292 @@ def test_wsl_hermes_flow_is_untouched(daemon):
     assert manifest["node_id"] == daemon.node_id
     assert result["authenticated"] is True
     assert result["mutual"] is True
+
+
+# ---------------------------------------------------------------------------
+# The executor behind the gate: one real capability, end to end
+#
+# Everything above this line is about who may ask. These are about what
+# happens when the answer is yes -- a real fetch over a real socket, through
+# the whole gate, from a peer holding exactly the grant CT 101's trust file
+# gives wsl-hermes.
+# ---------------------------------------------------------------------------
+
+def web_daemon():
+    """
+    A daemon advertising web-retrieval, able to reach the loopback origin.
+
+    The policy is the one difference from the deployed node: `allow_loopback`
+    so the test's own origin server is reachable. Everything else -- the gate,
+    the registry, the handler, the signature -- is what runs on CT 101.
+    """
+    registry = HandlerRegistry().register(
+        "web-retrieval",
+        WebRetrieval(policy=AddressPolicy(allow_loopback=True),
+                     timeout_seconds=5.0),
+    )
+    return make_node("node_web", capabilities=["web-retrieval"],
+                     handlers=registry)
+
+
+def fetch_answer(daemon, peer, url, task_name="fetch"):
+    return run(answer_assign(daemon, build_assign_query(
+        peer, "web-retrieval", task_name, {"url": url})))
+
+
+def test_a_granted_peer_gets_a_real_fetched_result(origin):
+    """
+    The acceptance criterion this whole change exists for: a peer holding
+    web-retrieval asks for a URL and gets the page back, not a canned string.
+    """
+    daemon = web_daemon()
+    peer = handshaked(make_node("node_fetcher", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+
+    answer = fetch_answer(daemon, peer, f"{origin}/hello")
+    result = answer["result"]
+
+    assert answer["reason"] == REASON_OK
+    assert result["status"] == STATUS_COMPLETED
+    assert result["capability"] == "web-retrieval"
+    assert result["output"]["http_status"] == 200
+    assert result["output"]["body"] == "hello from the origin"
+    assert result["output"]["content_type"].startswith("text/plain")
+    assert result["output"]["truncated"] is False
+
+
+def test_the_result_is_signed_in_the_result_domain_and_no_other(origin):
+    """
+    The responder signs what it did, in a domain nothing else can mint. A
+    result signature that verified as an assign query would be a result this
+    node could be handed back as a request to run something.
+    """
+    daemon = web_daemon()
+    peer = handshaked(make_node("node_verifier", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+
+    answer = fetch_answer(daemon, peer, f"{origin}/hello")
+    pub, signature, result = (daemon.public_key_hex,
+                              answer["result_signature"], answer["result"])
+
+    assert EurekaCrypto.verify_assign_result(pub, signature, result) is True
+    assert EurekaCrypto.verify_assign_query(pub, signature, result) is False
+    assert EurekaCrypto.verify_read_query(pub, signature, result) is False
+    assert EurekaCrypto.verify_discovery_query(pub, signature, result) is False
+    assert EurekaCrypto.verify_handshake(pub, signature, result) is False
+    assert EurekaCrypto.verify_handshake_offer(pub, signature, result) is False
+    assert EurekaCrypto.verify_handshake_confirm(pub, signature, result) is False
+    assert EurekaCrypto.verify_audit_log(pub, signature, result) is False
+
+
+def test_a_result_signature_does_not_carry_to_another_request(origin):
+    """
+    The nonce is in the signed payload, so a result is evidence about one
+    request and not about the next one that looks like it.
+    """
+    daemon = web_daemon()
+    peer = handshaked(make_node("node_binding", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+
+    first = fetch_answer(daemon, peer, f"{origin}/hello", "first")
+    second = fetch_answer(daemon, peer, f"{origin}/hello", "second")
+
+    assert first["result"]["nonce"] != second["result"]["nonce"]
+    assert EurekaCrypto.verify_assign_result(
+        daemon.public_key_hex, first["result_signature"],
+        second["result"]) is False
+    # And the requester is inside the signature too, so a result cannot be
+    # replayed to a peer it was not produced for.
+    lifted = dict(first["result"], requester_id="node_somebody_else")
+    assert EurekaCrypto.verify_assign_result(
+        daemon.public_key_hex, first["result_signature"], lifted) is False
+
+
+def test_a_refusal_carries_no_signature_to_tell_refusals_apart(daemon, ungranted):
+    """The refusal stays the bare constant it has always been."""
+    answer = run(answer_assign(daemon, build_assign_query(
+        ungranted, "code-exec", "denied")))
+
+    assert "result_signature" not in answer
+    assert answer == rejected(REASON_NOT_PERMITTED)
+
+
+def test_a_peer_granted_web_retrieval_cannot_invoke_an_unregistered_capability(origin):
+    """
+    The grant is for one capability, and the node advertises one capability.
+    Asking for anything else is refused by the gate -- before the registry is
+    consulted at all, which is why the refusal cannot say whether a handler
+    for it exists.
+    """
+    daemon = web_daemon()
+    peer = handshaked(make_node("node_overreach", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+    # Granted in the trust file as well, to prove it is the advertised list
+    # doing the refusing rather than a missing grant.
+    daemon.trust_list._grants[peer.public_key_hex.lower()] = frozenset(
+        {"web-retrieval", "code-exec"})
+
+    answer = run(answer_assign(daemon, build_assign_query(
+        peer, "code-exec", "run_something")))
+
+    assert answer == rejected(REASON_NOT_PERMITTED)
+    assert all(e["payload"]["outcome"] != "completed"
+               for e in daemon.event_log)
+
+
+def test_a_handler_refusal_is_not_a_gate_refusal(origin):
+    """
+    A blocked URL is work this node accepted and declined to do, which is a
+    different fact from a peer that may not ask. The gate says authenticated,
+    the result says address_not_allowed, and the caller can tell which of its
+    problems it has.
+    """
+    daemon = web_daemon()
+    peer = handshaked(make_node("node_ssrf", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+
+    answer = fetch_answer(daemon, peer, "http://169.254.169.254/latest/meta-data/")
+
+    assert answer["reason"] == REASON_OK
+    assert answer["result"]["status"] == STATUS_FAILED
+    assert answer["result"]["reason"] == REASON_ADDRESS_NOT_ALLOWED
+    assert answer["result"]["output"] is None
+    # Still signed: the responder is on the record for having refused it.
+    assert EurekaCrypto.verify_assign_result(
+        daemon.public_key_hex, answer["result_signature"],
+        answer["result"]) is True
+
+
+def test_the_daemons_own_api_cannot_be_fetched_through_a_grant():
+    """
+    The SSRF case that matters here specifically: a peer using its grant to
+    make this node read its own endpoints from inside. Every address the
+    daemon answers on is loopback or private, so the default policy is what
+    refuses it -- no special case for "me".
+    """
+    registry = HandlerRegistry().register("web-retrieval", WebRetrieval())
+    daemon = make_node("node_selfreach", capabilities=["web-retrieval"],
+                       handlers=registry)
+    peer = handshaked(make_node("node_curious", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+
+    for url in ("http://127.0.0.1:8443/v1/peers",
+                "http://192.168.1.180:8443/v1/manifest",
+                "http://localhost:8000/v1/logs"):
+        answer = fetch_answer(daemon, peer, url)
+        assert answer["result"]["reason"] == REASON_ADDRESS_NOT_ALLOWED
+
+
+def test_the_audit_log_records_peer_and_outcome_but_never_the_body(origin):
+    """
+    The log is the record of what this node did, and it is readable back by
+    the peer it names. What it must never become is a copy of what this node
+    fetched: that would republish somebody else's page under this node's
+    signature, for as long as the log is kept.
+    """
+    daemon = web_daemon()
+    peer = handshaked(make_node("node_audited", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+
+    fetched = fetch_answer(daemon, peer, f"{origin}/hello", "fetch_a_page")
+    refused = fetch_answer(daemon, peer, "http://10.0.0.9/secrets", "fetch_private")
+
+    entries = audit_entries_for(daemon, peer.node_id)
+    assert [e["payload"]["capability"] for e in entries] == ["web-retrieval"] * 2
+    assert [e["payload"]["outcome"] for e in entries] == [
+        "completed", REASON_ADDRESS_NOT_ALLOWED]
+    assert [e["payload"]["task_summary"] for e in entries] == [
+        "fetch_a_page", "fetch_private"]
+
+    # The body came back to the caller and went nowhere near the log.
+    body = fetched["result"]["output"]["body"]
+    assert body == "hello from the origin"
+    log_text = str(daemon.event_log)
+    assert body not in log_text
+    assert "origin" not in log_text
+    # Nor does the URL the peer asked for: it is the peer's business and it is
+    # not what the entry is a record of.
+    assert "10.0.0.9" not in log_text
+    assert refused["result"]["status"] == STATUS_FAILED
+
+
+def test_the_peer_can_read_its_own_fetch_history_back(origin):
+    """The entries are attributed, so /v1/logs discloses them to that peer."""
+    daemon = web_daemon()
+    peer = handshaked(make_node("node_reader", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+    fetch_answer(daemon, peer, f"{origin}/hello", "my_fetch")
+
+    own = answer_logs(daemon, build_read_query(peer, LOGS_EVENT))
+    assert [e["payload"]["task_summary"] for e in own["logs"]] == ["my_fetch"]
+    assert own["logs"][0]["payload"]["outcome"] == "completed"
+    assert "hello from the origin" not in str(own)
+
+
+def test_concurrent_assigns_do_not_interfere_and_do_not_stall_a_handshake(origin):
+    """
+    Three things at once over the real transport: a slow fetch, a fast one,
+    and a handshake from a peer that has nothing to do with either.
+
+    The handshake must complete while the slow fetch is still in flight. If
+    dispatch blocked the event loop -- a synchronous fetch, a resolver called
+    on the loop thread -- the handshake would queue behind it and finish after
+    it, which is what this asserts it does not do.
+    """
+    daemon = web_daemon()
+    slow_peer = handshaked(make_node("node_slow", capabilities=[]), daemon,
+                           grants=["web-retrieval"])
+    fast_peer = handshaked(make_node("node_fast", capabilities=[]), daemon,
+                           grants=["web-retrieval"])
+    newcomer = make_node("node_newcomer", capabilities=[])
+    daemon.trust_list.add(newcomer.node_id, newcomer.public_key_hex)
+    newcomer.trust_list.add(daemon.node_id, daemon.public_key_hex)
+
+    app = create_app(daemon)
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://daemon",
+                                     timeout=30) as http:
+            from eureka_protocol.src.eureka_daemon.client import handshake_over_http
+
+            started = time.monotonic()
+            timings = {}
+
+            async def post(peer, url, label):
+                document = build_assign_query(peer, "web-retrieval", label,
+                                              {"url": url})
+                answer = (await http.post("/v1/assign", json=document)).json()
+                timings[label] = time.monotonic() - started
+                return answer
+
+            async def shake():
+                result = await handshake_over_http(newcomer,
+                                                   peer_id=daemon.node_id,
+                                                   http=http)
+                timings["handshake"] = time.monotonic() - started
+                return result
+
+            slow, fast, shaken = await asyncio.gather(
+                post(slow_peer, f"{origin}/delay?ms=800", "slow"),
+                post(fast_peer, f"{origin}/hello", "fast"),
+                shake(),
+            )
+            return slow, fast, shaken, timings
+
+    slow, fast, shaken, timings = run(go())
+
+    # Each request got its own answer, not the other one's.
+    assert slow["result"]["output"]["body"] == "worth the wait"
+    assert fast["result"]["output"]["body"] == "hello from the origin"
+    assert slow["result"]["requester_id"] == "node_slow"
+    assert fast["result"]["requester_id"] == "node_fast"
+    assert slow["result"]["task_name"] == "slow"
+
+    # The handshake did not wait for the slow fetch, and neither did the fast
+    # one -- both finished while it was still running.
+    assert shaken["authenticated"] is True
+    assert shaken["mutual"] is True
+    assert timings["handshake"] < timings["slow"]
+    assert timings["fast"] < timings["slow"]

@@ -8,6 +8,14 @@ from enum import Enum
 from typing import Dict, List, Optional, Any, Set
 from .crypto import EurekaCrypto
 from .address_book import AddressBook
+from .handlers import (
+    HandlerContext,
+    HandlerRegistry,
+    REASON_NOT_IMPLEMENTED,
+    STATUS_COMPLETED,
+    default_registry,
+    failed as handler_failed,
+)
 from .trust import TrustError, TrustList
 
 # Default window a challenge stays valid for, in seconds. A response that
@@ -98,18 +106,46 @@ class EurekaNode:
     Man_ages identity, peer discovery, authentication, and task execution.
     """
     def __init__(self, node_id: Optional[str], crypto_engine: EurekaCrypto,
-                 capabilities: List[str],
+                 capabilities: Optional[List[str]] = None,
                  freshness_seconds: float = HANDSHAKE_FRESHNESS_SECONDS,
                  max_pending_challenges: int = MAX_PENDING_CHALLENGES,
                  max_seen_nonces: int = MAX_SEEN_NONCES,
                  trust_path: Optional[str] = None,
-                 trust_list: Optional[TrustList] = None):
+                 trust_list: Optional[TrustList] = None,
+                 handlers: Optional[HandlerRegistry] = None):
         self.crypto = crypto_async_wrapper(crypto_engine) if hasattr(self, 'crypto_async_wrapper') else crypto_engine
         # node_id=None means "name me after my key", so a node that reloads a
         # stored identity comes back under the same id instead of a fresh
         # random one. An explicit id is still honoured verbatim.
         self.node_id = node_id if node_id is not None else self.crypto.derive_node_id()
-        self.capabilities = capabilities
+
+        # What this node can be asked to do, and the code that does it.
+        #
+        # `handlers` is the executor. Given one, the advertised list is
+        # validated against it here and a capability with nothing registered
+        # to run it is a construction error -- which on the daemon path is a
+        # startup error, before a peer can be told yes by every gate and then
+        # handed nothing. Given no capabilities at all, the registry names
+        # them: a node that advertises exactly what it can run cannot drift
+        # from itself.
+        #
+        # `handlers=None` is a node with no executor -- every client in this
+        # codebase, and the throwaway nodes in demo.sh. It advertises whatever
+        # it was given and executes nothing: an assign that reaches it is
+        # refused with capability_not_implemented rather than dispatched. That
+        # is not a hole in the rule above, it is the other side of it, and it
+        # is why the daemon path always passes a registry.
+        self.handlers = handlers
+        if capabilities is None:
+            if handlers is None:
+                raise ValueError(
+                    "a node needs either a capability list or a handler "
+                    "registry to take one from"
+                )
+            capabilities = sorted(handlers.names())
+        elif handlers is not None:
+            handlers.validate_advertised(capabilities)
+        self.capabilities = list(capabilities)
         self.state = EurekaState.IDENTITY
         self.peers: Dict[str, Dict[str, Any]] = {}
         self.active_tasks: Dict[str, Any] = {}
@@ -172,18 +208,28 @@ class EurekaNode:
         }
 
     @classmethod
-    def with_persistent_identity(cls, capabilities: List[str],
+    def with_persistent_identity(cls, capabilities: Optional[List[str]] = None,
                                  identity_path: Optional[str] = None,
+                                 handlers: Optional[HandlerRegistry] = None,
                                  **kwargs) -> "EurekaNode":
         """
         Build a node backed by the on-disk identity, creating it on first run.
 
         This is the entry point a daemon should use: restart the process and
         the node keeps the same key and the same node_id.
+
+        Called with neither a capability list nor a registry it builds the
+        daemon's own executor and advertises exactly what that can run -- so
+        the deployed node's advertised list is derived from its code rather
+        than repeated next to it, where the two could disagree. Called with a
+        capability list and no registry it is a client: it advertises what it
+        was told and executes nothing, which is what demo.sh's nodes are.
         """
         crypto = EurekaCrypto.load_or_create(identity_path)
+        if capabilities is None and handlers is None:
+            handlers = default_registry()
         return cls(node_id=None, crypto_engine=crypto,
-                   capabilities=capabilities, **kwargs)
+                   capabilities=capabilities, handlers=handlers, **kwargs)
 
     @property
     def public_key_hex(self) -> str:
@@ -843,36 +889,79 @@ class EurekaNode:
         return mine
 
     async def assign(self, task_payload: Dict[str, Any],
-                     peer: Optional[str] = None) -> Dict[str, Any]:
+                     peer: Optional[str] = None,
+                     capability: Optional[str] = None,
+                     nonce: Optional[str] = None) -> Dict[str, Any]:
         """
-        Layer 4: Task negotiation and execution dispatch.
+        Layer 4: dispatch one authorized request to the code that runs it.
 
-        Still a stub: nothing is executed, and nothing will be until there is
-        a sandbox to execute it in. What changed is who can reach it -- the
-        endpoint in front of this now requires an authenticated peer holding a
-        capability grant -- and that `peer` carries the caller into the audit
-        entry, so the log records who a granted request came from.
+        This was the stub -- a half-second sleep and a canned string. The gate
+        in front of it was already real; what was missing was anything on the
+        other side. Now the named capability is looked up in this node's
+        registry and the handler runs, under the registry's deadline and
+        concurrency cap.
+
+        Every path returns a result. A handler that fails, times out, is
+        refused by its own policy, or raises something nobody predicted comes
+        back as a result with `status: "failed"` and a distinct reason, which
+        is the same shape a success has. Nothing raises out of here, because
+        the caller is a network endpoint and an exception there is a denial of
+        service with a traceback attached.
+
+        The returned dict is what gets signed in the assign-result domain, so
+        it carries the binding fields as well as the outcome: which capability
+        ran, for which peer, under which nonce. A result lifted off one
+        request and presented as the answer to another does not verify,
+        because the nonce it was signed over belongs to the first.
         """
         await self.transition_to(EurekaState.ASSIGN)
-        task_id = str(uuid.uuid4())
-        print(f"[NODE {self.node_id}] Dispatching task: {task_payload.get('task_name', 'unnamed')}")
-        
-        # Simulate task execution delay
-        await asyncio.sleep(0.5) 
-        
+        task_name = task_payload.get("task_name", "unnamed")
+        payload = task_payload.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        if capability is None:
+            asked = task_payload.get("capability")
+            capability = asked if isinstance(asked, str) else None
+
+        print(f"[NODE {self.node_id}] Dispatching task: {task_name} "
+              f"({capability or 'no capability'})")
+
+        context = HandlerContext(node_id=self.node_id,
+                                 capability=capability or "",
+                                 task_name=task_name, peer=peer)
+        if self.handlers is None:
+            # No executor was ever attached. The daemon path cannot reach
+            # this -- it is built with a registry and validated against it --
+            # so this is a client node being asked to run something.
+            outcome = handler_failed(REASON_NOT_IMPLEMENTED)
+        else:
+            outcome = await self.handlers.run(capability, payload, context)
+
         result = {
-            "task_id": task_id,
-            "status": "completed",
-            "output": f"Processed by {self.node_id}",
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "protocol": CHALLENGE_PROTOCOL,
+            "event": "assign_result",
+            "task_id": str(uuid.uuid4()),
+            "status": outcome.status,
+            "reason": outcome.reason,
+            "capability": capability,
+            "task_name": task_name,
+            "responder_id": self.node_id,
+            "requester_id": peer,
+            "nonce": nonce,
+            "output": outcome.output,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        
-        # Trigger the Log layer immediately after assignment completion
-        await self.log_event(task_payload, result, peer=peer)
+
+        # Trigger the Log layer immediately after assignment completion. The
+        # entry is built from scalars picked out by name -- never from the
+        # result wholesale -- which is what keeps `output` out of it.
+        await self.log_event(task_payload, result, peer=peer,
+                             capability=capability)
         return result
 
     async def log_event(self, task_info: Dict[str, Any], result_info: Dict[str, Any],
-                        peer: Optional[str] = None):
+                        peer: Optional[str] = None,
+                        capability: Optional[str] = None):
         """
         Layer 5: Cryptographically signed audit trail generation.
 
@@ -886,9 +975,29 @@ class EurekaNode:
         from the assign endpoint are attributed: a granted request logs under
         the peer that made it, and so does a refused one, because "we said no
         to X" is part of the record of what this node did about X.
+
+        **What an entry must never carry is the work itself.** For
+        web-retrieval the result holds somebody else's web page, and a page
+        copied in here is a page published to every reader of this log, kept
+        for as long as the log is kept, and signed by this node as if it were
+        its own record. So the entry is assembled from named scalars -- who
+        asked, which capability, what came of it -- and never from the result
+        dict wholesale. `output` is not read here, and adding a line that
+        reads it is the mistake this paragraph exists to prevent.
+
+        `outcome` is the new field: "completed" when the work ran, and
+        otherwise the distinct reason it did not -- a refusal from the gate, a
+        timeout, an address the fetch policy would not touch. "It ran" and
+        "it was refused, and here is which refusal" are different records, and
+        a log that flattens them cannot answer the question an operator
+        actually has.
         """
         await self.transition_to(EurekaState.LOG)
-        
+
+        status = result_info.get("status", "unknown")
+        reason = result_info.get("reason")
+        outcome = status if status == STATUS_COMPLETED else (reason or status)
+
         log_entry = {
             "protocol": "eureka/1.0",
             "event": "task_execution_complete",
@@ -896,8 +1005,10 @@ class EurekaNode:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "initiator_node": self.node_id,
             "peer": peer,
+            "capability": capability,
             "task_summary": task_info.get("task_name", "unknown"),
-            "result": result_info["status"]
+            "result": status,
+            "outcome": outcome,
         }
         
         # Audit-log domain: this signature is structurally unusable as a
