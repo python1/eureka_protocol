@@ -1,23 +1,39 @@
 # Eureka Protocol — working two-node deployment
 
 First successful cross-machine mutual handshake: 2026-08-24, commit 976c1f1.
+Responder moved from CT 102 to its own container, CT 101, on 2026-08-28 —
+see "Moving the responder to another host".
 
 ## Nodes
 
 | Node | Host | node_id | public key |
 |---|---|---|---|
-| ct102-antiochus | CT 102 (192.168.1.174) | node_a2ed8dc7 | a718592fde751a92db31fa27ee1e88efbd6c1134753fd9a5d92b08b89d118fd1 |
+| eureka-node | CT 101 (192.168.1.180), Debian 13 unprivileged | node_a2ed8dc7 | a718592fde751a92db31fa27ee1e88efbd6c1134753fd9a5d92b08b89d118fd1 |
 | wsl-hermes | Alienware WSL2 (Ubuntu 24.04) | node_ef0a1f59 | bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae |
 
-Private keys live in each host's identity file, mode 0600, never copied.
+`eureka-node` was `ct102-antiochus` until the move. Only the label and the
+address changed: the key is the same bytes, so `node_a2ed8dc7` and the pinned
+public key are unchanged and no peer was reprovisioned. Names in a trust file
+are human labels — lookups are by key — so a peer that renames its entry, or
+does not, is unaffected either way.
+
+Private keys live in each host's identity file, mode 0600. A key is copied only
+to move a node between hosts, over a direct link between the operator's own
+machines, and the source copy is left in place rather than moved.
 
 ## Paths
 
-CT 102: repo /root/.openclaw/workspace/eureka_protocol (source of truth),
-deployed runtime /opt/eureka, identity /var/lib/eureka/identity.key,
-trust /var/lib/eureka/trust.json, all owned by the `eureka` system user.
-The repo venv /root/eureka_venv is for development and the test suite; the
-service runs /opt/eureka/venv.
+CT 101 (the live responder): repo /root/eureka_protocol, deployed runtime
+/opt/eureka, identity /var/lib/eureka/identity.key, trust
+/var/lib/eureka/trust.json, state owned by the `eureka` system user.
+The service runs /opt/eureka/venv; there is no separate development venv on
+this host, so the test suite runs against /opt/eureka/venv too.
+
+CT 102 (192.168.1.174) still holds the origin repo at
+/root/.openclaw/workspace/eureka_protocol and its development venv
+/root/eureka_venv. Its daemon is stopped and disabled as of 2026-08-28 and its
+/var/lib/eureka is left intact — that copy of the identity is now a backup, and
+two hosts must never serve this identity at once.
 
 WSL: repo ~/eureka/eureka_protocol, venv ~/eureka/venv,
 identity ~/.eureka/identity.key, trust ~/.eureka/trust.json
@@ -95,7 +111,7 @@ Grants carry across. The old key is revoked, so it cannot be re-added later.
 
 ## Transport encryption (TLS)
 
-**CT 102 serves TLS on 8443 and nothing else. Plaintext is gone.**
+**CT 101 serves TLS on 8443 and nothing else. Plaintext is gone.**
 
     /opt/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
         --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls
@@ -134,11 +150,11 @@ client pins.
 
 `require_tls` governs whether a *plain* connection is allowed at all; a TLS
 connection is pinned either way. `demo.sh` sets it for `https://` URLs. Now
-that CT 102 refuses plaintext outright, a client that omits it fails at the
+that CT 101 refuses plaintext outright, a client that omits it fails at the
 transport rather than at the check -- so the flag is a belt to the transport's
 braces, not the thing keeping the channel encrypted:
 
-    await handshake_over_http(node, "https://192.168.1.174:8443", require_tls=True)
+    await handshake_over_http(node, "https://192.168.1.180:8443", require_tls=True)
 
 What is checked, on every response and not just the first:
 
@@ -192,9 +208,9 @@ the new key out of band. There is deliberately no signed "here is my new key"
 message that peers act on by themselves: a stolen key could use it to rotate
 the thief into permanent trust, which is trust-on-first-use wearing a hat.
 
-## Start the responder (CT 102)
+## Start the responder (CT 101)
 
-CT 102 runs the daemon under systemd as `eureka-daemon.service`, enabled at
+CT 101 runs the daemon under systemd as `eureka-daemon.service`, enabled at
 boot. It is no longer started by hand -- a daemon living in an SSH session dies
 with the session, and one that inherits its identity from a shell comes back as
 a different node the day someone forgets to export a variable.
@@ -205,8 +221,8 @@ a different node the day someone forgets to export a variable.
 
 Check both listeners:
 
-    curl -sk https://192.168.1.174:8443/v1/manifest    # TLS (the only listener)
-    curl -s  http://192.168.1.174:8000/v1/manifest     # refused: nothing there
+    curl -sk https://192.168.1.180:8443/v1/manifest    # TLS (the only listener)
+    curl -s  http://192.168.1.180:8000/v1/manifest     # refused: nothing there
 
 That manifest carries `node_id` and `runtime` and nothing else. It is the only
 endpoint that answers an unauthenticated caller, and it stays that way because
@@ -219,8 +235,16 @@ the certificate is self-signed and identity lives in the key inside it, not in
 any chain. A real peer pins that key against its trust file. To check the
 served key by hand:
 
-    openssl s_client -connect 192.168.1.174:8443 </dev/null 2>/dev/null \
+    openssl s_client -connect 192.168.1.180:8443 </dev/null 2>/dev/null \
       | openssl x509 -pubkey -noout
+
+To compare it against the pinned key as raw hex rather than by eye -- the
+ed25519 public key is the last 32 bytes of the DER encoding:
+
+    openssl s_client -connect 192.168.1.180:8443 </dev/null 2>/dev/null \
+      | openssl x509 -pubkey -noout \
+      | openssl pkey -pubin -outform DER \
+      | tail -c 32 | od -An -tx1 | tr -d ' \n'; echo
 
 The unit is version controlled at **`deploy/eureka-daemon.service`**, which is
 the canonical copy; `/etc/systemd/system/eureka-daemon.service` is an install
@@ -229,7 +253,7 @@ the journal under the identifier `eureka-daemon`.
 
 Install, or reinstall after editing:
 
-    cd /root/.openclaw/workspace/eureka_protocol
+    cd /root/eureka_protocol
     install -m 0644 deploy/eureka-daemon.service /etc/systemd/system/
     systemctl daemon-reload
     systemctl enable --now eureka-daemon
@@ -244,6 +268,35 @@ A `systemctl edit eureka-daemon` drop-in is the exception: it lands in
 `/etc/systemd/system/eureka-daemon.service.d/` and deliberately survives a
 reinstall, which is what you want for a host-specific tweak. `systemctl cat
 eureka-daemon` shows the unit and every drop-in together.
+
+### journald in an unprivileged container
+
+CT 101 carries exactly one drop-in, and it is host-specific in precisely the
+way that rule is for. On a fresh unprivileged LXC, `systemd-journald` fails
+with **`status=243/CREDENTIALS`** — the credentials machinery it is built with
+is not available to the container — and until it is fixed, `journalctl` has
+nothing. The daemon still runs and still logs; the logs go nowhere anyone can
+read them, which is worse than a visible failure, because every verification
+step in this document that reads the journal silently proves nothing:
+
+    mkdir -p /var/log/journal
+    systemctl edit systemd-journald      # clear the inherited settings:
+        [Service]
+        LoadCredential=
+        ImportCredential=
+    systemctl restart systemd-journald
+
+Assigning the empty string resets a list the vendor unit populated; dropping
+the line entirely would inherit it again. `/var/log/journal` makes the journal
+persistent, so it also survives the reboot that boot-survival is tested with.
+
+Confirm it took before trusting anything the journal says:
+
+    systemctl is-active systemd-journald
+    journalctl -u eureka-daemon -b | head
+
+The startup lines name the node and the public key peers pin. If the journal
+is empty, the daemon is not the thing to debug.
 
 To run it by hand anyway -- debugging, or a second node on another port -- stop
 the service first so the port is free:
@@ -306,16 +359,22 @@ stops matching, so deleting it costs one restart. Deleting the directory
 *above* it destroys the node.
 
 `node_id` did not change, because it derives from the key and the key is the
-same bytes -- verified after the move, not assumed, and no peer needed
-reprovisioning.
+same bytes -- verified after each move, not assumed, and no peer needed
+reprovisioning. That has now held twice: once dropping from root to the
+`eureka` user on CT 102, and once moving hosts to CT 101.
 
 **The runtime had to move too, and that is the part the old plan missed.**
-`/root` is mode 0700, so a non-root service cannot traverse it -- and the
-interpreter (`/root/eureka_venv`) and the code (`/root/.openclaw/workspace`)
+On CT 102 `/root` is mode 0700, so a non-root service cannot traverse it -- and
+the interpreter (`/root/eureka_venv`) and the code (`/root/.openclaw/workspace`)
 both lived under it. Opening `/root` up was the obvious fix and is the wrong
 one: `/root/.openclaw` beneath it is 0755, so making `/root` traversable would
 hand the entire agent workspace to this service account and undo most of the
 point of dropping privileges.
+
+The same split is kept on CT 101 even though there is no agent workspace there
+to protect: the repo lives at `/root/eureka_protocol`, which the service still
+cannot see, and only `/opt/eureka` is readable to it. A service that cannot
+reach the repo cannot be surprised by an uncommitted edit in it.
 
 So the runtime is deployed to `/opt/eureka`, root-owned and world-readable,
 which the service reads and cannot write:
@@ -324,21 +383,30 @@ which the service reads and cannot write:
     /opt/eureka/eureka_protocol    the code the daemon runs
     /opt/eureka/DEPLOYED_COMMIT    which commit that is
 
-The repo under `/root/.openclaw/workspace` stays the source of truth. Refresh
-the deployment from it the same way the unit is installed -- copy, then check:
+The `macbook` git remote is the shared source of truth across hosts; on CT 101
+the working copy is `/root/eureka_protocol`. Refresh the deployment from it the
+same way the unit is installed -- copy, then check:
 
     rsync -a --delete --exclude '.git' --exclude '__pycache__' \
       --exclude '.pytest_cache' \
-      /root/.openclaw/workspace/eureka_protocol/ /opt/eureka/eureka_protocol/
-    git -C /root/.openclaw/workspace/eureka_protocol rev-parse HEAD \
+      /root/eureka_protocol/ /opt/eureka/eureka_protocol/
+    git -C /root/eureka_protocol rev-parse HEAD \
       > /opt/eureka/DEPLOYED_COMMIT
     chown -R root:root /opt/eureka && chmod -R u=rwX,go=rX /opt/eureka
     systemctl restart eureka-daemon
 
+`DEPLOYED_COMMIT` is written from the repo's HEAD, so it is only honest if the
+rsync and the `rev-parse` describe the same tree: refresh with a dirty working
+copy and the file names a commit the deployed code does not match. `git status
+--short` before, or accept that the record is decoration.
+
 The venv carries a `.pth` naming the directory the package is imported from.
-In `/opt/eureka/venv` it says `/opt/eureka`; the one under `/root` still says
-`/root/.openclaw/workspace`. Copying a venv without fixing that gives an
-interpreter that silently imports the *other* tree.
+In `/opt/eureka/venv` it says `/opt/eureka`; CT 102's development venv under
+`/root` still says `/root/.openclaw/workspace`. Copying a venv without fixing
+that gives an interpreter that silently imports the *other* tree -- so a venv
+built on a new host gets the `.pth` written explicitly:
+
+    echo /opt/eureka > /opt/eureka/venv/lib/python3.13/site-packages/eureka.pth
 
 Because nothing the service needs lives under `/root` any more,
 `ProtectHome=read-only` became **`ProtectHome=yes`**: `/root`, `/home` and
@@ -352,13 +420,73 @@ when the file it is pointed at does not exist, so a typo in
 node comes back under a node_id no peer trusts. They are set explicitly in the
 unit, and they are the first thing to check if `node_id` ever changes.
 
+## Moving the responder to another host
+
+Done on 2026-08-28, CT 102 -> CT 101, at commit 3854f00. The node kept
+`node_a2ed8dc7` and the WSL peer's trust file was not touched — only the
+address it dials.
+
+**A move is not a rotation.** Rotation mints a new key and every peer must be
+reprovisioned out of band; a move carries the same key to a new host and no
+peer notices. That is the whole reason the identity is copied rather than
+regenerated, and it is why the copy must be verified byte-for-byte instead of
+assumed: a key that arrives subtly different does not fail loudly, it comes
+back as a stranger that nobody trusts.
+
+The order that keeps the mesh up:
+
+1. **Stage the payload.** On the old host, build a git bundle of the deployed
+   commit and a `pip freeze` of the *service* venv, and copy the identity and
+   trust files. Checksum all four; carry the checksums with them.
+2. **Transfer between your own machines only.** CT 102 has no route to CT 101,
+   so the payload went CT 102 -> MacBook -> CT 101 over existing SSH key auth,
+   `umask 077` at every hop, and was deleted from the intermediate host as soon
+   as it landed. Never stage key material anywhere a third party stores it.
+3. **Build the new host and verify the identity before creating the service.**
+   Package deps, the `eureka` system user, clone from the bundle, venv from the
+   freeze, `/opt/eureka` laid out with the `.pth` written explicitly, then
+   `/var/lib/eureka` at 0700 with both files 0600. Confirm the checksums match
+   the old host, then derive the node_id offline, as the service user:
+
+        cd /opt/eureka
+        runuser -u eureka -- /opt/eureka/venv/bin/python -c "
+        from eureka_protocol.src.eureka_daemon.crypto import EurekaCrypto
+        c = EurekaCrypto.load('/var/lib/eureka/identity.key')
+        print(c.derive_node_id()); print(c.get_public_key_hex())
+        "
+
+   `EurekaCrypto.load` refuses a missing file, where the daemon's
+   `load_or_create` would mint a new identity and look healthy doing it — so
+   this is the check, and it belongs *before* a service exists to be started.
+   Run the test suite here too; a node that cannot pass its own tests should
+   not be handed an identity.
+4. **Start it and verify locally.** Service active, manifest carrying the right
+   node_id, plaintext refused, the served certificate's key equal to the pinned
+   key, ownership and modes right, identity unchanged across a restart *and*
+   across a reboot — `enabled` is a claim, a reboot is the evidence.
+5. **Cut the peer over and prove it.** Point the peer at the new address with
+   no change to its trust file, and require the full `demo.sh` contrast, not
+   just a green handshake. Confirm on the responder from the journal.
+6. **Only then stop the old daemon.** `systemctl disable --now eureka-daemon`,
+   and confirm the old port is refused.
+
+**Both daemons must never serve this identity at once.** Two hosts answering as
+`node_a2ed8dc7` keep separate replay tables and separate peer tables, so a
+nonce spent against one is still unspent against the other — the same reason
+the TLS and plaintext listeners share a process. Overlap is bounded to the
+verification window in step 5, when the new host is running but no peer has
+been pointed at it yet.
+
+The old host's `/var/lib/eureka` is left intact and becomes the backup copy of
+the identity. It is dead weight only until the day the new host's disk fails.
+
 ## Run the handshake (WSL initiates)
 
 `demo.sh` in this repo is the end-to-end check. It is version controlled, so
 both hosts run the same one:
 
     cd ~/eureka/eureka_protocol
-    ./demo.sh                                # TLS to CT 102 on 8443
+    ./demo.sh                                # TLS to CT 101 on 8443
 
 It runs the same exchange twice, and **the contrast is the point**:
 
@@ -386,8 +514,16 @@ longer an open GET (see below):
 
     journalctl -u eureka-daemon | grep "Handshake established"
 
-It takes a URL if you need a different peer or a plaintext one, though CT 102
-no longer serves plaintext: `./demo.sh http://host:port`.
+It takes a URL if you need a different peer or a plaintext one, though CT 101
+no longer serves plaintext: `./demo.sh http://host:port`. Passing the address
+explicitly is also how a host with a stale checkout gets pointed at a moved
+responder without editing anything.
+
+**A run that reports only the trusted scenario is a stale checkout, not a
+passing check.** The untrusted case was added in `0a91e05`; before it,
+`demo.sh` was 75 lines and ran one scenario. If the second block is missing,
+the peer is behind -- `git -C ~/eureka/eureka_protocol log --oneline -1` says
+how far -- and the run proves reachability only.
 
 Nothing has to be passed to make TLS work. An `https://` URL builds a client
 that **pins** the peer's key against the trust file instead of chaining to a
@@ -398,8 +534,10 @@ that, something is constructing its own client; the fix is
 along with the chain and leaves the connection unauthenticated.
 
 `demo.sh` picks its interpreter from `$EUREKA_PYTHON`, then `../venv`, then
-CT 102's venv -- and checks each candidate can actually import the
+CT 102's development venv -- and checks each candidate can actually import the
 dependencies, because more than one venv sits next to this repo on some hosts.
+On CT 101 neither fallback exists, so run it with
+`EUREKA_PYTHON=/opt/eureka/venv/bin/python`.
 
 ## Reading the peer table and the audit log
 
@@ -451,8 +589,15 @@ peers from the table it checks against.
   loader refuses group/world-readable key files.
 - SSH root password login to CT 102 is refused (OpenSSH default
   prohibit-password). Use pct exec from the Proxmox host, or set up a key.
-- Run from the parent of eureka_protocol so the package resolves. On CT 102 a
-  .pth in the venv handles this; on WSL use sys.path.insert or cd ~/eureka.
+- CT 101 takes key auth from the MacBook. CT 102 has no SSH access to CT 101,
+  which is why the move went CT 102 -> MacBook -> CT 101 rather than directly.
+- Run from the parent of eureka_protocol so the package resolves. On CT 101 and
+  CT 102 a .pth in the venv handles this; on WSL use sys.path.insert or
+  cd ~/eureka.
+- A fresh unprivileged LXC has no working journald until the credentials
+  drop-in is applied (status=243/CREDENTIALS). See "journald in an
+  unprivileged container" -- until then every journal check here reads empty
+  and proves nothing.
 
 ## Dispatching a task (/v1/assign)
 

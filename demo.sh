@@ -12,17 +12,19 @@
 # anything was checked; it is only meaningful next to an identical exchange
 # that gets refused for the one reason that should refuse it.
 #
-# Defaults to CT 102's TLS listener. Over https the peer's certificate is
-# pinned against the trust file -- there is no certificate authority anywhere
-# in this protocol, so there is nothing to chain to and nothing to install.
+# Defaults to CT 101's TLS listener -- the responder moved there from CT 102
+# (192.168.1.174) on 2026-08-28 keeping the same identity. Over https the
+# peer's certificate is pinned against the trust file -- there is no
+# certificate authority anywhere in this protocol, so there is nothing to
+# chain to and nothing to install.
 #
-#   ./demo.sh                                 # TLS to CT 102
-#   ./demo.sh https://192.168.1.174:8443      # explicit peer
+#   ./demo.sh                                 # TLS to CT 101
+#   ./demo.sh https://192.168.1.180:8443      # explicit peer
 #
 # Exits non-zero unless BOTH scenarios came out as expected.
 set -euo pipefail
 
-PEER="${1:-https://192.168.1.174:8443}"
+PEER="${1:-https://192.168.1.180:8443}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARENT="$(cd "$HERE/.." && pwd)"
 
