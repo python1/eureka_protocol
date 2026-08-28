@@ -48,7 +48,7 @@ peers maps NAME -> an entry. Lookups are by key; the name is a human label.
       "peers": {
         "<name>": {
           "public_key": "<64 hex chars>",
-          "capabilities": ["fast-inference"]
+          "capabilities": ["web-retrieval"]
         }
       },
       "revoked": [
@@ -70,6 +70,83 @@ when it is still authenticating.
 
 A grant naming a capability the node does not advertise is also a load error,
 so a typo fails at startup instead of sitting in the file looking effective.
+
+**Which capabilities are legal is a property of the node reading the file, not
+of the peer named in it.** The daemon advertises exactly three, set where the
+node is constructed (`api.py`):
+
+    code-exec    web-retrieval    data-analysis
+
+Granting anything outside that set makes the trust file unloadable *for this
+node*, and the daemon refuses to start rather than run without the allowlist it
+was told to enforce -- five attempts, then `failed`. Note that `demo.sh` builds
+its client node with `capabilities=["fast-inference"]`, which is that node's own
+advertised set and has nothing to do with what the daemon accepts; the two lists
+are unrelated, and using one where the other belongs is the easiest way to write
+a file that fails at startup. **Validate before restarting** -- see "Granting a
+capability".
+
+## Granting a capability (and migrating v1 -> v3)
+
+A v1 file authenticates peers and grants nothing, so a peer on it handshakes
+normally and gets `capability_not_granted` from `/v1/assign`. That is the safe
+direction to be wrong in, and it is where CT 101 sat until 2026-08-28: the file
+carried over from CT 102 was v1, so `wsl-hermes` was trusted and entitled to
+nothing.
+
+Migrating is a load and a write -- `to_document()` always emits the current
+version, so a v1 file that is read and written back comes out as v3 with the
+same peers. The grant is the only deliberate change.
+
+**Back up first, and validate before restarting.** The daemon reads this file at
+startup and refuses to start if it cannot load it, so an invalid grant does not
+degrade the node, it stops it -- and the crash-loop guard then holds it in
+`failed` until a human intervenes. The order below never leaves the service
+depending on a file nobody has loaded yet:
+
+    # 1. back up. trust.json holds public keys only, so /root is fine.
+    cp -p /var/lib/eureka/trust.json /root/trust.json.v1.bak-$(date +%Y%m%d)
+
+    # 2. rewrite in place, as the eureka user. Editing in place preserves the
+    #    inode, so owner and mode survive; a shell redirect would create a new
+    #    file owned by root and unreadable by the daemon.
+    cd /opt/eureka
+    runuser -u eureka -- /opt/eureka/venv/bin/python -c "
+    import json
+    from eureka_protocol.src.eureka_daemon.trust import TrustList
+    path = '/var/lib/eureka/trust.json'
+    trust = TrustList.load(path)
+    trust.add('wsl-hermes', trust.key_for('wsl-hermes'), ['web-retrieval'])
+    with open(path, 'w') as fh:
+        json.dump(trust.to_document(), fh, indent=2); fh.write('\n')
+    "
+
+    # 3. load it the way the daemon will, BEFORE restarting. Raises if wrong.
+    runuser -u eureka -- /opt/eureka/venv/bin/python -c "
+    from eureka_protocol.src.eureka_daemon.trust import TrustList
+    t = TrustList.load('/var/lib/eureka/trust.json',
+                       advertised=['code-exec','web-retrieval','data-analysis'])
+    k = t.key_for('wsl-hermes')
+    print(sorted(t.capabilities_for(k)), t.grants(k, 'web-retrieval'))
+    "
+
+    # 4. only now. The file is read at startup, not per request.
+    systemctl restart eureka-daemon
+
+`add()` on a name already present replaces that peer's grants and keeps the key,
+which is why this is one call rather than a remove and a re-add: there is no
+moment when the peer is absent from the file. It refuses outright if the key is
+revoked, so a revoked peer cannot be quietly re-granted by this path.
+
+Step 3 is the one that is tempting to skip and should not be. It fails in the
+shell, where a bad grant costs nothing; skipped, the same mistake surfaces as a
+daemon that will not start, and the node is off the mesh until someone reads the
+journal. If it raises, restore the backup and fix the grant before restarting.
+
+Grant the narrowest capability that does the job. `code-exec` is deliberately
+not granted to anyone: the assign gate is real but what it dispatches to is a
+stub, and the day that stub becomes an executor, every standing grant becomes
+live at once. A grant written now is a decision taken now.
 
 ## Revoking a peer
 
@@ -756,6 +833,11 @@ peers from the table it checks against.
   drop-in is applied (status=243/CREDENTIALS). See "journald in an
   unprivileged container" -- until then every journal check here reads empty
   and proves nothing.
+- A capability grant is validated against what *this* node advertises
+  (`code-exec`, `web-retrieval`, `data-analysis`), not against what the peer
+  claims. `fast-inference` is `demo.sh`'s client-side list and is **not** one
+  of them -- granting it makes the daemon refuse to start. See "Granting a
+  capability".
 - CT 101 has no git remote, on purpose: its `origin` was the seed bundle, and
   a bare fetch force-rewound `origin/master` to the seed commit. New commits
   get there by bundle -- see "Advancing CT 101 to a new commit". Do not add a
