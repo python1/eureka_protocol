@@ -2,7 +2,9 @@
 
 First successful cross-machine mutual handshake: 2026-08-24, commit 976c1f1.
 Responder moved from CT 102 to its own container, CT 101, on 2026-08-28 —
-see "Moving the responder to another host".
+see "Moving the responder to another host". CT 101's trust file was migrated
+v1 -> v3 the same day and `wsl-hermes` now holds `web-retrieval`; no peer has
+exercised that grant yet — see "Granting a capability".
 
 ## Nodes
 
@@ -33,7 +35,10 @@ CT 102 (192.168.1.174) still holds the origin repo at
 /root/.openclaw/workspace/eureka_protocol and its development venv
 /root/eureka_venv. Its daemon is stopped and disabled as of 2026-08-28 and its
 /var/lib/eureka is left intact — that copy of the identity is now a backup, and
-two hosts must never serve this identity at once.
+two hosts must never serve this identity at once. Its `trust.json` there is
+still v1 (checked 2026-08-28) and predates the grant, so that backup restores
+the identity and an allowlist that grants nothing. Same for
+`/root/trust.json.v1.bak-20260828` on CT 101 — see "Granting a capability".
 
 WSL: repo ~/eureka/eureka_protocol, venv ~/eureka/venv,
 identity ~/.eureka/identity.key, trust ~/.eureka/trust.json
@@ -61,10 +66,11 @@ peers maps NAME -> an entry. Lookups are by key; the name is a human label.
 Each node trusts the other's public key. Empty or absent file trusts nobody.
 No trust-on-first-use, no bypass.
 
-Older versions still load: v1 (peers maps name -> bare key string) grants
-nothing, v2 adds capabilities. Both are read-only history at this point --
-neither can express a revocation, and a `revoked` list in a file declaring
-version 1 or 2 is a load error rather than a field that is quietly ignored.
+CT 101's live file has been v3 since 2026-08-28. Older versions still load:
+v1 (peers maps name -> bare key string) grants nothing, v2 adds capabilities.
+Both are read-only history at this point -- neither can express a revocation,
+and a `revoked` list in a file declaring version 1 or 2 is a load error rather
+than a field that is quietly ignored.
 Get that wrong silently and an operator believes a compromised key is dead
 when it is still authenticating.
 
@@ -92,7 +98,8 @@ A v1 file authenticates peers and grants nothing, so a peer on it handshakes
 normally and gets `capability_not_granted` from `/v1/assign`. That is the safe
 direction to be wrong in, and it is where CT 101 sat until 2026-08-28: the file
 carried over from CT 102 was v1, so `wsl-hermes` was trusted and entitled to
-nothing.
+nothing. It was migrated that day, by the procedure below; what the run
+actually produced is recorded after it.
 
 Migrating is a load and a write -- `to_document()` always emits the current
 version, so a v1 file that is read and written back comes out as v3 with the
@@ -127,7 +134,9 @@ depending on a file nobody has loaded yet:
     t = TrustList.load('/var/lib/eureka/trust.json',
                        advertised=['code-exec','web-retrieval','data-analysis'])
     k = t.key_for('wsl-hermes')
-    print(sorted(t.capabilities_for(k)), t.grants(k, 'web-retrieval'))
+    print('grants:', sorted(t.capabilities_for(k)),
+          '| web-retrieval:', t.grants(k, 'web-retrieval'),
+          '| code-exec:', t.grants(k, 'code-exec'))
     "
 
     # 4. only now. The file is read at startup, not per request.
@@ -147,6 +156,46 @@ Grant the narrowest capability that does the job. `code-exec` is deliberately
 not granted to anyone: the assign gate is real but what it dispatches to is a
 stub, and the day that stub becomes an executor, every standing grant becomes
 live at once. A grant written now is a decision taken now.
+
+### What the run produced on CT 101, 2026-08-28
+
+The backup from step 1 is `/root/trust.json.v1.bak-20260828`, and it is the last
+v1 copy on that host. Restoring it is a rollback of the *migration*, not of the
+grant: the file comes back at a version that cannot express a revocation at all,
+so a key revoked after today would return trusted, and a `revoked` list written
+into it is a load error rather than a field that is ignored. Keep it as the
+record of what the file was, and re-migrate rather than restore.
+
+Ask step 3 about a capability that must be *absent* as well as the one being
+granted -- a check that only ever prints True cannot fail. It printed:
+
+    grants: ['web-retrieval'] | web-retrieval: True | code-exec: False
+
+The first is the grant as the daemon will read it; the second is the gate
+answering for it; the third is the one to keep re-reading. `code-exec` is still
+granted to nobody, and now that the file is v3 that is a checked fact rather
+than a side effect of a format that could not grant anything to anyone.
+
+The restart after it brought the daemon back as `node_a2ed8dc7`, manifest
+answering on 8443. The trust file does not touch the identity, so a node_id that
+moves across a grant means the wrong file was edited -- or `EUREKA_IDENTITY_PATH`
+missed and a key was minted -- not that the grant was bad.
+
+A full container restart followed, and the daemon came back `active` with nobody
+starting it. That is the evidence step 4 of the move asks for and could not have
+before: `enabled` is a claim, and until something restarted that host the claim
+was all there was.
+
+**The grant is not confirmed end to end, and CT 101 cannot confirm it.** There
+is no self-handshake in this protocol (see "CT 101 cannot run the trusted
+scenario against itself"), so the only thing that proves the grant is a signed
+`/v1/assign` from `wsl-hermes` naming `web-retrieval` and getting back anything
+other than `capability_not_granted`. The Alienware is powered off, so that is
+outstanding as of 2026-08-28. What is proven is that the daemon loads the file
+and the allowlist answers True for `web-retrieval` and False for `code-exec`;
+what is not proven is that a peer on the far side of a handshake sees the same
+answer. Do not read the restart as the check -- a daemon that starts has loaded
+the file, which is the cheap half.
 
 ## Revoking a peer
 
@@ -288,9 +337,11 @@ the thief into permanent trust, which is trust-on-first-use wearing a hat.
 ## Start the responder (CT 101)
 
 CT 101 runs the daemon under systemd as `eureka-daemon.service`, enabled at
-boot. It is no longer started by hand -- a daemon living in an SSH session dies
-with the session, and one that inherits its identity from a shell comes back as
-a different node the day someone forgets to export a variable.
+boot -- and observed coming back on its own after a full container restart on
+2026-08-28, which is the first time that was evidence rather than a setting.
+It is no longer started by hand -- a daemon living in an SSH session dies with
+the session, and one that inherits its identity from a shell comes back as a
+different node the day someone forgets to export a variable.
 
     systemctl status eureka-daemon
     systemctl restart eureka-daemon
@@ -826,6 +877,9 @@ peers from the table it checks against.
   prohibit-password). Use pct exec from the Proxmox host, or set up a key.
 - CT 101 takes key auth from the MacBook. CT 102 has no SSH access to CT 101,
   which is why the move went CT 102 -> MacBook -> CT 101 rather than directly.
+  CT 101's 8443 does answer from CT 102 though, so the manifest is checkable
+  from here (`curl -sk https://192.168.1.180:8443/v1/manifest`) even when
+  nothing else about that host is reachable.
 - Run from the parent of eureka_protocol so the package resolves. On CT 101 and
   CT 102 a .pth in the venv handles this; on WSL use sys.path.insert or
   cd ~/eureka.
@@ -845,6 +899,10 @@ peers from the table it checks against.
 - `demo.sh` without `EUREKA_IDENTITY_PATH`/`EUREKA_TRUST_PATH` creates a
   throwaway identity instead of failing, and reports a node_id that never
   existed. See "demo.sh needs the identity paths too".
+- `wsl-hermes`'s `web-retrieval` grant (CT 101, 2026-08-28) has never been
+  exercised by the peer -- the Alienware has been off since it was written, and
+  CT 101 cannot test it against itself. Validating the file locally is a
+  different check from a peer getting past the gate.
 
 ## Dispatching a task (/v1/assign)
 
