@@ -384,9 +384,9 @@ which the service reads and cannot write:
     /opt/eureka/DEPLOYED_COMMIT    which commit that is
 
 The `macbook` git remote is the shared source of truth across hosts, but only
-CT 102 and the MacBook itself can reach it -- CT 101 cannot, and reports that by
-doing nothing rather than by failing. See "Advancing CT 101 to a new commit"
-below before assuming a fetch there did something. On CT 101 the working copy is
+CT 102 and the MacBook itself can reach it. CT 101 has no remote at all and
+cannot fetch from anywhere -- see "Advancing CT 101 to a new commit" below
+before assuming a fetch there did something. On CT 101 the working copy is
 `/root/eureka_protocol`. Refresh the deployment from it the same way the unit is
 installed -- copy, then check:
 
@@ -405,20 +405,31 @@ copy and the file names a commit the deployed code does not match. `git status
 
 ### Advancing CT 101 to a new commit
 
-**`git fetch origin` on CT 101 is a silent no-op.** Its `origin` is not the
-MacBook -- it is `/root/migrate/eureka.bundle`, the one-shot file the host was
-seeded from during the move. Fetching re-reads that same frozen file, finds
-nothing new, and exits 0. Nothing warns you; the repo simply stays where it is
-while `origin/master` keeps naming the commit it was seeded at.
+**CT 101 has no git remote at all, deliberately.** It had one until 2026-08-28:
+a clone leaves `origin` pointing at whatever it was cloned from, and this host
+was cloned from `/root/migrate/eureka.bundle`, the one-shot file it was seeded
+from during the move. That remote was worse than useless. The default fetch
+refspec is a **forced** update, so `git fetch` re-read that frozen file and
+drove `origin/master` back to the seed commit -- silently, exit 0, no output.
+The branch itself was never at risk (a fetch does not move local `master`), but
+the tracking ref would jump backwards and `git status` would then describe the
+branch as ahead of a history that had actually already been merged. It rewound
+once that way before the remote was removed.
 
-Repointing `origin` at the MacBook is not currently possible without widening
-access. CT 101 has no private key at all (`/root/.ssh` holds `authorized_keys`
-and nothing else) and does not resolve the name `macbook`. The MacBook's port 22
-is reachable from CT 101, so this is an authentication gap, not a network one --
-closing it means generating a keypair on CT 101 and authorizing it on the
-MacBook, which adds an inbound credential and makes a link that is deliberately
-one-way into a round trip. Until someone decides to do that, commits reach
-CT 101 as bundles.
+So `origin` is gone rather than repointed, and a bare `git fetch` is now inert:
+no remote, no tracking ref, nothing to move. `git status` reports no upstream,
+which is the honest description of a host that has no reachable remote.
+
+Repointing it at the MacBook is not currently possible without widening access.
+CT 101 holds no private key at all (`/root/.ssh` has `authorized_keys` and
+`known_hosts` and nothing else) and has no `macbook` host alias. The MacBook's
+port 22 *is* reachable from CT 101 -- it answers and then refuses with
+`Permission denied (publickey,password,keyboard-interactive)` -- so this is an
+authentication gap, not a network one. Closing it means generating a keypair on
+CT 101 and authorizing it on the MacBook, which adds an inbound credential to a
+laptop and turns a deliberately one-way link (MacBook -> CT 101) into a round
+trip. That is a decision to take on purpose, not a step to slip into a
+migration. Until someone takes it, commits reach CT 101 as bundles.
 
 An incremental bundle carries only the range, and names the commit it must be
 applied onto, so it refuses to apply to the wrong history instead of guessing:
@@ -439,16 +450,19 @@ applied onto, so it refuses to apply to the wrong history instead of guessing:
     # 3. on CT 101: verify the prerequisite is present, then fast-forward
     B=/root/migrate/eureka-$OLD-$NEW.bundle
     git -C /root/eureka_protocol bundle verify $B
-    git -C /root/eureka_protocol fetch $B master:refs/remotes/origin/master
-    git -C /root/eureka_protocol merge --ff-only refs/remotes/origin/master
+    git -C /root/eureka_protocol fetch $B master
+    git -C /root/eureka_protocol merge --ff-only FETCH_HEAD
 
-Fetch into `refs/remotes/origin/master`, not just into `FETCH_HEAD`. The
-tracking ref is the only thing on CT 101 that claims to know where the shared
-history is, and if the bundle advances `master` while `origin/master` stays put,
-`git status` starts reporting the branch as ahead of a remote it has never
-actually spoken to. `--ff-only` is what keeps this a transport rather than a
-merge: if it refuses, CT 101 has commits of its own and that is a fact to
-resolve, not to force past.
+`bundle verify` is the step that matters: an incremental bundle names the commit
+it must be applied onto, so it refuses the wrong history instead of guessing.
+Run it before the fetch and a bundle built against the wrong `OLD` says so.
+
+Merge from `FETCH_HEAD`, and do not recreate a `refs/remotes/origin/*` ref to
+merge from instead. A tracking ref under `origin` implies a remote this host can
+talk to; inventing one to satisfy a habit is what made the rewind above possible
+in the first place. `--ff-only` keeps this a transport rather than a merge: if it
+refuses, CT 101 has commits of its own, and that is a fact to resolve rather than
+to force past.
 
 Then refresh `/opt/eureka` with the rsync above, so `DEPLOYED_COMMIT` moves with
 the repo. Keep the bundles in `/root/migrate` named by range -- the filenames
@@ -534,6 +548,32 @@ been pointed at it yet.
 
 The old host's `/var/lib/eureka` is left intact and becomes the backup copy of
 the identity. It is dead weight only until the day the new host's disk fails.
+
+### Close out the staging directory
+
+A move leaves a second copy of the private key on the new host, in whatever
+directory the payload was unpacked into -- `/root/migrate` here. That copy is
+outside `/var/lib/eureka`, so nothing in the unit protects it: `StateDirectory`
+does not own it, the `eureka` user does not need it, and it is exactly the kind
+of file that later gets swept into a backup or an rsync by someone who does not
+know what it is. As of 2026-08-28 it is **still present on CT 101** and should
+be removed once the identity is confirmed installed.
+
+Confirm the installed copy first, then delete the staged one -- in that order,
+so a mismatch is found while both copies still exist:
+
+    sha256sum /root/migrate/identity.key /var/lib/eureka/identity.key
+    sha256sum /root/migrate/trust.json  /var/lib/eureka/trust.json
+    # identical, and the daemon is serving the right node_id? then:
+    shred -u /root/migrate/identity.key /root/migrate/trust.json
+
+Leave the bundles: they are code, not secrets, and their filenames are this
+host's only record of how it got from one commit to the next.
+
+The seed bundle `eureka.bundle` is also worth keeping for a different reason --
+it is what a fresh clone here would have to come from, and the clone that
+created it is what left the `origin` remote that had to be removed. See
+"Advancing CT 101 to a new commit".
 
 ## Run the handshake (WSL initiates)
 
@@ -716,9 +756,10 @@ peers from the table it checks against.
   drop-in is applied (status=243/CREDENTIALS). See "journald in an
   unprivileged container" -- until then every journal check here reads empty
   and proves nothing.
-- `git fetch origin` on CT 101 fetches from `/root/migrate/eureka.bundle`, not
-  from the MacBook, and succeeds without doing anything. New commits get there
-  by bundle -- see "Advancing CT 101 to a new commit".
+- CT 101 has no git remote, on purpose: its `origin` was the seed bundle, and
+  a bare fetch force-rewound `origin/master` to the seed commit. New commits
+  get there by bundle -- see "Advancing CT 101 to a new commit". Do not add a
+  remote back without reading that section first.
 - `demo.sh` without `EUREKA_IDENTITY_PATH`/`EUREKA_TRUST_PATH` creates a
   throwaway identity instead of failing, and reports a node_id that never
   existed. See "demo.sh needs the identity paths too".
