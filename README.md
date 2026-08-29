@@ -35,6 +35,16 @@ relationship and no discoverable registry. What it assumes instead is an
 operator willing to exchange public keys out of band, which is a real cost and
 is the trade this design accepts in return for having no directory anywhere.
 
+That distinction stopped being theoretical on 2026-08-29. A Hermes Agent on one
+machine now fetches pages through a Eureka peer on another, and the two
+protocols sit in exactly the layering described above: MCP carries the
+relationship between the agent and its own tools — a local server it launches
+and trusts implicitly — while Eureka carries the relationship between that
+machine and a peer it has no authority over, where every request is signed,
+every grant is checked, and the answer comes back signed in its own domain. The
+agent asks its tool; the tool asks a stranger. Neither protocol is doing the
+other's job, and neither could.
+
 ## What works today
 
 The suite is 616 tests, all passing. Each item below is implemented and

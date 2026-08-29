@@ -4,7 +4,9 @@ First successful cross-machine mutual handshake: 2026-08-24, commit 976c1f1.
 Responder moved from CT 102 to its own container, CT 101, on 2026-08-28 —
 see "Moving the responder to another host". CT 101's trust file was migrated
 v1 -> v3 the same day and `wsl-hermes` now holds `web-retrieval`, which the
-peer exercised end to end on 2026-08-29 — see "What the WSL peer proved".
+peer exercised end to end on 2026-08-29 — see "What the WSL peer proved". That
+peer is now driven by Hermes Agent over MCP; see "Hermes Agent reaching
+Eureka".
 
 ## Nodes
 
@@ -911,6 +913,108 @@ this protocol. The trusted scenario has to be initiated from the WSL peer; run
 locally on CT 101, `demo.sh` proves the listener is up and the refusal path
 works, and nothing more.
 
+## Hermes Agent reaching Eureka (WSL, MCP)
+
+`wsl-hermes` is not only a key in a trust file any more. Hermes Agent on the
+Alienware calls CT 101 through it: the operator asks for a page, Hermes calls a
+tool, and the fetch happens on CT 101 under CT 101's policy, signed. Working as
+of 2026-08-29.
+
+**The seam is an MCP server, not a Hermes plugin, and the reason is
+dependencies.** A plugin runs inside Hermes's own interpreter, and Hermes does
+not install what a plugin declares -- `hermes_cli/plugins.py` on the
+`python_dependencies` field: "VALIDATED AND SURFACED ONLY -- Hermes never
+auto-installs these". The Eureka client needs `eureka_protocol`, `httpx` and
+`cryptography` working together, which is exactly what `~/eureka/venv` already
+is and what the 616 tests pass against. An MCP server runs as its own process
+under that interpreter, so the proven environment stays intact and Hermes gets
+only a tool surface. The `env:` block is the second reason: an MCP subprocess
+receives only the variables listed there, so the identity and trust paths are
+explicit and auditable, where an in-process plugin would inherit everything
+Hermes has.
+
+    ~/eureka/eureka_mcp_server.py        the server (NOT in this repo -- see below)
+    ~/eureka/venv/bin/python             its interpreter, with mcp==2.0.0 added
+
+Config, in `~/.hermes/config.yaml`, written by `hermes mcp add`:
+
+    mcp_servers:
+      eureka:
+        command: /home/<user>/eureka/venv/bin/python
+        args:
+          - /home/<user>/eureka/eureka_mcp_server.py
+        env:
+          EUREKA_IDENTITY_PATH: /home/<user>/.eureka/identity.key
+          EUREKA_TRUST_PATH: /home/<user>/.eureka/trust.json
+          EUREKA_PEER: https://192.168.1.180:8443
+        connect_timeout: 60
+
+It exposes two tools. `eureka_fetch(url, max_chars)` handshakes, issues a
+signed `web-retrieval` assign, **verifies the result signature before returning
+any content**, and hands back JSON. `eureka_peer_status()` handshakes and
+stops, which is what tells a provisioning problem (`untrusted_key`) apart from
+a permission problem (`capability_not_granted`) without running anything.
+
+**An unverified result is a failure, not a warning.** The server checks that a
+`result_signature` is present, that the TLS pin was read, that the signature
+verifies in the assign-result domain against that pin, and that the signed
+nonce is the one it sent. Any of those failing returns a refusal and no
+content. Without that check the tool is returning a string it found on the
+network, and the signature is the only thing that makes it evidence.
+
+Refusals are reported as outcomes with an explanation, and come back to Hermes
+as a successful tool call carrying `ok: false` -- deliberately not an MCP
+error. A refusal is a real answer from the protocol; marking it an error invites
+the model to retry something that will never succeed.
+
+### Two things that will bite whoever writes the next one of these
+
+**stdout belongs to the MCP protocol, and EurekaNode prints to it.**
+`create_handshake_offer` and friends print `[NODE ...] Challenge issued to ...`
+on stdout. MCP stdio transport *is* stdout, so an unguarded handshake injects
+that line into the JSON-RPC stream, and the failure presents as a server that
+will not start rather than as noise. Every call into Eureka in that server runs
+inside `contextlib.redirect_stdout(sys.stderr)`. This is the single most likely
+way to break an MCP server built around this codebase.
+
+**`mcp.server.fastmcp` does not exist in `mcp==2.0.0`,** which is what Hermes
+pins. The class is `mcp.server.MCPServer`, decorator `@server.tool(...)`,
+entry `server.run("stdio")`, and schemas come from type hints. 2.0.0 also
+renamed result fields to snake_case (`server_info`, `input_schema`,
+`is_error`). Anything written against the older FastMCP API fails at import.
+
+### What was proven, 2026-08-29
+
+From inside Hermes, against the live daemon:
+
+| asked | result |
+|---|---|
+| `eureka_peer_status` | mutual handshake, node_ef0a1f59 <-> node_a2ed8dc7 |
+| fetch `https://example.com/` | 200, text/html, 559 bytes, responder node_a2ed8dc7, content returned and summarised by the model |
+| fetch `http://127.0.0.1/` | `address_not_allowed`, readable; the model explained the policy and offered an alternative rather than retrying |
+
+That last row is the one worth keeping. The refusal did not merely arrive --
+it arrived in a form the model could act on correctly, which is the whole
+purpose of mapping reasons to sentences instead of passing the raw string up.
+
+Two caveats recorded because they are not Eureka's and should not be debugged
+as if they were. `qwen3:8b` emitted malformed tool calls on the first two
+attempts before succeeding: model tool-calling reliability, unrelated to the
+protocol or the server. And Hermes's own `tools/mcp_tool.py:6189` throws
+`RuntimeWarning: coroutine 'MCPServerTask._watch_stdio_children' was never
+awaited` -- an upstream Hermes issue, harmless here, and not a symptom of
+anything on the Eureka side.
+
+### The server is not version controlled, and should be
+
+`eureka_mcp_server.py` exists on the Alienware and nowhere else. That is the
+one piece of this integration with no history, no backup and no way to reach
+another host, in a system whose whole record-keeping story is that commits and
+bundle filenames are the audit trail. It is not in this repo yet because the
+path resolution assumes the file sits *beside* `eureka_protocol/` rather than
+inside it, so committing it means either a path fix or a second copy that can
+drift. Worth doing; not done.
+
 ## Reading the peer table and the audit log
 
 `/v1/peers` and `/v1/logs` used to be open GETs. Anything that could reach the
@@ -1014,6 +1118,19 @@ peers from the table it checks against.
   pre-flight DNS resolution runs before it and is not covered by it, and 30s
   is what actually bounds a dispatch. A 10s client races the work it asked
   for. Use 60s.
+- **Anything speaking MCP over stdio must keep EurekaNode's prints off
+  stdout.** The node prints handshake progress there, and stdio transport *is*
+  stdout, so an unguarded call corrupts the JSON-RPC stream and looks like a
+  server that will not start. Wrap Eureka calls in
+  `contextlib.redirect_stdout(sys.stderr)`. See "Hermes Agent reaching Eureka".
+- **`mcp.server.fastmcp` does not exist in `mcp==2.0.0`** (the version Hermes
+  pins). Use `mcp.server.MCPServer`; result fields are snake_case. Code written
+  against the older FastMCP API fails at import, not at runtime.
+- The Hermes side runs `qwen3:8b`, which sometimes emits malformed tool calls
+  before succeeding. That is model reliability, not a protocol fault -- do not
+  go looking for it in Eureka. Same for Hermes's own
+  `mcp_tool.py:6189 RuntimeWarning: coroutine ... never awaited`, which is
+  upstream and harmless.
 
 ## Dispatching a task (/v1/assign)
 
