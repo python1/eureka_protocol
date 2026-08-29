@@ -3,8 +3,8 @@
 First successful cross-machine mutual handshake: 2026-08-24, commit 976c1f1.
 Responder moved from CT 102 to its own container, CT 101, on 2026-08-28 —
 see "Moving the responder to another host". CT 101's trust file was migrated
-v1 -> v3 the same day and `wsl-hermes` now holds `web-retrieval`; no peer has
-exercised that grant yet — see "Granting a capability".
+v1 -> v3 the same day and `wsl-hermes` now holds `web-retrieval`, which the
+peer exercised end to end on 2026-08-29 — see "What the WSL peer proved".
 
 ## Nodes
 
@@ -223,6 +223,11 @@ and the allowlist answers True for `web-retrieval` and False for `code-exec`;
 what is not proven is that a peer on the far side of a handshake sees the same
 answer. Do not read the restart as the check -- a daemon that starts has loaded
 the file, which is the cheap half.
+
+That gap closed on 2026-08-29, once the executor was deployed and the Alienware
+came back: `wsl-hermes` made the signed call and got a fetched page. The
+paragraph above stands as what was and was not known on the day, which is the
+point of dating it. See "What the WSL peer proved".
 
 ## Revoking a peer
 
@@ -694,6 +699,10 @@ return a real fetched page, which makes it the first assign that could actually
 distinguish a working executor from a working gate. The Alienware is still
 powered off.
 
+**It was run the next day, and it distinguished them.** See "What the WSL peer
+proved" -- and note that the first attempt failed on a ten-second DNS stall
+that looked exactly like a protocol fault and was not one.
+
 ## Moving the responder to another host
 
 Done on 2026-08-28, CT 102 -> CT 101, at commit 3854f00. The node kept
@@ -983,10 +992,28 @@ peers from the table it checks against.
 - `demo.sh` without `EUREKA_IDENTITY_PATH`/`EUREKA_TRUST_PATH` creates a
   throwaway identity instead of failing, and reports a node_id that never
   existed. See "demo.sh needs the identity paths too".
-- `wsl-hermes`'s `web-retrieval` grant (CT 101, 2026-08-28) has never been
-  exercised by the peer -- the Alienware has been off since it was written, and
-  CT 101 cannot test it against itself. Validating the file locally is a
-  different check from a peer getting past the gate.
+- `wsl-hermes`'s `web-retrieval` grant was exercised by the peer on
+  2026-08-29 and works end to end. It sat unexercised for a day because CT 101
+  cannot test it against itself, and validating the file locally stayed a
+  different check from a peer getting past the gate. See "What the WSL peer
+  proved".
+- **CT 101's DNS was broken in a way that looked like a protocol bug.** Its
+  PVE-managed `/etc/resolv.conf` listed `1.1.1.1` first, and UDP/53 to
+  `1.1.1.1` and `8.8.8.8` is blocked LAN-wide -- CT 102 sees the same block.
+  glibc waited out the default `timeout:5` on the first nameserver before
+  falling back to one that answered, so every cold lookup cost a flat five
+  seconds. `web-retrieval` resolves twice on purpose (once for the policy
+  check, once inside httpx when it connects), so a fetch of a 559-byte page
+  took ten seconds and the peer's client timed out before the answer came
+  back. Fixed on 2026-08-29 with `pct set 101 --nameserver 192.168.1.1` on the
+  Proxmox host; cold `getaddrinfo` went from 5.05s to 0.056s and the whole
+  handler from ~10s to 0.16s. Editing `/etc/resolv.conf` on CT 101 does not
+  hold -- PVE regenerates it.
+- **A client calling /v1/assign must outlast the registry's deadline, not the
+  fetch timeout.** Those are different numbers: the fetch gets 10s, but the
+  pre-flight DNS resolution runs before it and is not covered by it, and 30s
+  is what actually bounds a dispatch. A 10s client races the work it asked
+  for. Use 60s.
 
 ## Dispatching a task (/v1/assign)
 
@@ -1115,6 +1142,54 @@ peer's business, and the entry is a record of what this node did, not of what
 the peer was looking for. The entry is built from named scalars rather than
 from the result dict, which is the thing that keeps it that way.
 
+### What the WSL peer proved, 2026-08-29
+
+The check this file had been deferring since the grant was written. It is the
+first `/v1/assign` from a real peer, and the first that could tell a working
+executor from a working gate -- the refusals were always distinguishable, but a
+*granted* request returned the same canned string whether anything behind the
+gate could run or not.
+
+`wsl-hermes` (node_ef0a1f59, on the Alienware) ran one handshake and then seven
+cases behind it, because `is_permitted` consults a peer record that exists only
+after a handshake -- it lives in the responder's memory until the daemon
+restarts, so the cases share a run but need not share a connection. Round trip
+0.22s. What came back:
+
+| | request | result |
+|---|---|---|
+| 1 | `web-retrieval` `https://example.com/` | `completed`, http 200, 559 bytes |
+| 2 | that result's signature | verifies in assign-**result**; fails as an assign query and as a read query |
+| 3 | the identical envelope resent | `replayed_nonce` |
+| 4 | `code-exec` | `capability_not_granted`, unsigned |
+| 5 | `web-retrieval` `http://127.0.0.1/` | gate `authenticated`, work `address_not_allowed` |
+| 6 | `web-retrieval` `file:///etc/passwd` | `scheme_not_allowed` |
+| 7 | `POST /v1/logs` | 5 entries, all attributed to this peer, capability and outcome present, no body |
+
+Case 5 is the one to keep re-reading. The gate said `authenticated` and the
+work said `address_not_allowed`, which is the separation this protocol is built
+on: a fetch this node declined to make is still a request it accepted, and
+collapsing the two would tell a peer its grant had been withdrawn every time a
+web server was unreachable.
+
+**Two things went wrong, and neither was the daemon.**
+
+The first attempt timed out client-side at exactly ten seconds while CT 101
+finished the work and had nobody to hand it to -- the DNS fault in "Gotchas",
+which presented as a protocol failure and was a blocked nameserver. Worth
+remembering the shape: the journal showed the dispatch and the log entry ten
+seconds apart with no access line for the POST, because the client had already
+gone. A missing access line after a completed dispatch means the caller left.
+
+The second was in the checking script, and it is the more instructive one. It
+asserted `reason == "ok"` on the logs answer and failed a passing system.
+There are two constants called `REASON_OK`: `node.REASON_OK` is
+`"authenticated"`, the gate's verdict, returned by every answer including the
+reads; `handlers.REASON_OK` is `"ok"`, the work's verdict, which lives inside
+`result.reason`. The check compared a gate verdict against work vocabulary --
+the exact distinction the row above is about, tripped over while testing it.
+Import the constants rather than typing the strings.
+
 ## Not yet done
 
 DHT discovery (addresses are still configured by hand), NAT traversal, WAN.
@@ -1124,9 +1199,9 @@ stays unbuilt until there is a sandbox, and the node now refuses to claim it
 rather than gating a stub. Task execution itself is no longer on this list --
 `web-retrieval` runs end to end behind the gate.
 
-Not yet confirmed against the WSL peer: no peer has exercised the grant or the
-executor over the wire. See "What the run produced on CT 101" -- the same
-outstanding check, now with more behind it to check.
+Confirmed against the WSL peer on 2026-08-29: the grant and the executor have
+both been exercised over the wire, so nothing on this list is waiting on that
+any more. See "What the WSL peer proved".
 
 Mutual TLS is evaluated and deliberately not planned; see the TLS section above
 for why.
