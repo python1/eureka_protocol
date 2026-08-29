@@ -933,8 +933,8 @@ receives only the variables listed there, so the identity and trust paths are
 explicit and auditable, where an in-process plugin would inherit everything
 Hermes has.
 
-    ~/eureka/eureka_mcp_server.py        the server (NOT in this repo -- see below)
-    ~/eureka/venv/bin/python             its interpreter, with mcp==2.0.0 added
+    ~/eureka/eureka_protocol/integrations/eureka_mcp_server.py   the server
+    ~/eureka/venv/bin/python                                     its interpreter, with mcp==2.0.0 added
 
 Config, in `~/.hermes/config.yaml`, written by `hermes mcp add`:
 
@@ -942,7 +942,7 @@ Config, in `~/.hermes/config.yaml`, written by `hermes mcp add`:
       eureka:
         command: /home/<user>/eureka/venv/bin/python
         args:
-          - /home/<user>/eureka/eureka_mcp_server.py
+          - /home/<user>/eureka/eureka_protocol/integrations/eureka_mcp_server.py
         env:
           EUREKA_IDENTITY_PATH: /home/<user>/.eureka/identity.key
           EUREKA_TRUST_PATH: /home/<user>/.eureka/trust.json
@@ -1005,15 +1005,30 @@ protocol or the server. And Hermes's own `tools/mcp_tool.py:6189` throws
 awaited` -- an upstream Hermes issue, harmless here, and not a symptom of
 anything on the Eureka side.
 
-### The server is not version controlled, and should be
+### Where the server lives, and why there is only one copy
 
-`eureka_mcp_server.py` exists on the Alienware and nowhere else. That is the
-one piece of this integration with no history, no backup and no way to reach
-another host, in a system whose whole record-keeping story is that commits and
-bundle filenames are the audit trail. It is not in this repo yet because the
-path resolution assumes the file sits *beside* `eureka_protocol/` rather than
-inside it, so committing it means either a path fix or a second copy that can
-drift. Worth doing; not done.
+`integrations/eureka_mcp_server.py`, in this repo. It briefly lived only on the
+Alienware -- the one piece of this integration with no history, no backup and
+no way to reach another host, in a system whose entire record-keeping story is
+that commits and bundle filenames are the audit trail.
+
+Committing it needed a path fix first. The file has to put the directory
+*containing* `eureka_protocol` on `sys.path`, and that directory is one level
+up when the file is deployed beside the checkout and two levels up when it is
+inside it. A hardcoded parent works in exactly one of those, which is how a
+tracked file and a deployed file quietly become two files that disagree. So
+`_find_package_root()` walks up until it finds an ancestor holding
+`eureka_protocol/src/eureka_daemon`, and the same bytes run correctly from
+either location. The marker is the daemon package rather than the directory
+name, so an empty `eureka_protocol/` higher up the tree cannot capture the
+search; failing to find it is a startup error with a message that names the
+path it searched from, not an ImportError three frames deep.
+
+**There is deliberately no second copy.** The old `~/eureka/eureka_mcp_server.py`
+is deleted once the tracked one is proven, rather than left as a fallback:
+a fallback is the drift this resolver exists to prevent, and the deployed path
+is one line of `args:` in config.yaml, which is where a deployment choice
+belongs.
 
 ## Reading the peer table and the audit log
 
