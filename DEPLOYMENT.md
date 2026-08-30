@@ -1158,11 +1158,20 @@ peers from the table it checks against.
 - **`mcp.server.fastmcp` does not exist in `mcp==2.0.0`** (the version Hermes
   pins). Use `mcp.server.MCPServer`; result fields are snake_case. Code written
   against the older FastMCP API fails at import, not at runtime.
-- The Hermes side runs `qwen3:8b`, which sometimes emits malformed tool calls
-  before succeeding. That is model reliability, not a protocol fault -- do not
-  go looking for it in Eureka. Same for Hermes's own
-  `mcp_tool.py:6189 RuntimeWarning: coroutine ... never awaited`, which is
-  upstream and harmless.
+- **The least deterministic step in this whole chain is the model emitting the
+  tool call, and it looks like an MCP fault.** `qwen3:8b` on the Hermes side
+  repeatedly fails to produce a valid call before getting one right --
+  `tool_call requires a 'name' argument`, observed twice on 2026-08-29 and
+  four times later the same day, each followed by success on the next attempt.
+  Nothing is wrong with the server when this happens, and the way to tell is
+  that **a malformed tool call never reaches it**: the MCP server's stderr
+  carries no `eureka-mcp:` line, and CT 101's journal shows no
+  `Handshake established`. A real fault leaves traces on both. If the model
+  eventually succeeds and the fetch works, that was this, and the fix is a
+  better tool-calling model rather than anything in Eureka or the server.
+- Hermes's own `mcp_tool.py:6189 RuntimeWarning: coroutine
+  'MCPServerTask._watch_stdio_children' was never awaited` is upstream and
+  harmless. Also not ours.
 
 ## Dispatching a task (/v1/assign)
 
