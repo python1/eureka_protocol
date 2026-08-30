@@ -85,7 +85,7 @@ for _var in ("EUREKA_IDENTITY_PATH", "EUREKA_TRUST_PATH"):
 
 from mcp.server import MCPServer  # noqa: E402
 
-from eureka_protocol.src.eureka_daemon import assign, client, tls  # noqa: E402
+from eureka_protocol.src.eureka_daemon import assign, client, reads, tls  # noqa: E402
 from eureka_protocol.src.eureka_daemon.crypto import (  # noqa: E402
     EurekaCrypto,
     resolve_identity_path,
@@ -303,9 +303,13 @@ async def eureka_fetch(url: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
 @server.tool(
     name="eureka_peer_status",
     description=(
-        "Check the Eureka peer: complete a mutual handshake and report whether "
-        "this node is trusted by it. Use this to tell a provisioning problem "
-        "(untrusted_key) from a permission problem (capability_not_granted)."
+        "Check the Eureka peer: complete a mutual handshake, report whether "
+        "this node is trusted by it, and list the capabilities the peer "
+        "advertises. Use this to tell a provisioning problem (untrusted_key) "
+        "from a permission problem (capability_not_granted). NOTE: the "
+        "advertised list is what the peer offers to authenticated callers, "
+        "NOT proof that this node may run any of it -- grants are held on the "
+        "peer and only an actual request reveals them."
     ),
 )
 async def eureka_peer_status() -> str:
@@ -317,12 +321,42 @@ async def eureka_peer_status() -> str:
                 if not ok:
                     return _fail("handshake", reason, peer=PEER_URL,
                                  this_node=node.node_id)
+
+                # The capability list is a real disclosure, so it rides the
+                # authenticated POST rather than the open GET. Its failure is
+                # reported without failing the status call: the handshake is
+                # the fact being established here, and it already succeeded.
+                advertised: Optional[list] = None
+                manifest_reason: Optional[str] = None
+                answer = (await http.post(
+                    "/v1/manifest",
+                    json=reads.build_read_query(node, reads.MANIFEST_EVENT),
+                )).json()
+                if answer.get("reason") == GATE_OK:
+                    manifest = answer.get("manifest") or {}
+                    got = manifest.get("capabilities")
+                    advertised = list(got) if isinstance(got, list) else None
+                else:
+                    manifest_reason = answer.get("reason")
+
                 return json.dumps({
                     "ok": True,
                     "peer": PEER_URL,
                     "peer_id": hs.get("peer_id"),
                     "this_node": node.node_id,
                     "mutual": hs.get("mutual", False),
+                    # What the peer OFFERS. Not what this node is permitted to
+                    # run: is_permitted intersects this with a grant held on
+                    # the peer, and the refusal for "not granted" and "not
+                    # offered" is deliberately the same, so the two cannot be
+                    # told apart from here.
+                    "peer_advertises": advertised,
+                    "advertised_read_failed": manifest_reason,
+                    "note": (
+                        "peer_advertises is the peer's offered list, not a "
+                        "grant. Only an assign shows whether this node may "
+                        "run one of them."
+                    ),
                     "identity_path": str(resolve_identity_path()),
                     "trust_path": str(resolve_trust_path()),
                 }, ensure_ascii=False)

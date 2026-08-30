@@ -951,9 +951,26 @@ Config, in `~/.hermes/config.yaml`, written by `hermes mcp add`:
 
 It exposes two tools. `eureka_fetch(url, max_chars)` handshakes, issues a
 signed `web-retrieval` assign, **verifies the result signature before returning
-any content**, and hands back JSON. `eureka_peer_status()` handshakes and
-stops, which is what tells a provisioning problem (`untrusted_key`) apart from
-a permission problem (`capability_not_granted`) without running anything.
+any content**, and hands back JSON. `eureka_peer_status()` handshakes and reads
+the peer's manifest, which is what tells a provisioning problem
+(`untrusted_key`) apart from a permission problem (`capability_not_granted`)
+without running anything.
+
+**`peer_advertises` is what the peer offers, not what this node may run**, and
+the distinction is not pedantic. `is_permitted` intersects the advertised list
+with a grant held on the peer, and the refusal for "not granted" and "not
+offered here" is deliberately identical, so nothing readable from this side can
+separate them. A peer can advertise `web-retrieval` and refuse it to this
+caller; only an actual assign settles it. The field is labelled that way, and
+carries a note saying so, because a status tool that implied permission would
+be answering a question it cannot see the answer to.
+
+The list rides the authenticated `POST /v1/manifest` rather than the open GET,
+which carries `node_id` and `runtime` only -- the capability list says what a
+node can be asked to do, which is a real disclosure and waits until the caller
+has proved who it is. If that read fails the status call still succeeds: the
+handshake is the fact being established, it already happened, and the failure
+is reported in `advertised_read_failed` rather than discarding a good result.
 
 **An unverified result is a failure, not a warning.** The server checks that a
 `result_signature` is present, that the TLS pin was read, that the signature
