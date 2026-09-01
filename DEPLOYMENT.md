@@ -11,8 +11,9 @@ Eureka".
 A third node joined on 2026-09-01: `ct102-openclaw` on CT 102, the host that
 holds the origin repo and runs Antiochus. It is an initiator only — no daemon,
 no listening port — and it proved a signed `/v1/assign` against CT 101 the same
-day. See "Adding Antiochus as a third node (CT 102)". It is not yet wired into
-OpenClaw; the script is driven by hand.
+day. See "Adding Antiochus as a third node (CT 102)". Later the same day it was
+wired into OpenClaw and is reachable from Telegram — see "Reaching Eureka from
+Telegram".
 
 ## Nodes
 
@@ -1525,7 +1526,7 @@ refusal downstream would be a lie about the grant. So the script calls
 `load()` on both and injects the results, and a wrong path fails in the shell
 naming the path it could not read.
 
-### What was proven, 2026-09-01
+### What was proven, 2026-09-01: the node itself
 
 A signed `/v1/assign` from `node_485428e3` to CT 101 fetched `https://example.com`
 — HTTP 200, 559 bytes, `text/html` — and the result signature verified against
@@ -1573,6 +1574,143 @@ so nobody reads a 0.5s skew as the cause of a refusal it cannot produce. A
 slept host drifting far enough to matter is a real failure mode; this was not
 yet it.
 
+## Reaching Eureka from Telegram (OpenClaw, CT 102)
+
+Done 2026-09-01. Antiochus now calls CT 101 through the same MCP server WSL
+uses. `ct102-openclaw` is reachable from a Telegram message, and the tool that
+answers is the one whose result carries a verified signature.
+
+**OpenClaw's MCP support is real, and its own guides do not document it.** There
+is no `mcp.md` anywhere under `docs/`; the only mentions are the `mcporter`
+skill (a CLI for calling *other* people's servers) and `migrate-claude`. Read
+the docs alone and the reasonable conclusion is that OpenClaw cannot host an
+MCP server and the integration has to be a skill shelling out through `exec`.
+That conclusion is wrong. The support is first class -- `dist/` carries
+`mcp-stdio`, `agent-bundle-mcp-runtime` and `mcp-cli`, `@modelcontextprotocol/sdk`
+is vendored, and there is a full `openclaw mcp` command group. Check
+`openclaw mcp --help` before believing the documentation on this point.
+
+### One server, two hosts
+
+`integrations/eureka_mcp_server.py` runs unmodified on both WSL and CT 102.
+Only the environment differs. That is the whole reason it was committed rather
+than left on one machine: a second copy is the thing that drifts, and the two
+callers would have diverged on the day one of them was fixed.
+
+    openclaw mcp add eureka \
+      --command /root/eureka_venv/bin/python \
+      --arg /root/.openclaw/workspace/eureka_protocol/integrations/eureka_mcp_server.py \
+      --env EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key \
+      --env EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json \
+      --env EUREKA_PEER=https://192.168.1.180:8443 \
+      --env EUREKA_MAX_CHARS=8000 \
+      --env EUREKA_TASK_NAME=antiochus-fetch \
+      --timeout 90
+
+`mcp add` **probes the server before saving**, so a command that cannot start is
+not written into the config at all. It lands under `mcp.servers` in
+`~/.openclaw/openclaw.json`.
+
+Three of those values are load bearing:
+
+- **`--timeout 90`** is OpenClaw's per-request ceiling and must sit *above* the
+  client's own `EUREKA_CLIENT_TIMEOUT` (60s), which in turn sits above the
+  responder's 30s registry deadline. Set it lower and OpenClaw cuts off a fetch
+  the client is still legitimately waiting on, which presents as a tool failure
+  rather than as the timeout it is.
+- **`EUREKA_MAX_CHARS=8000`**, not the 20000 default. That default was sized for
+  Hermes's context window; a Telegram reply is not that.
+- **`EUREKA_TASK_NAME=antiochus-fetch`** -- see below.
+
+No `cwd` is set. `_find_package_root()` resolves the package from `__file__`,
+so the server runs from any working directory, and a `cwd` here would be one
+more field to keep true for no benefit.
+
+The venv is `/root/eureka_venv`, the same one the client and the test suite use,
+with `mcp` added to it. Installing it changed nothing else: `httpx` stayed at
+0.28.1 and `cryptography` at 50.0.0, because `mcp` pulls `httpx2`/`httpcore2`
+as *separate* packages rather than upgrading either. The freeze diff was
+additions only, and the 616 tests still pass on that interpreter.
+
+### The task name, and why it got its own variable
+
+`build_assign_query` was called with a hardcoded `"hermes-fetch"` for as long as
+WSL was the only caller. CT 102 then started running the same file, and its
+fetches were filed in CT 101's audit log under Hermes's name.
+
+Nothing broke. That is exactly what makes it worth fixing: the log kept working
+and started lying, and the log is how a future reader answers "who ran this".
+**An audit trail that misattributes work is worse than no audit trail** -- the
+absent one prompts a question, the wrong one answers it confidently.
+
+So the name comes from `EUREKA_TASK_NAME`, defaulting to `hermes-fetch`. The
+default is not laziness: WSL predates the variable, and a default of anything
+else would silently change that host's identity in the log the day it picked up
+a new commit. A host that never sets it writes exactly what it always wrote.
+
+The two `hermes-fetch` entries CT 102 wrote on 2026-09-01 between 06:14 and
+06:20 are left in the journal as they are. An audit log is not rewritten to
+make it tidy; those entries are a true record that the daemon logged that name,
+and this paragraph is the record of why it was wrong.
+
+### Applying config changes without restarting the agent
+
+Antiochus is a live Telegram agent, so the sequence matters:
+
+    cp -p ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.pre-<change>-<date>
+    # generate the change against a COPY, diff it, then apply
+    OPENCLAW_CONFIG_PATH=~/.openclaw/openclaw.json.candidate openclaw mcp set eureka '<json>'
+    diff -u ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.candidate
+    cat ~/.openclaw/openclaw.json.candidate > ~/.openclaw/openclaw.json   # preserves inode/owner/mode
+    openclaw config validate
+    openclaw mcp reload
+
+`OPENCLAW_CONFIG_PATH` is what makes the review honest: OpenClaw writes the
+candidate itself, so the diff is the tool's own output rather than a
+hand-built guess at what it would do.
+
+**`openclaw mcp reload` disposes the cached MCP runtimes and agents pick up the
+new config on their next turn. The gateway is never restarted** -- PID unchanged
+across both changes made on 2026-09-01, `NRestarts=0`, no Telegram downtime.
+
+Rollback is `openclaw mcp unset eureka && openclaw mcp reload`, or restoring the
+backup. **Do not roll back to `openclaw.json.last-good`**: OpenClaw refreshes
+that file itself once a config validates, so within minutes of a successful
+change it is a copy of the *new* config, not the old one. The dated
+`pre-<change>` backup is the rollback point.
+
+The gateway is a **user** systemd unit,
+`/root/.config/systemd/user/openclaw-gateway.service`, enabled, `Restart=always`.
+A system-scope `systemctl status openclaw-gateway` reports "could not be found",
+which looks alarming and means nothing -- use `systemctl --user`, with
+`XDG_RUNTIME_DIR=/run/user/0` when not on a login session.
+
+### What was proven, 2026-09-01: the Telegram path
+
+`openclaw agent --session-id <scratch>` runs one turn through the Gateway, which
+is the same path a Telegram message takes, without `--deliver` so nothing is
+sent to the channel. Asked to fetch `https://example.com` through the peer, the
+agent returned HTTP 200, signature-verified, "Example Domain".
+
+**The agent's own answer is not the evidence.** It could have used its ordinary
+web tool and produced the same three facts. CT 101's journal is the witness:
+`Handshake established with node_485428e3` and an `EUREKA-LOG` at the matching
+second, which nothing but a real signed assign from CT 102 produces.
+
+Transport was audited directly rather than assumed. Driving the server over raw
+stdio JSON-RPC, every line on stdout parsed as JSON-RPC during a live fetch,
+while `[NODE node_485428e3] Handshake established` went to stderr where
+`_protocol_safe_stdout()` puts it. This is the failure that broke the Hermes
+server before it was fixed, and it is worth re-checking after any change to
+that file: the symptom is not a noisy log, it is a server the client reports as
+dead.
+
+Two harness traps, since both cost time here. Feeding every request and then
+closing stdin makes the server exit on EOF mid-call, which surfaces as
+`"Connection closed"` and looks like a server fault -- a real client holds stdin
+open, and so must a test. And `mcp add`'s probe proves the server *starts and
+lists tools*; only an agent turn proves the tools reach the model.
+
 ## Not yet done
 
 DHT discovery (addresses are still configured by hand), NAT traversal, WAN.
@@ -1586,9 +1724,11 @@ Confirmed against the WSL peer on 2026-08-29: the grant and the executor have
 both been exercised over the wire, so nothing on this list is waiting on that
 any more. See "What the WSL peer proved".
 
-Antiochus is provisioned but not wired into OpenClaw: `ct102-openclaw` is
-driven by hand through `integrations/antiochus_client.py`, and nothing in the
-agent calls it yet. That is deliberately a separate piece of work.
+Antiochus is wired into OpenClaw as of 2026-09-01 and reachable from Telegram
+-- see "Reaching Eureka from Telegram". `integrations/antiochus_client.py`
+remains the hand-driven path, and is still the right thing to reach for when
+the question is whether the *node* works, since it exercises the protocol
+without the agent, the model or the MCP transport in the way.
 
 Mutual TLS is evaluated and deliberately not planned; see the TLS section above
 for why.

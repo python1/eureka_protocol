@@ -110,6 +110,15 @@ CLIENT_TIMEOUT = float(os.environ.get("EUREKA_CLIENT_TIMEOUT", "60"))
 # Hermes spills mcp_* tool results over 50,000 chars to disk. Truncating here
 # keeps a normal page inside the model's context and says so when it cuts.
 DEFAULT_MAX_CHARS = int(os.environ.get("EUREKA_MAX_CHARS", "20000"))
+# What the peer records this host as having asked for. It lands in the
+# responder's audit log verbatim, so it is the name a future reader uses to
+# work out WHO ran a task -- which makes a wrong one worse than none at all.
+# It was hardcoded "hermes-fetch" while WSL was the only caller; CT 102 now
+# runs this same file, and its fetches were being filed under Hermes's name.
+# The default stays "hermes-fetch" so the host that predates this variable
+# keeps writing exactly what it always wrote, and does not silently change
+# identity in the log the day it picks up a new commit.
+TASK_NAME = (os.environ.get("EUREKA_TASK_NAME") or "hermes-fetch").strip()
 
 # --- (c) every refusal this protocol can produce, in words -----------------
 # Keyed by the reason strings the daemon actually returns. Anything missing
@@ -248,7 +257,7 @@ async def eureka_fetch(url: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
                     return _fail("handshake", reason, peer=PEER_URL)
 
                 query = assign.build_assign_query(
-                    node, "web-retrieval", "hermes-fetch", {"url": url})
+                    node, "web-retrieval", TASK_NAME, {"url": url})
                 response = await http.post("/v1/assign", json=query)
                 answer = response.json()
                 pin = tls.peer_key_from_response(response)
@@ -367,5 +376,6 @@ async def eureka_peer_status() -> str:
 
 if __name__ == "__main__":
     print(f"eureka-mcp: peer={PEER_URL} timeout={CLIENT_TIMEOUT}s "
-          f"identity={resolve_identity_path()}", file=sys.stderr, flush=True)
+          f"task={TASK_NAME} identity={resolve_identity_path()}",
+          file=sys.stderr, flush=True)
     server.run("stdio")
