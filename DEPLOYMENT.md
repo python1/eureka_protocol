@@ -1,4 +1,4 @@
-# Eureka Protocol — working two-node deployment
+# Eureka Protocol — working three-node deployment
 
 First successful cross-machine mutual handshake: 2026-08-24, commit 976c1f1.
 Responder moved from CT 102 to its own container, CT 101, on 2026-08-28 —
@@ -8,12 +8,26 @@ peer exercised end to end on 2026-08-29 — see "What the WSL peer proved". That
 peer is now driven by Hermes Agent over MCP; see "Hermes Agent reaching
 Eureka".
 
+A third node joined on 2026-09-01: `ct102-openclaw` on CT 102, the host that
+holds the origin repo and runs Antiochus. It is an initiator only — no daemon,
+no listening port — and it proved a signed `/v1/assign` against CT 101 the same
+day. See "Adding Antiochus as a third node (CT 102)". It is not yet wired into
+OpenClaw; the script is driven by hand.
+
 ## Nodes
 
 | Node | Host | node_id | public key |
 |---|---|---|---|
 | eureka-node | CT 101 (192.168.1.180), Debian 13 unprivileged | node_a2ed8dc7 | a718592fde751a92db31fa27ee1e88efbd6c1134753fd9a5d92b08b89d118fd1 |
 | wsl-hermes | Alienware WSL2 (Ubuntu 24.04) | node_ef0a1f59 | bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae |
+| ct102-openclaw | CT 102 (192.168.1.174), the origin-repo host | node_485428e3 | c373fd0d8b58bb325895859cdc065a2ed767a881717bd0246b617dcda335feba |
+
+**`ct102-antiochus` is not a name in this table, and must not become one.** It
+was `eureka-node`'s label before the move, so in this document it means key
+`a718592f...` — the identity CT 101 serves. Antiochus's own node is
+`ct102-openclaw`, key `c373fd0d...`, and the two have never shared a key. The
+label was retired rather than reused precisely so that a reader who greps this
+file for `ct102-antiochus` finds one meaning instead of two.
 
 `eureka-node` was `ct102-antiochus` until the move. Only the label and the
 address changed: the key is the same bytes, so `node_a2ed8dc7` and the pinned
@@ -35,12 +49,31 @@ this host, so the test suite runs against /opt/eureka/venv too.
 
 CT 102 (192.168.1.174) still holds the origin repo at
 /root/.openclaw/workspace/eureka_protocol and its development venv
-/root/eureka_venv. Its daemon is stopped and disabled as of 2026-08-28 and its
-/var/lib/eureka is left intact — that copy of the identity is now a backup, and
-two hosts must never serve this identity at once. Its `trust.json` there is
-still v1 (checked 2026-08-28) and predates the grant, so that backup restores
-the identity and an allowlist that grants nothing. Same for
+/root/eureka_venv. Since 2026-09-01 it is also a node in its own right:
+identity /var/lib/eureka-antiochus/identity.key, trust
+/var/lib/eureka-antiochus/trust.json, both root-owned in a 0700 directory. It
+runs no daemon — it initiates and nothing listens — so there is no service unit
+and no TLS material on this host.
+
+**CT 102 has two eureka state directories, and only one of them is Antiochus.**
+
+| directory | what it is | who uses it |
+|---|---|---|
+| `/var/lib/eureka-antiochus` | Antiochus's own identity, `node_485428e3` | `ct102-openclaw`, live |
+| `/var/lib/eureka` | the pre-move backup of `node_a2ed8dc7` | nobody — CT 101 serves that identity |
+
+The second one is the trap, and it is why the paths above are spelled out
+rather than left to default. Its daemon is stopped and disabled as of
+2026-08-28 and the directory is left intact — that copy of the identity is a
+backup, and two hosts must never serve this identity at once. Its `trust.json`
+there is still v1 (checked 2026-08-28) and predates the grant, so that backup
+restores the identity and an allowlist that grants nothing. Same for
 `/root/trust.json.v1.bak-20260828` on CT 101 — see "Granting a capability".
+
+Pointing anything on CT 102 at `/var/lib/eureka` would bring up a second
+`node_a2ed8dc7` holding the same private key CT 101 is serving. It would
+handshake — CT 101 trusts that key — and the mesh would contain two nodes that
+cannot be told apart. Nothing prevents this but the explicit paths.
 
 WSL: repo ~/eureka/eureka_protocol, venv ~/eureka/venv,
 identity ~/.eureka/identity.key, trust ~/.eureka/trust.json
@@ -581,6 +614,14 @@ once that way before the remote was removed.
 So `origin` is gone rather than repointed, and a bare `git fetch` is now inert:
 no remote, no tracking ref, nothing to move. `git status` reports no upstream,
 which is the honest description of a host that has no reachable remote.
+
+**Since 2026-09-01 CT 102 can reach CT 101 directly** (`ssh ct101`, key auth),
+so a bundle no longer has to be relayed by hand through the MacBook. The two-hop
+`scp` in step 2 below collapses to one, and the rest of the procedure is
+unchanged — the bundle is still the transport, because CT 101 still has no
+remote and still must refuse a bundle built against the wrong history. Use the
+direct route; the hop is kept in the text because it is the route every bundle
+before that date took.
 
 Repointing it at the MacBook is not currently possible without widening access.
 CT 101 holds no private key at all (`/root/.ssh` has `authorized_keys` and
@@ -1348,6 +1389,190 @@ reads; `handlers.REASON_OK` is `"ok"`, the work's verdict, which lives inside
 the exact distinction the row above is about, tripped over while testing it.
 Import the constants rather than typing the strings.
 
+## Adding Antiochus as a third node (CT 102)
+
+Done 2026-09-01, at master c230d37. CT 102 already held the origin repo and ran
+Antiochus; what it did not have was an identity of its own. It now initiates to
+CT 101 as `ct102-openclaw` / `node_485428e3`.
+
+**It is an initiator, not a responder.** No daemon, no unit, no listening port,
+no TLS material. It advertises nothing and executes nothing, which is what a
+client node is here: built with `capabilities=[]` and no handler registry, so an
+assign that somehow reached it would be refused rather than dispatched.
+
+**Its trust file grants CT 101 nothing, and that is not an oversight.** Trusting
+a key and granting it a capability are different acts. Trust is what CT 102
+needs to *call* CT 101 — the TLS pin checks the key that terminated the
+connection against this file, and the handshake checks the key that signed
+message 2. Grants govern the other direction: what a peer may ask of us. There
+is nothing here to ask for, so a grant would name a capability this node could
+never honour — and, because the client loads its trust file with
+`advertised=[]`, writing one in is a load error rather than a line that sits
+there looking effective.
+
+### 1. Mint the identity, at an explicit path
+
+`/var/lib/eureka` on CT 102 is the pre-move backup of `node_a2ed8dc7` and must
+not be reused — see "Paths". Antiochus gets its own directory:
+
+    mkdir -p -m 0700 /var/lib/eureka-antiochus
+    /root/eureka_venv/bin/python -c "
+    from eureka_protocol.src.eureka_daemon.crypto import EurekaCrypto
+    c = EurekaCrypto()
+    c.save('/var/lib/eureka-antiochus/identity.key')   # no overwrite=True
+    print(c.derive_node_id(), c.get_public_key_hex())
+    "
+
+`save()` without `overwrite=True` refuses to clobber an existing identity, so
+this cannot silently replace a node. Run from `/root/.openclaw/workspace` so
+`eureka_protocol` imports.
+
+### 2. Write CT 102's trust file
+
+    /root/eureka_venv/bin/python -c "
+    import json
+    from eureka_protocol.src.eureka_daemon.trust import TrustList
+    t = TrustList()
+    t.add('eureka-node',
+          'a718592fde751a92db31fa27ee1e88efbd6c1134753fd9a5d92b08b89d118fd1', [])
+    with open('/var/lib/eureka-antiochus/trust.json', 'w') as fh:
+        json.dump(t.to_document(), fh, indent=2); fh.write('\n')
+    "
+    chmod 0600 /var/lib/eureka-antiochus/trust.json
+
+CT 101's public key came from its identity file over ssh — an authenticated
+channel — and was cross-checked against the node table above and the
+`peers should pin:` line the daemon prints at startup. Do not take it from an
+unauthenticated fetch: the key is the whole basis of the pin.
+
+### 3. Grant on CT 101
+
+By the procedure in "Granting a capability", unchanged, with one addition worth
+keeping: generate the new file as a *candidate* and diff it against the live one
+before anything is written in place.
+
+    cd /opt/eureka && /opt/eureka/venv/bin/python -c "
+    import json
+    from eureka_protocol.src.eureka_daemon.trust import TrustList
+    t = TrustList.load('/var/lib/eureka/trust.json')
+    t.add('ct102-openclaw',
+          'c373fd0d8b58bb325895859cdc065a2ed767a881717bd0246b617dcda335feba',
+          ['web-retrieval'])
+    with open('/root/trust.json.candidate', 'w') as fh:
+        json.dump(t.to_document(), fh, indent=2); fh.write('\n')
+    "
+    diff -u /var/lib/eureka/trust.json /root/trust.json.candidate
+
+The diff is the review. It showed one added peer and `wsl-hermes` untouched,
+which is the property that actually matters — a trust edit that quietly alters
+an existing peer is the failure this catches. The candidate was also
+load-checked *before* being put in place, which the original procedure does not
+do: it validates after the in-place rewrite, when a bad grant has already
+touched the live file. Checking the candidate first costs nothing and leaves the
+live file pristine when it fails.
+
+Then steps 1–4 of "Granting a capability" as written: back up, rewrite in place
+as the `eureka` user, load-check the live path, restart. The backup from this
+run is `/root/trust.json.bak-20260901`.
+
+Confirm the rewrite preserved the inode (`stat -c %i`) — it did, 433 before and
+after. A shell redirect would have created a new file owned by root, and the
+daemon would fail to read it.
+
+### What the run produced, 2026-09-01
+
+CT 101's allowlist, loaded as the daemon loads it:
+
+    advertised by this node : ['web-retrieval']
+    peers on the allowlist  : 2
+    revocations             : 0
+
+      wsl-hermes       bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae
+                       grants=['web-retrieval'] web-retrieval=True code-exec=False
+      ct102-openclaw   c373fd0d8b58bb325895859cdc065a2ed767a881717bd0246b617dcda335feba
+                       grants=['web-retrieval'] web-retrieval=True code-exec=False
+
+`wsl-hermes`'s entry is byte-identical to the pre-change backup. The restart
+brought the daemon back as `node_a2ed8dc7` with `NRestarts=0`, pinning the same
+key — a node_id that moves across a trust edit means the wrong file was edited,
+not that the grant was bad.
+
+### Driving it: integrations/antiochus_client.py
+
+Version controlled, and the Antiochus-side counterpart to
+`eureka_mcp_server.py`: same protocol path, no MCP. It is what proves the node
+before anything is wired into OpenClaw.
+
+    export EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key
+    export EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json
+    /root/eureka_venv/bin/python integrations/antiochus_client.py https://example.com
+
+stdout is the JSON result and nothing else; progress and EurekaNode's own prints
+go to stderr. It verifies, in order: the handshake authenticated over TLS with
+the peer's key pinned; the gate said `authenticated` rather than a refusal; a
+result signature is present and a TLS pin was captured to check it against; the
+signature verifies in the assign-result domain; and the nonce inside the signed
+result is the nonce that was sent. Only then is the body read.
+
+**The paths are required and the script will not invent them.** This is the one
+place it deliberately departs from the rest of the codebase:
+`EurekaCrypto.load_or_create()` mints a key when the file is missing, and
+`EurekaNode`'s constructor falls back to `TrustList.load_or_empty()`, which
+turns a missing trust file into an empty allowlist. Both are correct for a
+daemon's first boot and both are silent here — a typo'd path would produce a
+node with a new identity that no peer trusts, trusting nobody, and every
+refusal downstream would be a lie about the grant. So the script calls
+`load()` on both and injects the results, and a wrong path fails in the shell
+naming the path it could not read.
+
+### What was proven, 2026-09-01
+
+A signed `/v1/assign` from `node_485428e3` to CT 101 fetched `https://example.com`
+— HTTP 200, 559 bytes, `text/html` — and the result signature verified against
+the key that terminated TLS, bound to the nonce that was sent.
+
+Three runs, and **the contrast is the point**, same as `demo.sh`:
+
+| run | identity | asks for | outcome |
+|---|---|---|---|
+| trusted | `node_485428e3` | `web-retrieval` | `ok: true`, verified, page returned |
+| untrusted | throwaway key, same trust file | `web-retrieval` | refused `untrusted_key` at handshake |
+| ungranted | `node_485428e3` | `code-exec` | refused `capability_not_granted` at the gate |
+
+The second run differs from the first in exactly one variable — which key signs
+— so a green first run is not merely reachability. The third shows the grant is
+narrow: the same authenticated peer is refused for a capability it does not
+hold, which is also the answer for a capability the node does not advertise,
+since `is_permitted` folds both into one `False`.
+
+The journal shows the shape of what gets recorded. Both authenticated runs
+produced an `EUREKA-LOG` entry — the refused one included, because a refusal of
+an authenticated caller is part of the record of what this node did about it.
+The untrusted run produced none: an unverified `requester_id` is a claim, and
+attributing log entries to claims would let anyone write history under anyone's
+name.
+
+**`wsl-hermes` re-verified on the wire, same day.** The trust edit added a peer
+and the file said its entry was untouched, but the file is not the wire, and
+`wsl-hermes` is an initiator that nothing on CT 102 can drive. The Alienware
+came up and ran `demo.sh`: trusted PASS (`authenticated` True, `mutual` True,
+peer `node_a2ed8dc7`), untrusted PASS (refused `untrusted_key`). `node_ef0a1f59`
+unchanged. Both scenarios, because a trusted PASS on its own only shows
+reachability.
+
+So the third node was added with no observable effect on the second — which is
+the property a trust edit has to have, and the only way to know it is to ask the
+other peer rather than to re-read the file you just wrote.
+
+One wrinkle worth writing down: the WSL host had slept, and its clock was 0.5s
+off. It was corrected with `ntpdate` before the run. **That was hygiene, not the
+fix** — the handshake freshness window is 30s
+(`HANDSHAKE_FRESHNESS_SECONDS`), so half a second is nowhere near
+`stale_timestamp`, and a run at that offset would have passed anyway. Recorded
+so nobody reads a 0.5s skew as the cause of a refusal it cannot produce. A
+slept host drifting far enough to matter is a real failure mode; this was not
+yet it.
+
 ## Not yet done
 
 DHT discovery (addresses are still configured by hand), NAT traversal, WAN.
@@ -1360,6 +1585,10 @@ rather than gating a stub. Task execution itself is no longer on this list --
 Confirmed against the WSL peer on 2026-08-29: the grant and the executor have
 both been exercised over the wire, so nothing on this list is waiting on that
 any more. See "What the WSL peer proved".
+
+Antiochus is provisioned but not wired into OpenClaw: `ct102-openclaw` is
+driven by hand through `integrations/antiochus_client.py`, and nothing in the
+agent calls it yet. That is deliberately a separate piece of work.
 
 Mutual TLS is evaluated and deliberately not planned; see the TLS section above
 for why.
