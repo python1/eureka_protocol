@@ -20,7 +20,7 @@ Telegram".
 | Node | Host | node_id | public key |
 |---|---|---|---|
 | eureka-node | CT 101 (192.168.1.180), Debian 13 unprivileged | node_a2ed8dc7 | a718592fde751a92db31fa27ee1e88efbd6c1134753fd9a5d92b08b89d118fd1 |
-| wsl-hermes | Alienware WSL2 (Ubuntu 24.04) | node_ef0a1f59 | bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae |
+| wsl-hermes | Alienware WSL2 (Ubuntu 24.04), 192.168.1.152 | node_ef0a1f59 | bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae |
 | ct102-openclaw | CT 102 (192.168.1.174), the origin-repo host | node_485428e3 | c373fd0d8b58bb325895859cdc065a2ed767a881717bd0246b617dcda335feba |
 
 **`ct102-antiochus` is not a name in this table, and must not become one.** It
@@ -76,8 +76,13 @@ Pointing anything on CT 102 at `/var/lib/eureka` would bring up a second
 handshake — CT 101 trusts that key — and the mesh would contain two nodes that
 cannot be told apart. Nothing prevents this but the explicit paths.
 
-WSL: repo ~/eureka/eureka_protocol, venv ~/eureka/venv,
-identity ~/.eureka/identity.key, trust ~/.eureka/trust.json
+WSL (192.168.1.152, user `stunner`): repo ~/eureka/eureka_protocol, venv
+~/eureka/venv, identity ~/.eureka/identity.key, trust ~/.eureka/trust.json.
+Since 2026-09-01 it runs a daemon as well as initiating -- unit
+`eureka-daemon-wsl.service`, TLS material in /var/lib/eureka-wsl/tls, which is
+derived state and safe to delete. **Nothing writes to ~/.eureka**: the identity
+and trust file are read, and the service mounts /home read-only. See "Stand up
+the responder on WSL".
 
 ## Trust file format
 
@@ -833,6 +838,195 @@ it is what a fresh clone here would have to come from, and the clone that
 created it is what left the `origin` remote that had to be removed. See
 "Advancing CT 101 to a new commit".
 
+## Stand up the responder on WSL (wsl-hermes)
+
+`wsl-hermes` initiated for its whole life and listened for none of it. Since
+2026-09-01 it also serves: same key, same `node_ef0a1f59`, TLS on 8443, under
+systemd inside WSL. Nothing about its initiating side changed -- the MCP server
+config is untouched and Hermes still reaches CT 101 exactly as before.
+
+**One node, two roles, one identity, and only one listener.** The daemon is the
+only thing bound to a port here; the MCP server is a short-lived subprocess
+Hermes spawns that initiates and exits. That is the same rule the daemon
+enforces internally by serving both its listeners from one process: two
+*listeners* under one identity would keep two replay tables and two peer
+tables. An initiator sharing the identity keeps neither, so it is not the thing
+that rule forbids.
+
+### What it advertises, and what that is not
+
+It advertises **`web-retrieval`, and nothing else** -- not nothing. The
+advertised list is derived from the handler registry (`api.py` builds the node
+with `default_registry()`; `EurekaNode.__init__` takes the list from it), and
+`default_registry()` registers a real `WebRetrieval`. A node cannot advertise
+more than it can run: `validate_advertised` makes an advertised capability with
+no handler a startup error.
+
+**Advertising is a claim about this node; granting is a decision about a peer,
+and this host grants nothing.** CT 101 and CT 102 are in WSL's trust file with
+`"capabilities": []`. They handshake; an `/v1/assign` from either is refused
+before dispatch, because `is_permitted` intersects the advertised list with a
+grant held here. Standing the responder up did not hand anybody a capability,
+and the two questions have to stay separate -- CT 101 has advertised
+`web-retrieval` since the registry landed while granting it to exactly two keys.
+
+The refusal for "not granted" and "not offered here" is deliberately identical,
+so nothing readable from the far side distinguishes them.
+
+### Why supervision needed deciding before anything was written
+
+WSL2 has no init by default, and the distro's VM stops once the last process
+exits. A daemon started with `nohup` from a terminal dies with the WSL session
+that started it, which is the same failure CT 101 was moved off of -- "a daemon
+living in an SSH session dies with the session".
+
+Two separate problems, and they need two mechanisms:
+
+| problem | mechanism |
+|---|---|
+| restart the process when it dies | systemd inside WSL |
+| make sure a WSL instance exists at all | Windows Task Scheduler |
+
+systemd was **already enabled** on this host (`[boot] systemd=true` in
+`/etc/wsl.conf`, PID 1 is `systemd`), so the disruptive `wsl --shutdown` that
+enabling it would have required was not needed. Check before assuming:
+
+    cat /etc/wsl.conf; ps -p 1 -o comm=
+
+The alternative -- a hand-written respawn loop -- was rejected. It means
+reimplementing backoff and a crash-loop guard that systemd already gets right,
+and it gives this host a different operational surface from CT 101 for no gain.
+`deploy/eureka-daemon-wsl.service` is a near-copy of `deploy/eureka-daemon.service`
+and the differences are all forced by the host; see below.
+
+### What the unit does differently from CT 101's, and why
+
+| CT 101 | WSL | reason |
+|---|---|---|
+| `User=eureka` | `User=stunner` | the identity, venv and repo are all under `~stunner`. A separate account would need read access across that whole home directory -- more exposure, not less. |
+| `ProtectHome=yes` | `ProtectHome=read-only` | CT 101 keeps key, interpreter and code outside `/home` and can hide it entirely. Here all three are inside it. `read-only` is the useful half: the identity **can be read and cannot be written by this service**, which is what "do not touch the key material" asks for, enforced by the kernel rather than by everyone remembering. |
+| `StateDirectory=eureka` | `StateDirectory=eureka-wsl` | a directory called `eureka` on a second host is how somebody eventually copies an identity into the wrong one. Same reason CT 102's is `eureka-antiochus`. |
+| `--tls-dir /var/lib/eureka/tls` | `--tls-dir /var/lib/eureka-wsl/tls` | **not the default.** The default writes the certificate *and its key* beside the identity file, which would put a second copy of this node's private key inside `~/.eureka`. Explicit keeps that directory read-only in practice as well as in policy. |
+| — | `PYTHONDONTWRITEBYTECODE=1` | the repo is on a read-only mount for this service, so CPython cannot write `__pycache__` beside the source. Saying so beats letting it discover that per import. |
+| — | `ExecStartPre=deploy/wsl-preflight.sh` | see below. |
+
+### The preflight, and the two things it refuses to default
+
+**`deploy/wsl-preflight.sh` runs as `ExecStartPre=`, so a provisioning mistake
+is a start failure with a reason in the journal instead of a running daemon
+that is wrong.**
+
+Two behaviours in the library are deliberately forgiving, and on a host being
+redeployed rather than born, that forgiveness is how a node quietly stops being
+itself:
+
+- `EurekaCrypto.load_or_create()` **creates a key when the path does not
+  exist.** A typo'd `EUREKA_IDENTITY_PATH` does not fail -- it mints a new
+  identity and the daemon comes up under a `node_id` no peer has ever trusted,
+  looking perfectly healthy. This is the same trap `demo.sh` hits (see "demo.sh
+  needs the identity paths too") and the same one the unit's `Environment=`
+  lines exist to prevent on CT 101.
+- `TrustList.load_or_empty()` treats a **missing** trust file as an empty
+  allowlist. Correct for a node with no peers yet; indistinguishable from a
+  trust file that failed to deploy. The daemon starts and refuses everyone.
+
+Both are right for the library. Neither is right here, so the preflight makes
+all four paths required rather than defaulted (`${VAR:?}`, not a fallback --
+a fallback is the bug it exists to catch), requires the files to already
+exist, and checks that the identity **hashes to the `node_id` named in the
+unit**. That last one is the guard that turns "must not change" from an
+intention into a check: `EUREKA_EXPECT_NODE_ID=node_ef0a1f59`.
+
+It derives the advertised list from `default_registry()` rather than taking a
+list typed into the script -- typing one is how a check like this drifts from
+the daemon and starts passing trust files the daemon will refuse.
+
+All four refusals, exercised 2026-09-01 before install:
+
+    preflight: no identity file at .../identity.kye (NOT creating one: a new key here is a new node_id)
+    preflight: no trust file at .../nope.json (an absent trust file loads as an empty allowlist and refuses every peer)
+    preflight: identity at .../identity.key is node_485428e3, expected node_deadbeef. ...
+    wsl-preflight.sh: line 33: EUREKA_IDENTITY_PATH: not set -- refusing to fall back to ~/.eureka/identity.key, which would be created if absent
+
+Each exits 1, and the typo'd-path case was checked for a stray key afterwards:
+none, because the existence test runs before anything calls into the library.
+
+### The trust file was v1, and carried the retired label
+
+WSL's `~/.eureka/trust.json` was still v1 as of 2026-09-01, and named CT 101's
+key `ct102-antiochus` -- the label this document retired precisely so a grep
+finds one meaning. It worked, because **lookups are by key and names are human
+labels**, and a v1 file grants nothing, which is the safe direction to be wrong
+in. It was migrated to v3 and renamed to `eureka-node` in the same write.
+
+`add()` refuses a rename outright -- `existing != name` raises `duplicate
+public key` -- so a load-and-write-back cannot do this. The migration builds a
+fresh `TrustList` instead, and **reads CT 101's key out of the old file rather
+than retyping it**, so a 64-character key cannot be fat-fingered in the one
+step that would silently swap a peer's identity.
+
+### Windows firewall: scoped to two hosts, not the LAN
+
+`networkingMode=mirrored` means WSL shares the Windows host's LAN interface, so
+inbound to 192.168.1.152:8443 meets the **Windows** firewall before it reaches
+anything in Linux. The rule names the two peers by address:
+
+    New-NetFirewallRule -DisplayName "Eureka daemon (WSL) 8443" `
+      -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8443 `
+      -RemoteAddress 192.168.1.180,192.168.1.174 -Profile Private
+
+`-RemoteAddress` is the whole point. Without it the daemon answers any host on
+the LAN. That is not a security boundary the protocol is relying on -- an
+untrusted caller gets `untrusted_key` at the pin and never reaches the
+handshake -- but it is the difference between refusing strangers and never
+hearing from them, and the manifest endpoint is open by design to whoever can
+open a connection.
+
+`-Profile Private` matters on a laptop: on a coffee-shop network Windows picks
+Public, the rule does not apply, and the port is closed. That is the correct
+outcome and it is worth knowing before it looks like a bug.
+
+### Reboot, and sleep
+
+**WSL does not start when Windows boots.** systemd inside the distro handles
+restarting the daemon, but nothing starts the distro. A Task Scheduler entry at
+logon does that, and it is required regardless of how the daemon is supervised:
+
+    schtasks /Create /TN "Start WSL for Eureka" /SC ONLOGON /RL HIGHEST `
+      /TR "C:\Windows\System32\wsl.exe -d Ubuntu -- /bin/true"
+
+`/bin/true` is deliberate: starting the distro is the entire job, and systemd
+takes it from there via `WantedBy=multi-user.target`. Putting the daemon
+command here instead would give a second, competing supervisor.
+
+So the recovery matrix is:
+
+| event | what happens |
+|---|---|
+| daemon crashes | systemd restarts it, 5s backing off to 60s, five attempts per 300s then `failed` |
+| preflight refuses | `ExecStart` never runs; five attempts then `failed`, reason in the journal |
+| WSL distro restarted | systemd starts the daemon, `enable`d |
+| Windows reboot | nothing until logon; the Task Scheduler entry starts the distro, systemd starts the daemon |
+| laptop sleeps and resumes | the VM is suspended with the host and resumes with it. Established TCP connections are dead; new ones work. **See the clock, below.** |
+
+Sleep is the one that does not announce itself. See the Gotchas entry -- the
+symptom is `stale_timestamp`, in both directions, and it is not a network fault.
+
+### Verifying it
+
+From CT 101 and CT 102, in that order -- CT 101 already trusted this key, CT 102
+had to be provisioned:
+
+    curl -sk https://192.168.1.152:8443/v1/manifest      # node_ef0a1f59
+
+`demo.sh` is the real check, because the untrusted scenario is what shows the
+handshake was doing something. Both hosts need the identity paths on the command
+line, for the reason in "demo.sh needs the identity paths too".
+
+A responder cannot run the trusted scenario against itself -- a node does not
+carry its own key in its own allowlist -- so this is checked from the peers,
+never from WSL.
+
 ## Run the handshake (WSL initiates)
 
 `demo.sh` in this repo is the end-to-end check. It is version controlled, so
@@ -1151,10 +1345,27 @@ peers from the table it checks against.
   arrived**, so no tool ran, and the Eureka config is not implicated. Check
   that before touching `mcp.servers` -- a silent agent after a config change
   is the moment this will be blamed on the new config.
-- WSL2 is behind NAT: outbound works, inbound needs a portproxy or
-  networkingMode=mirrored. WSL initiates, so neither is needed here.
-- WSL clock drifts after the Windows host sleeps. Freshness window is 30s.
-  Fix: sudo ntpdate pool.ntp.org
+- WSL2 is behind NAT unless `networkingMode=mirrored`, which this host sets:
+  it shares the Windows LAN interface, so 192.168.1.152 is the same address
+  Windows answers on and inbound meets the **Windows** firewall first. That was
+  true while WSL only initiated and nobody had to care; since it started
+  serving on 8443 it is the first thing to check when a peer times out rather
+  than being refused. A timeout is the firewall; `untrusted_key` is the trust
+  file, and means the packets arrived fine.
+- **WSL's clock lags the host after the laptop sleeps, and the symptom is
+  `stale_timestamp` refusals in BOTH directions.** The handshake checks
+  `abs(age) > freshness_seconds` against the timestamp the *other* side signed,
+  at 30s, on message 1 and again on message 3. So a WSL clock that resumes
+  behind rejects CT 101's offers as stale, and CT 101 rejects WSL's, and from
+  either end it reads as the peer being broken. It is not a network fault and
+  it is not a trust problem: nothing was reprovisioned, the clock moved.
+  Mattered less while WSL only initiated -- a stale offer failed one command
+  someone was watching. Now it takes the responder off the mesh silently until
+  something resyncs. Check with `date -u` on both hosts before reading anything
+  else; more than ~30s apart is the whole story. Fix:
+  `sudo ntpdate pool.ntp.org`, or `sudo hwclock -s` to take the host's clock,
+  then `systemctl restart eureka-daemon` is NOT needed -- the freshness check
+  reads the clock per message, not at startup.
 - Keys must not live on /mnt/c — Windows filesystem breaks mode 0600 and the
   loader refuses group/world-readable key files.
 - SSH root password login to CT 102 is refused (OpenSSH default

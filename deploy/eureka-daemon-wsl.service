@@ -1,0 +1,108 @@
+[Unit]
+Description=Eureka Protocol daemon (WSL, wsl-hermes)
+Documentation=file:///home/stunner/eureka/eureka_protocol/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+# Same crash-loop guard as CT 101, and the same arithmetic: StartLimitIntervalSec
+# must be comfortably longer than RestartSec x StartLimitBurst or the limiter
+# never trips. Five attempts with backoff span ~100s against a 300s window.
+#
+# It matters more here than on CT 101, because the most likely failure on this
+# host is a preflight refusal -- a wrong path, or an identity that is not
+# node_ef0a1f59 -- and that is a mistake to stop on, not to retry forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+
+Environment=PYTHONUNBUFFERED=1
+# The repo lives under a home directory that is mounted read-only for this
+# service (see ProtectHome below), so CPython cannot write __pycache__ next to
+# the source. Saying so outright beats letting it discover that per import.
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# --- Identity: the four variables the preflight refuses to default ----------
+# On CT 101 these two lines are the only thing standing between a typo and a
+# node that comes back under a different node_id, because the identity loader
+# CREATES a key when the file it is pointed at does not exist. This host has a
+# third and a fourth: EUREKA_EXPECT_NODE_ID pins the answer, so the failure is
+# caught rather than merely made unlikely, and EUREKA_PYTHON names the one
+# interpreter that has the dependencies -- there is more than one venv on this
+# machine's PATH depending on who started what.
+Environment=EUREKA_PYTHON=/home/stunner/eureka/venv/bin/python
+Environment=EUREKA_IDENTITY_PATH=/home/stunner/.eureka/identity.key
+Environment=EUREKA_TRUST_PATH=/home/stunner/.eureka/trust.json
+Environment=EUREKA_EXPECT_NODE_ID=node_ef0a1f59
+
+WorkingDirectory=/home/stunner/eureka
+
+# Checked before uvicorn binds anything: paths present, identity is the node
+# peers already trust, trust file loads against the advertised list. A non-zero
+# exit here means ExecStart never runs, and the reason is in the journal.
+ExecStartPre=/home/stunner/eureka/eureka_protocol/deploy/wsl-preflight.sh
+
+# TLS only, exactly as CT 101 serves. --no-plain refuses to start without
+# --tls-port, so a half-edit cannot produce a daemon listening on nothing.
+#
+# --tls-dir is explicit and is NOT the default. The default writes the
+# certificate and its key beside the identity file, which would put a second
+# copy of this node's private key inside ~/.eureka -- a directory this
+# deployment only ever reads. Pointing it at the state directory keeps
+# ~/.eureka untouched, and the material there is derived from the identity and
+# regenerated whenever it stops matching, so it is safe to delete.
+ExecStart=/home/stunner/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
+    --tls-port 8443 --no-plain --tls-dir /var/lib/eureka-wsl/tls
+
+# on-failure, not always: a clean exit 0 is somebody stopping the daemon on
+# purpose, and restarting it would fight them.
+Restart=on-failure
+RestartSec=5s
+RestartSteps=4
+RestartMaxDelaySec=60s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eureka-daemon
+
+# --- Identity ---------------------------------------------------------------
+# The invoking user, not a dedicated system account. CT 101 has one because its
+# key lives in /var/lib and nothing else needs it; here the identity is at
+# ~stunner/.eureka and the venv and repo are under ~stunner too, so a separate
+# account would need read access across that whole home directory -- which is
+# strictly more exposure than reusing the account that already owns it.
+User=stunner
+Group=stunner
+
+# --- Hardening --------------------------------------------------------------
+# read-only, not yes. CT 101 can afford ProtectHome=yes because its key,
+# interpreter and code all live outside /home; on this host all three are
+# inside it, so hiding it entirely would leave the daemon nothing to start
+# from. read-only is the useful half of that setting: the identity and the
+# trust file can be read and CANNOT be written by this service, which is the
+# property "do not touch the key material" actually asks for -- enforced by
+# the kernel here rather than by everyone remembering.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+# /var/lib/eureka-wsl, created 0700 and owned by stunner, holding only the TLS
+# certificate and key. This is the one writable path the service has, and it is
+# derived state: delete it and the next start rebuilds it from the identity.
+#
+# Deliberately NOT /var/lib/eureka. That name is CT 101's, and a directory
+# called eureka on a second host is how somebody eventually copies an identity
+# into the wrong one.
+StateDirectory=eureka-wsl
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
