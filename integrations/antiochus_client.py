@@ -214,7 +214,12 @@ def main() -> int:
     parser.add_argument("--trust", default=None,
                         help="trust file (or $EUREKA_TRUST_PATH)")
     parser.add_argument("--capability", default="web-retrieval")
-    parser.add_argument("--task-name", default="antiochus-fetch")
+    # Names the ENTRY POINT, not the host -- the host is already named by the
+    # signing key in every log line. CT 102 reaches CT 101 two ways, and while
+    # both wrote "antiochus-fetch" the peer's audit log could not tell a
+    # hand-run script from a Telegram message, which left "which path was
+    # that?" answerable only by whoever remembered what they had run.
+    parser.add_argument("--task-name", default="antiochus-cli")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     args = parser.parse_args()
 

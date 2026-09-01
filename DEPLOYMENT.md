@@ -1131,6 +1131,15 @@ peers from the table it checks against.
 
 ## Gotchas
 
+- **A stuck Telegram provider looks exactly like a broken Eureka tool, and is
+  not.** Seen 2026-09-01, before the MCP work: the gateway's health-monitor
+  logged `[telegram:default] health-monitor: restarting (reason: stopped)`
+  every ~10 minutes and inbound messages never reached the agent. A gateway
+  restart cleared it. The discriminator is upstream of anything Eureka does:
+  **no inbound Telegram line in the gateway journal means the message never
+  arrived**, so no tool ran, and the Eureka config is not implicated. Check
+  that before touching `mcp.servers` -- a silent agent after a config change
+  is the moment this will be blamed on the new config.
 - WSL2 is behind NAT: outbound works, inbound needs a portproxy or
   networkingMode=mirrored. WSL initiates, so neither is needed here.
 - WSL clock drifts after the Windows host sleeps. Freshness window is 30s.
@@ -1139,11 +1148,12 @@ peers from the table it checks against.
   loader refuses group/world-readable key files.
 - SSH root password login to CT 102 is refused (OpenSSH default
   prohibit-password). Use pct exec from the Proxmox host, or set up a key.
-- CT 101 takes key auth from the MacBook. CT 102 has no SSH access to CT 101,
-  which is why the move went CT 102 -> MacBook -> CT 101 rather than directly.
-  CT 101's 8443 does answer from CT 102 though, so the manifest is checkable
-  from here (`curl -sk https://192.168.1.180:8443/v1/manifest`) even when
-  nothing else about that host is reachable.
+- CT 101 takes key auth from the MacBook, and **since 2026-09-01 from CT 102
+  directly** (`ssh ct101`). The MacBook hop in "Moving the responder" and in
+  the older bundle deploys is history, not a current constraint. CT 101's 8443
+  answers from CT 102 regardless, so the manifest is checkable
+  (`curl -sk https://192.168.1.180:8443/v1/manifest`) even when nothing else
+  about that host is reachable.
 - Run from the parent of eureka_protocol so the package resolves. On CT 101 and
   CT 102 a .pth in the venv handles this; on WSL use sys.path.insert or
   cd ~/eureka.
@@ -1648,6 +1658,29 @@ default is not laziness: WSL predates the variable, and a default of anything
 else would silently change that host's identity in the log the day it picked up
 a new commit. A host that never sets it writes exactly what it always wrote.
 
+**The name identifies the entry point, not the host.** The host is already
+named, in every line, by the key that signed the request -- adding it to the
+task name says nothing new. What the log could not say is *how* CT 102 called,
+and it reaches CT 101 two ways:
+
+| caller | task name |
+|---|---|
+| `integrations/antiochus_client.py`, hand-run | `antiochus-cli` |
+| MCP server, i.e. OpenClaw and Telegram | `antiochus-fetch` |
+
+Both wrote `antiochus-fetch` for about half an hour on 2026-09-01, and in that
+window the peer's audit log could not tell a hand-run script from a Telegram
+message. Nothing was wrong in the log; the distinction simply was not in it,
+and "which path was that?" was answerable only by whoever remembered what they
+had run. Fixing the misattribution by host had quietly cost the distinction by
+path, which is worth noticing on its own: a correction can narrow what a record
+can answer.
+
+Verified by running both within twelve seconds and reading the result back:
+
+    07:34:33  EUREKA-LOG generated for task antiochus-cli
+    07:34:45  EUREKA-LOG generated for task antiochus-fetch
+
 The two `hermes-fetch` entries CT 102 wrote on 2026-09-01 between 06:14 and
 06:20 are left in the journal as they are. An audit log is not rewritten to
 make it tidy; those entries are a true record that the daemon logged that name,
@@ -1710,6 +1743,20 @@ closing stdin makes the server exit on EOF mid-call, which surfaces as
 `"Connection closed"` and looks like a server fault -- a real client holds stdin
 open, and so must a test. And `mcp add`'s probe proves the server *starts and
 lists tools*; only an agent turn proves the tools reach the model.
+
+**Confirmed from a phone, 2026-09-01 07:24:27.** "Use the eureka_fetch tool to
+get https://example.com/" sent to Antiochus over Telegram came back with the
+Example Domain content, and CT 101's journal independently shows
+`Handshake established with node_485428e3` and `EUREKA-LOG generated for task
+antiochus-fetch` at that second.
+
+That is the claim finally made by the thing it is a claim about. Every check
+before it used `openclaw agent`, which runs a turn through the Gateway and is
+*the same path* a Telegram message takes -- but "the same path" was an argument,
+and the message from the phone is the observation. Keep the distinction when
+reading the rest of this section: an agent turn is the right tool for iterating,
+because it needs no phone and delivers nothing to the channel, and it is a proxy
+until somebody sends a real message.
 
 ## Not yet done
 
