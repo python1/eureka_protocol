@@ -1131,11 +1131,22 @@ peers from the table it checks against.
 
 ## Gotchas
 
+- **CT 101 logs in UTC and CT 102 logs in America/Chicago (CDT, -0500).** The
+  evidence method throughout this document is "the caller acted, and CT 101's
+  journal shows a handshake at the matching second" -- and the two journals are
+  five hours apart on the clock while describing the same instant. A gateway
+  restart at 02:18:47 CDT is 07:18:47 in CT 101's journal. Convert before
+  concluding that an event did not correlate; `date -u` on both hosts settles
+  it faster than reading either journal again.
 - **A stuck Telegram provider looks exactly like a broken Eureka tool, and is
   not.** Seen 2026-09-01, before the MCP work: the gateway's health-monitor
   logged `[telegram:default] health-monitor: restarting (reason: stopped)`
   every ~10 minutes and inbound messages never reached the agent. A gateway
-  restart cleared it. The discriminator is upstream of anything Eureka does:
+  restart cleared it. Note what that restart looks like afterwards: the gateway
+  exits and systemd's `Restart=always` brings it back, so `NRestarts` increments
+  and the MainPID changes. **That is an ordinary restart, not a crash** -- do
+  not read `NRestarts=1` as evidence that a new config destabilised anything.
+  The discriminator is upstream of anything Eureka does:
   **no inbound Telegram line in the gateway journal means the message never
   arrived**, so no tool ran, and the Eureka config is not implicated. Check
   that before touching `mcp.servers` -- a silent agent after a config change
