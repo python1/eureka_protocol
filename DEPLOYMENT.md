@@ -965,26 +965,68 @@ fresh `TrustList` instead, and **reads CT 101's key out of the old file rather
 than retyping it**, so a 64-character key cannot be fat-fingered in the one
 step that would silently swap a peer's identity.
 
-### Windows firewall: scoped to two hosts, not the LAN
+### Windows firewall: two layers, and the rule that works
 
 `networkingMode=mirrored` means WSL shares the Windows host's LAN interface, so
 inbound to 192.168.1.152:8443 meets the **Windows** firewall before it reaches
-anything in Linux. The rule names the two peers by address:
+anything in Linux.
+
+**There are two filtering layers, and you only write a rule for one of them.**
+Mirrored traffic is also subject to the Hyper-V firewall, whose
+`DefaultInboundAction` for the WSL VM creator id
+(`{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}`) is `Block` with no rules visible at
+a glance. That looks like a second rule to write and it is not: **Windows
+mirrors host rules into the Hyper-V layer automatically**, edits included.
+Confirmed 2026-09-01 -- `Get-NetFirewallHyperVRule` lists ~130 entries
+(Core Networking, WslCore, and ours), and a `Set-NetFirewallRule` on the host
+copy showed up in the mirror without any further action. Writing a
+`New-NetFirewallHyperVRule` by hand duplicates what is already there. Check the
+mirror before concluding the layer is the problem:
+
+    Get-NetFirewallHyperVRule | Where-Object DisplayName -like "*Eureka*" |
+      Select-Object DisplayName, Action, LocalPorts, RemoteAddresses
+
+The rule as it stands:
 
     New-NetFirewallRule -DisplayName "Eureka daemon (WSL) 8443" `
       -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8443 `
-      -RemoteAddress 192.168.1.180,192.168.1.174 -Profile Private
+      -Profile Any -LocalAddress 192.168.1.152 `
+      -RemoteAddress 192.168.1.180,192.168.1.174
 
-`-RemoteAddress` is the whole point. Without it the daemon answers any host on
-the LAN. That is not a security boundary the protocol is relying on -- an
-untrusted caller gets `untrusted_key` at the pin and never reaches the
-handshake -- but it is the difference between refusing strangers and never
-hearing from them, and the manifest endpoint is open by design to whoever can
-open a connection.
+**Two conditions must both hold, and neither is the network profile.**
+`-RemoteAddress` names the two peers. `-LocalAddress` is what answers "am I on
+the right network?", and it is there instead of `-Profile Private` on purpose.
 
-`-Profile Private` matters on a laptop: on a coffee-shop network Windows picks
-Public, the rule does not apply, and the port is closed. That is the correct
-outcome and it is worth knowing before it looks like a bug.
+The first attempt used `-Profile Private`, and it was inert: this laptop's Wi-Fi
+is classified **Public**, so the rule never applied. The obvious fix --
+`Set-NetConnectionProfile -NetworkCategory Private` -- was rejected, and the
+reasoning is worth keeping. Reclassifying is a system-wide posture change to
+enable one daemon: it activates every *other* Private-profile rule on that
+network too, File and Printer Sharing and Network Discovery among them. Scoping
+the rule is the narrower change and gets the same fail-closed behaviour, because
+on any other network the laptop holds a different address and `-LocalAddress`
+stops matching.
+
+`-Profile Any` is only safe *because* of `-LocalAddress`. On its own, with
+`-RemoteAddress` alone, it would be a real hole: `192.168.1.0/24` is the most
+common cafe subnet there is, so a stranger at `.180` would match. They would
+still be refused at the pin -- that is what pinning is for -- but they would
+reach the open manifest and the handshake tables first, and "the protocol would
+survive it" is a poor reason to allow it.
+
+**Set a DHCP reservation for the Alienware at 192.168.1.152.** `-LocalAddress`
+keys on a DHCP lease, not on an identity, so a new lease silently stops the rule
+matching and CT 101 and CT 102 start timing out. That address is now baked into
+a firewall rule and into this document.
+
+**A wrong profile looks like a dead host, not a blocked port.** When the rule
+was inert, *every* TCP port on 192.168.1.152 timed out -- 445, 135, 3389, 8443 --
+while ARP still resolved the MAC. That is the signature: a timeout on
+everything, from a host that is demonstrably up at layer 2. A single port
+refusing while others answer is a different fault. And a `curl` to
+`https://localhost:8443` from Windows now returns nothing, correctly: loopback
+is not one of the two allowed remote addresses. Test from CT 101 or CT 102, not
+from the Windows side.
 
 ### Reboot, and sleep
 
@@ -1026,6 +1068,62 @@ line, for the reason in "demo.sh needs the identity paths too".
 A responder cannot run the trusted scenario against itself -- a node does not
 carry its own key in its own allowlist -- so this is checked from the peers,
 never from WSL.
+
+    # from CT 102
+    cd /root/.openclaw/workspace/eureka_protocol
+    EUREKA_PYTHON=/root/eureka_venv/bin/python \
+    EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key \
+    EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json \
+      ./demo.sh https://192.168.1.152:8443
+
+    # from CT 101
+    cd /opt/eureka/eureka_protocol
+    runuser -u eureka -- env \
+      EUREKA_PYTHON=/opt/eureka/venv/bin/python \
+      EUREKA_IDENTITY_PATH=/var/lib/eureka/identity.key \
+      EUREKA_TRUST_PATH=/var/lib/eureka/trust.json \
+      bash demo.sh https://192.168.1.152:8443
+
+### What was proven, 2026-09-01: wsl-hermes as a responder
+
+The daemon came up on 8443 under `eureka-daemon-wsl`, `ExecStartPre` preflight
+passing, as `node_ef0a1f59` -- **the same node_id it has always had**. The
+identity file was read and never written.
+
+The TLS key served on 8443 is
+`bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae`, byte for
+byte the key CT 101 has trusted since before this host listened for anything.
+That is the design working as intended: the certificate wraps the existing
+identity, so **nothing new had to be distributed to make TLS work**, and CT 101
+needed no reprovisioning at all. Read it back with the `openssl` pipeline in
+"Start the responder (CT 101)".
+
+Both peers, both scenarios, clocks 0s apart:
+
+| initiator | trusted | untrusted |
+|---|---|---|
+| CT 102 `node_485428e3` | `authenticated`, `mutual: true`, peer `node_ef0a1f59` | refused, `untrusted_key` |
+| CT 101 `node_a2ed8dc7` | `authenticated`, `mutual: true`, peer `node_ef0a1f59` | refused, `untrusted_key` |
+
+The untrusted leg is what makes the trusted one evidence: a throwaway identity
+with an empty allowlist, refused at the pin with "the key terminating TLS is not
+trusted", against the same listener that had just authenticated a real peer one
+second earlier.
+
+CT 102 needed provisioning to get there and CT 101 did not. CT 101's trust file
+already held `wsl-hermes`; CT 102's held only `eureka-node`, so it could not pin
+WSL's certificate and was refused with `untrusted_key` -- the correct refusal,
+and indistinguishable from a genuine stranger, which is the point. It was added
+with an empty grant.
+
+**Nobody was granted anything.** Both peers sit in WSL's trust file with
+`"capabilities": []`, so an `/v1/assign` from either is refused before dispatch.
+The node advertises `web-retrieval` because it has a handler for it and cannot
+advertise otherwise; that is a claim about this node, not permission for
+anybody. Standing up the responder and granting a capability are two decisions
+and only the first has been taken.
+
+`wsl-hermes` was re-checked as an initiator afterwards and is unchanged.
 
 ## Run the handshake (WSL initiates)
 
@@ -1137,6 +1235,32 @@ paths into a temp directory, and an explicit argument beats the environment --
 so it keeps passing, correctly, while the trusted one is silently wrong. A run
 that reports `untrusted: PASS` and `trusted: FAIL` is the signature of a missing
 environment at least as often as it is a real protocol failure.
+
+### demo.sh advertised a capability that does not exist
+
+**`demo.sh` hardcoded `capabilities=["fast-inference"]`, and that made the
+trusted scenario unrunnable on any host whose trust file grants anything.**
+Fixed 2026-09-01; it now derives the list from `default_registry()`, the same
+place `api.py` takes it from.
+
+A grant is validated against the advertised list when the trust file loads, so
+on CT 101 -- which has granted `web-retrieval` since 2026-08-28 -- the node
+could not be constructed at all:
+
+    TrustError: trust file /var/lib/eureka/trust.json: peer 'wsl-hermes':
+    granted capability 'web-retrieval' that this node does not advertise
+
+It died there, before reaching the peer, on every run against every peer. So
+between 2026-08-28 and 2026-09-01 the documented end-to-end check could not run
+on the responder host, and the invocation printed in this document produced that
+traceback.
+
+It survived that long because of who runs it. The hosts that exercise `demo.sh`
+most are the ones granting nothing -- WSL and CT 102 -- and an arbitrary
+advertised list validates fine against an empty grant. It took standing up a
+second responder, and running the check from CT 101 for the first time since the
+grant, to reach it. Deriving the list means the check cannot drift from the
+deployment again.
 
 ### CT 101 cannot run the trusted scenario against itself
 
@@ -1387,8 +1511,12 @@ peers from the table it checks against.
   is now `web-retrieval` and nothing else -- derived from the handler registry,
   not typed into `api.py`. Granting `code-exec` or `data-analysis` used to load
   and now does not, and an unloadable trust file stops the daemon. So does
-  `fast-inference`, which is `demo.sh`'s client-side list and was never one of
-  ours. See "Granting a capability".
+  `fast-inference`, which *was* `demo.sh`'s hardcoded client-side list and was
+  never one of ours. That is fixed as of 2026-09-01 -- it derives the list from
+  the registry now -- but the entry stays because the failure mode it names is
+  the general one: **an advertised list that disagrees with a grant stops the
+  node at load, not at request time.** See "Granting a capability" and
+  "demo.sh advertised a capability that does not exist".
 - `web-retrieval` cannot reach anything on this LAN, on purpose: loopback,
   private, link-local and CGNAT addresses are all refused, after DNS
   resolution and again on every redirect. If a fetch that should work comes

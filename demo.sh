@@ -54,6 +54,24 @@ peer = os.environ["PEER"]
 sys.path.insert(0, os.environ["PARENT"])
 
 from eureka_protocol.src.eureka_daemon.node import EurekaNode
+from eureka_protocol.src.eureka_daemon.handlers import default_registry
+
+# What this deployment advertises, taken from the handler registry -- the same
+# place api.py takes it from, so this client validates its trust file against
+# exactly the list the daemon would.
+#
+# This was hardcoded ["fast-inference"], a capability that has never existed
+# anywhere in this protocol, and it made the trusted scenario UNRUNNABLE on any
+# host whose trust file grants anything: a grant is validated against the
+# advertised list at load, so CT 101 -- which has granted web-retrieval since
+# 2026-08-28 -- could not construct the node at all. It died with TrustError
+# ("granted capability 'web-retrieval' that this node does not advertise")
+# before reaching the peer, on every run, against every peer.
+#
+# It survived that long because the hosts that run demo.sh most were the ones
+# granting nothing, where an arbitrary list validates fine against an empty
+# grant. Deriving it means the check cannot drift from the deployment again.
+ADVERTISED = sorted(default_registry().names())
 
 # https gets require_tls: this node will not fall back to speaking in the clear
 # to a peer it was told to reach over TLS. The pin applies either way.
@@ -81,7 +99,7 @@ def report(label, node, result, ok, expectation):
 
 
 # --- 1. trusted: this host's real identity and trust file ------------------
-trusted = EurekaNode.with_persistent_identity(capabilities=["fast-inference"])
+trusted = EurekaNode.with_persistent_identity(capabilities=ADVERTISED)
 result = asyncio.run(handshake(trusted))
 first = report(
     "trusted peer", trusted, result,
@@ -97,7 +115,7 @@ first = report(
 scratch = tempfile.mkdtemp(prefix="eureka-demo-untrusted-")
 try:
     stranger = EurekaNode.with_persistent_identity(
-        capabilities=["fast-inference"],
+        capabilities=ADVERTISED,
         identity_path=os.path.join(scratch, "identity.key"),
         trust_path=os.path.join(scratch, "trust.json"),
     )
