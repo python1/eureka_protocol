@@ -698,6 +698,29 @@ when the file it is pointed at does not exist, so a typo in
 node comes back under a node_id no peer trusts. They are set explicitly in the
 unit, and they are the first thing to check if `node_id` ever changes.
 
+### What the run produced on CT 101, 2026-09-01: b8695b9 -> 14b0ed8
+
+Bundle `/root/migrate/eureka-b8695b9-14b0ed8.bundle`, 17 KB, transported
+**direct** over `ssh ct101` -- the first advance to skip the MacBook hop.
+`bundle verify` named `b8695b9` as its prerequisite on both ends, the fetch
+fast-forwarded cleanly, and `/opt/eureka` was refreshed with `DEPLOYED_COMMIT`
+matching the repo HEAD.
+
+**The daemon was deliberately not restarted.** `git diff --name-only
+b8695b9..14b0ed8 -- src/ integrations/` was empty: the range carries
+`DEPLOYMENT.md`, `demo.sh` and two new files under `deploy/`, none of which the
+running process executes. `NRestarts=0` and the original
+`ExecMainStartTimestamp` still stand afterwards. The rsync-then-restart recipe
+above is the general case; a range that touches no code the daemon runs does not
+earn an outage on the mesh's only always-on responder. Check the diff rather
+than assuming either way.
+
+What it fixed, verified immediately after: the documented `demo.sh` invocation
+in "Run the handshake" now runs on CT 101 for the first time since the
+2026-08-28 grant -- trusted PASS as `node_a2ed8dc7`, untrusted PASS with
+`untrusted_key`, against `node_ef0a1f59`. 616 tests pass against
+`/opt/eureka/venv`.
+
 ### What the run produced on CT 101, 2026-08-28: d8dddc9 -> 7929bc3
 
 The fifth incremental bundle in `/root/migrate`, and the first deploy that
