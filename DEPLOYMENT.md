@@ -84,6 +84,12 @@ derived state and safe to delete. **Nothing writes to ~/.eureka**: the identity
 and trust file are read, and the service mounts /home read-only. See "Stand up
 the responder on WSL".
 
+Both files in `~/.eureka` are 0600; the trust file was set to that on
+2026-09-02, matching CT 101's `/var/lib/eureka/trust.json`. It holds no secrets
+-- public keys and labels -- but it is the allowlist that decides which keys
+this node will speak to, and it has no business being more readable than the
+identity sitting beside it.
+
 ## Trust file format
 
 peers maps NAME -> an entry. Lookups are by key; the name is a human label.
@@ -1042,6 +1048,10 @@ keys on a DHCP lease, not on an identity, so a new lease silently stops the rule
 matching and CT 101 and CT 102 start timing out. That address is now baked into
 a firewall rule and into this document.
 
+**Still not set as of 2026-09-02.** The laptop kept .152 across the Windows
+reboot that day, which is a lease renewed and not a lease reserved -- it says
+the router had no reason to hand out a different address, not that it cannot.
+
 **A wrong profile looks like a dead host, not a blocked port.** When the rule
 was inert, *every* TCP port on 192.168.1.152 timed out -- 445, 135, 3389, 8443 --
 while ARP still resolved the MAC. That is the signature: a timeout on
@@ -1076,6 +1086,35 @@ So the recovery matrix is:
 
 Sleep is the one that does not announce itself. See the Gotchas entry -- the
 symptom is `stale_timestamp`, in both directions, and it is not a network fault.
+
+### What was proven, 2026-09-02: the reboot
+
+The `Windows reboot` row above was exercised rather than reasoned about.
+Windows was restarted and logged in to, and nothing was started by hand:
+
+    # in WSL, after logon
+    systemctl is-active eureka-daemon-wsl              # active
+
+    # from CT 102
+    curl -sk https://192.168.1.152:8443/v1/manifest    # node_ef0a1f59
+
+Both halves of the chain fired, in order: the Task Scheduler entry started the
+distro at logon, and systemd started the daemon behind it via
+`WantedBy=multi-user.target`. Neither is sufficient alone and neither needed a
+human.
+
+`active` also means the preflight passed on that start, because it runs as
+`ExecStartPre=` and there is no path to `active` around it -- so the identity
+file was found where the unit says it lives and still hashed to
+`node_ef0a1f59`, which the manifest then confirmed from the other side of the
+wire.
+
+**This says nothing about a reboot with nobody logging in.** The trigger is
+`ONLOGON`. A machine that boots to the lock screen and is left there has no WSL
+instance and therefore no daemon, and the symptom is the one from the firewall
+note above: every port on .152 timing out while the host is plainly up. If that
+ever needs to change, it is a different Task Scheduler trigger, not a change to
+the unit.
 
 ### Verifying it
 
