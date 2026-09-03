@@ -899,8 +899,11 @@ CT 101 still advertises `web-retrieval` alone, and that is not an omission --
 see "inference is a property of the host" below.
 
 **Advertising is a claim about this node; granting is a decision about a peer,
-and this host grants nothing.** CT 101 and CT 102 are in WSL's trust file with
-`"capabilities": []`. They handshake; an `/v1/assign` from either is refused
+and when this was written on 2026-09-02 this host granted nothing.** CT 101 and
+CT 102 were both in WSL's trust file with `"capabilities": []`. (CT 102 was
+granted `inference` the next day; CT 101 still holds nothing here, and the
+separation the paragraph is about is exactly what let one change without the
+other.) They handshake; an `/v1/assign` from either is refused
 before dispatch, because `is_permitted` intersects the advertised list with a
 grant held here. Standing the responder up did not hand anybody a capability,
 and the two questions have to stay separate -- CT 101 has advertised
@@ -1031,6 +1034,27 @@ list used to cause. So on WSL, once a grant exists:
 
 It is left inherited rather than forced on inside demo.sh, because forcing it
 would have demo.sh claim inference on CT 101.
+
+**And it bites the grant procedure itself, one step earlier.** Step 3 of
+"Granting a capability" -- the load-check that is the whole point of the
+procedure -- also derives its advertised list from `default_registry()`, in the
+operator's interactive shell. That shell does not inherit
+`Environment=EUREKA_INFERENCE=1` from the unit either. So on WSL the check
+raises `TrustError` on a *correct* `inference` grant:
+
+    granted capability 'inference' that this node does not advertise
+
+which is the same sentence a genuinely bad grant produces, arriving at the step
+whose job is to tell those apart. The tempting repair -- drop the grant, the
+check goes green -- ships a trust file that says nothing and a daemon that
+starts fine. Export it for the check as well as for demo.sh:
+
+    EUREKA_INFERENCE=1 ~/eureka/venv/bin/python -c "...step 3..."
+
+The rule underneath: **anything that asks `default_registry()` what this host
+advertises must be run in a shell that answers the way the unit does.** That is
+the daemon, demo.sh, the preflight, and the grant check -- four callers, one of
+which runs under systemd and three of which do not.
 
 ### Why supervision needed deciding before anything was written
 
@@ -1317,6 +1341,15 @@ what this node advertises and what it proved about Ollama:
 
 The grants lines must still say `(nothing)`. Advertising is not granting, and
 this change deliberately does not touch the trust file.
+
+**Superseded 2026-09-03, for the `ct102-openclaw` line only.** That host was
+granted `inference` on that date, so a preflight read today prints
+`grants ct102-openclaw: inference` and the expectation above is a record of
+what this step produced rather than what a rerun shows. `eureka-node` is still
+`(nothing)`, and the property the line was making — advertising is not
+granting — is unchanged: the grant was a separate decision taken a day later,
+by the procedure in "Granting a capability". See "Granting inference to
+ct102-openclaw".
 
 **How the commit reaches WSL: `git pull`, and that is the whole of it.**
 Recorded here on 2026-09-02, because this document had described CT 101's
@@ -2166,6 +2199,33 @@ before anything is wired into OpenClaw.
     export EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json
     /root/eureka_venv/bin/python integrations/antiochus_client.py https://example.com
 
+**It takes a capability, and the capability decides three things.** The
+positional argument stopped being a URL and became the capability's one input,
+because `inference` wants a prompt where `web-retrieval` wants a URL, and the
+payload key each handler reads is the only thing that differs:
+
+    ... integrations/antiochus_client.py --peer https://192.168.1.152:8443 \
+        --capability inference "Say the single word: ping"
+
+The three are the payload key, the client timeout, and the shape of a
+successful answer. The timeout is the one that is not cosmetic: it is sized
+against the responder's registry DEADLINE for the capability, and inference
+runs under 90s where web-retrieval runs under 30s. The old flat 60s would have
+given up at 60 on a request WSL was still honestly working on -- and from the
+shell, a client-side timeout and a peer that refused look identical. That is
+the wrong lesson to learn on the run meant to prove a grant.
+
+`--capability` takes `choices`, so a typo fails in argparse rather than
+travelling as a web-retrieval payload and coming back
+`capability_not_granted` -- a refusal that names the grant for what is a
+mistake on this side.
+
+**The prompt is not echoed in the output; `prompt_chars` is.** The responder
+keeps prompts out of its audit log deliberately, and this stdout gets piped
+into logs too. There is no reason for the client to be the leak the daemon
+refused to be, and a character count still separates a prompt that was too long
+from one that was empty.
+
 stdout is the JSON result and nothing else; progress and EurekaNode's own prints
 go to stderr. It verifies, in order: the handshake authenticated over TLS with
 the peer's key pinned; the gate said `authenticated` rather than a refusal; a
@@ -2231,6 +2291,106 @@ fix** — the handshake freshness window is 30s
 so nobody reads a 0.5s skew as the cause of a refusal it cannot produce. A
 slept host drifting far enough to matter is a real failure mode; this was not
 yet it.
+
+## Granting inference to ct102-openclaw (on WSL)
+
+Done 2026-09-03. WSL had advertised `inference` since 2026-09-02 and granted it
+to nobody; Antiochus can now ask Hermes's host to run a prompt. It is the first
+grant of anything other than `web-retrieval`, and the first grant WSL has ever
+made — until this date that host advertised two capabilities and handed out
+none.
+
+**Only `inference`.** WSL advertises both, and the narrowest grant that does
+the job is one of them. `ct102-openclaw` gets no `web-retrieval` here, which
+also means the gate has something to say `False` about on this host.
+
+By the procedure in "Granting a capability", with the candidate-and-diff
+addition from "Adding Antiochus as a third node", and one change that is not
+optional on this host.
+
+### The load-check needs EUREKA_INFERENCE=1 in the operator's shell
+
+Step 3 derives its advertised list from `default_registry()`, which reads the
+environment of whatever shell runs it — not the unit's. Run without it on WSL,
+the check raises `TrustError` on a correct grant. See "This will bite demo.sh
+the day something is granted inference", which is the same trap one step later.
+
+    EUREKA_INFERENCE=1 ~/eureka/venv/bin/python -c "
+    from eureka_protocol.src.eureka_daemon.trust import TrustList
+    from eureka_protocol.src.eureka_daemon.handlers import default_registry
+    advertised = sorted(default_registry().names())
+    print('this node advertises:', advertised)
+    t = TrustList.load('/home/stunner/trust.json.candidate', advertised=advertised)
+    for name in ('ct102-openclaw', 'eureka-node'):
+        k = t.key_for(name)
+        print(name, sorted(t.capabilities_for(k)),
+              '| inference:', t.grants(k, 'inference'),
+              '| web-retrieval:', t.grants(k, 'web-retrieval'))
+    "
+
+Both peers are asked, and each is asked about a capability that must be absent
+as well as one that must be present — a check that only ever prints True cannot
+fail. It printed:
+
+    this node advertises: ['inference', 'web-retrieval']
+    ct102-openclaw ['inference'] | inference: True | web-retrieval: False
+    eureka-node    []            | inference: False | web-retrieval: False
+
+The `eureka-node` row is the one that matters second: CT 101 was in this file
+before the edit and is unchanged by it.
+
+### What the run produced, 2026-09-03
+
+Backup at `~/trust.json.bak-20260903`. The in-place rewrite preserved the
+inode — 303865 before and after — so owner and mode survived; a shell redirect
+into a new file would have left the daemon a file it could not read. Note that
+on this host the daemon *cannot* write this file at all (`ProtectHome=read-only`),
+which is why the edit is made as `stunner` rather than by the service account.
+
+Preflight after the restart:
+
+    preflight: node_ef0a1f59 ok
+    preflight:   advertises inference, web-retrieval
+    preflight:   ollama     http://127.0.0.1:11434/api/generate generating with qwen3:8b
+    preflight:   grants     ct102-openclaw: inference
+    preflight:   grants     eureka-node: (nothing)
+
+`node_ef0a1f59` unchanged across the trust edit — a node_id that moves means the
+wrong file was edited, not that the grant was bad.
+
+### What was proven: the grant, end to end
+
+**This is the check CT 101's 2026-08-28 grant went without for four days.** A
+daemon that starts has loaded the file; it has not shown that a peer on the far
+side of a handshake sees the same answer. Here the peer exists and can be
+driven, so the grant was proven the same day it was written:
+
+    EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key \
+    EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json \
+    /root/eureka_venv/bin/python integrations/antiochus_client.py \
+      --peer https://192.168.1.152:8443 \
+      --capability inference "Say the single word: ping"
+
+    ok true, verified true, capability inference
+    responder node_ef0a1f59, pinned_key bff5536a...
+    prompt_chars 25, model qwen3:8b
+    completion "Ping", chars 4, truncated false, done_reason stop, eval_count 2
+
+`done_reason: stop` and `truncated: false` together are the pair worth reading:
+the completion ended because the model finished, not because it hit the token
+budget or this node's character cap. A four-character answer could have been
+either.
+
+**The pinned key predates the grant.** `bff5536a...` is the `wsl-hermes` entry
+CT 102 has carried since 2026-09-01, so the TLS pin matched material written
+before this edit existed — the grant changed what WSL will *do* for that key
+and nothing about who the key is.
+
+The contrast run was against CT 101 rather than a second identity, and it is the
+sharper one available here: the same signing key asking the same capability of a
+host that neither advertises nor grants it is refused `capability_not_granted`
+at the gate. One grant, one host, one capability — and the refusal for "not
+granted" and "not offered here" is deliberately the same sentence.
 
 ## Reaching Eureka from Telegram (OpenClaw, CT 102)
 
@@ -2428,10 +2588,16 @@ without the agent, the model or the MCP transport in the way.
 Mutual TLS is evaluated and deliberately not planned; see the TLS section above
 for why.
 
-`inference` was added on 2026-09-02 and **is granted to nobody.** WSL
-advertises it, WSL can run it, and both peers sit in WSL's trust file with
-`"capabilities": []`, so an `/v1/assign` naming it is refused before dispatch
-exactly as before. Advertising and granting stay two decisions and only the
-first has been taken -- the same position `web-retrieval` was in on this host
-on 2026-09-01. Granting it is the next task, and the demo.sh note above becomes
-live the moment it happens.
+`inference` was added on 2026-09-02 and **granted on 2026-09-03, to
+`ct102-openclaw` and to nobody else** -- see "Granting inference to
+ct102-openclaw". For one day it sat where `web-retrieval` had sat on this host
+on 2026-09-01: advertised, runnable, permitted to no one. `eureka-node` is
+still in WSL's trust file with `"capabilities": []`, so an `/v1/assign` naming
+`inference` from CT 101 is refused before dispatch exactly as before.
+Advertising and granting remain two decisions; the second has now been taken
+once, for one peer.
+
+The demo.sh note above is **live on WSL from 2026-09-03**: that host now both
+serves `inference` and grants it, which is precisely the condition under which
+demo.sh must be run with `EUREKA_INFERENCE=1` or it dies before reaching the
+peer.

@@ -41,11 +41,18 @@ What is verified before any content is returned, in this order:
 Only then is the body read. Steps 3-5 are the difference between evidence and
 a string off the network.
 
+The positional argument is the capability's one input: a URL for
+web-retrieval, a prompt for inference. Which capability is asked for decides
+how the payload is built, how long the client waits, and what a successful
+answer carries -- see CAPABILITY_TIMEOUTS and _payload_for.
+
 Usage:
     export EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key
     export EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json
     ./antiochus_client.py https://example.com
     ./antiochus_client.py --peer https://192.168.1.180:8443 https://example.com
+    ./antiochus_client.py --peer https://192.168.1.152:8443 \
+        --capability inference "Say the single word: ping"
 
 stdout is the JSON result and nothing else, so the caller can pipe it. All
 progress and diagnostics go to stderr -- including EurekaNode's own prints,
@@ -99,10 +106,24 @@ from eureka_protocol.src.eureka_daemon.node import (  # noqa: E402
 from eureka_protocol.src.eureka_daemon.trust import TrustError, TrustList  # noqa: E402
 
 DEFAULT_PEER = "https://192.168.1.180:8443"
-# Must outlast the responder's registry deadline (30s), not merely its fetch
-# timeout (10s): the peer's pre-flight DNS resolution is not covered by the
-# latter, so a client sized to 10s races the work it asked for and loses.
-DEFAULT_TIMEOUT = 60.0
+
+# How long to wait, per capability. Each figure is sized against the
+# responder's registry DEADLINE for that capability and not against the
+# handler timeout inside it: web-retrieval's fetch gives up at 10s but runs
+# under the registry default of 30s, and the peer's pre-flight DNS resolution
+# is not covered by the fetch timeout, so a client sized to 10s races the work
+# it asked for and loses.
+#
+# inference is the reason this stopped being one number. It runs under a 90s
+# deadline with a 75s handler timeout, so the web-retrieval figure would have
+# this client give up at 60s on a request the peer is still honestly working
+# on -- and from the shell a client-side timeout is indistinguishable from a
+# peer that refused. That is the wrong thing to learn on the run that is
+# supposed to prove a grant.
+CAPABILITY_TIMEOUTS = {
+    "web-retrieval": 60.0,
+    "inference": 120.0,
+}
 
 
 def _required_path(flag_value: str | None, env_var: str, label: str) -> Path:
@@ -152,76 +173,147 @@ def build_node(identity_path: Path, trust_path: Path) -> EurekaNode:
     )
 
 
+def _payload_for(capability: str, subject: str) -> Dict[str, Any]:
+    """
+    The one value each capability's handler reads out of the payload.
+
+    A table rather than a branch at the call site, because the failure to
+    avoid is a client that sends {"url": ...} to a handler that wanted a
+    prompt: the peer answers invalid_payload, which is a refusal about the
+    REQUEST, and on the run that is meant to prove a grant it reads like a
+    refusal about the grant.
+    """
+    if capability == "inference":
+        return {"prompt": subject}
+    return {"url": subject}
+
+
+def _context(capability: str, subject: str) -> Dict[str, Any]:
+    """
+    What a refusal says about the request it refused.
+
+    The prompt is deliberately not in here. The responder keeps prompts out of
+    its audit log on purpose; this stdout gets piped into logs too, and there
+    is no reason for the client to be the leak the daemon refused to be. The
+    caller knows what it sent -- a character count is enough to tell a prompt
+    that was too long from one that was empty.
+    """
+    described = {"capability": capability}
+    if capability == "inference":
+        described["prompt_chars"] = len(subject)
+    else:
+        described["url"] = subject
+    return described
+
+
+def _describe(capability: str, subject: str,
+              output: Dict[str, Any]) -> Dict[str, Any]:
+    """The capability-specific half of a successful answer."""
+    if capability == "inference":
+        # truncated and done_reason are two different ways of being cut short
+        # -- the responder's character cap and its token budget -- and a
+        # completion can hit either without hitting the other. A caller that
+        # reads only one of them treats a clipped answer as a whole one.
+        return {
+            "prompt_chars": len(subject),
+            "model": output.get("model"),
+            "completion": output.get("completion"),
+            "chars": output.get("chars"),
+            "truncated": output.get("truncated"),
+            "done_reason": output.get("done_reason"),
+            "eval_count": output.get("eval_count"),
+        }
+    body = output.get("body") or ""
+    return {
+        "url": subject,
+        "final_url": output.get("final_url"),
+        "http_status": output.get("http_status"),
+        "content_type": output.get("content_type"),
+        "bytes": output.get("bytes"),
+        "body_preview": body[:500],
+    }
+
+
 def _fail(stage: str, reason: str | None, **extra: Any) -> Dict[str, Any]:
     return {"ok": False, "stage": stage, "reason": reason, **extra}
 
 
-async def run(node: EurekaNode, peer: str, url: str, capability: str,
+async def run(node: EurekaNode, peer: str, subject: str, capability: str,
               task_name: str, timeout: float) -> Dict[str, Any]:
+    context = _context(capability, subject)
     async with tls.pinning_client(peer, timeout) as http:
         handshake = await client.handshake_over_http(node, http=http, require_tls=True)
         if handshake.get("authenticated") is not True:
             return _fail("handshake", handshake.get("reason"), peer=peer)
 
-        query = assign.build_assign_query(node, capability, task_name, {"url": url})
+        query = assign.build_assign_query(node, capability, task_name,
+                                          _payload_for(capability, subject))
         response = await http.post("/v1/assign", json=query)
         answer = response.json()
         # Read the pin from the response the answer actually arrived on.
         pin = tls.peer_key_from_response(response)
 
         if answer.get("reason") != GATE_OK:
-            return _fail("gate", answer.get("reason"), url=url)
+            return _fail("gate", answer.get("reason"), **context)
 
         result = answer.get("result") or {}
         signature = answer.get("result_signature")
 
         if not isinstance(signature, str) or not signature:
-            return _fail("verification", "missing_result_signature", url=url)
+            return _fail("verification", "missing_result_signature", **context)
         if not pin:
-            return _fail("verification", "no_tls_pin", url=url)
+            return _fail("verification", "no_tls_pin", **context)
         if not EurekaCrypto.verify_assign_result(pin, signature, result):
-            return _fail("verification", "result_signature_invalid", url=url)
+            return _fail("verification", "result_signature_invalid", **context)
         if result.get("nonce") != query["query"]["nonce"]:
             # A good signature over a different request is not our answer.
-            return _fail("verification", "result_bound_to_another_request", url=url)
+            return _fail("verification", "result_bound_to_another_request",
+                         **context)
 
         if result.get("status") != "completed" or result.get("reason") != WORK_OK:
-            return _fail("fetch", result.get("reason"), url=url, verified=True)
+            # "work", not "fetch": the stage is named for the half of the
+            # protocol it failed in, and that half is no longer always a fetch.
+            return _fail("work", result.get("reason"), verified=True, **context)
 
-        output = result.get("output") or {}
-        body = output.get("body") or ""
         return {
             "ok": True,
             "verified": True,
+            "capability": capability,
             "responder_id": answer.get("responder_id"),
             "pinned_key": pin,
-            "url": url,
-            "final_url": output.get("final_url"),
-            "http_status": output.get("http_status"),
-            "content_type": output.get("content_type"),
-            "bytes": output.get("bytes"),
-            "body_preview": body[:500],
+            **_describe(capability, subject, output=result.get("output") or {}),
         }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Issue a signed /v1/assign from Antiochus to a Eureka peer.")
-    parser.add_argument("url", help="the URL to have the peer fetch")
+    parser.add_argument("subject",
+                        help="the capability's input: the URL to have the peer "
+                             "fetch, or with --capability inference the prompt "
+                             "to have it run")
     parser.add_argument("--peer", default=os.environ.get("EUREKA_PEER", DEFAULT_PEER))
     parser.add_argument("--identity", default=None,
                         help="identity file (or $EUREKA_IDENTITY_PATH)")
     parser.add_argument("--trust", default=None,
                         help="trust file (or $EUREKA_TRUST_PATH)")
-    parser.add_argument("--capability", default="web-retrieval")
+    # choices, not a free string: an unknown capability would otherwise be
+    # sent with a web-retrieval payload and come back capability_not_granted,
+    # which names the grant for what is actually a typo on this side.
+    parser.add_argument("--capability", default="web-retrieval",
+                        choices=sorted(CAPABILITY_TIMEOUTS))
     # Names the ENTRY POINT, not the host -- the host is already named by the
     # signing key in every log line. CT 102 reaches CT 101 two ways, and while
     # both wrote "antiochus-fetch" the peer's audit log could not tell a
     # hand-run script from a Telegram message, which left "which path was
     # that?" answerable only by whoever remembered what they had run.
     parser.add_argument("--task-name", default="antiochus-cli")
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--timeout", type=float, default=None,
+                        help="seconds; defaults to the figure for the chosen "
+                             "capability -- see CAPABILITY_TIMEOUTS")
     args = parser.parse_args()
+    timeout = (args.timeout if args.timeout is not None
+               else CAPABILITY_TIMEOUTS[args.capability])
 
     identity_path = _required_path(args.identity, "EUREKA_IDENTITY_PATH", "identity")
     trust_path = _required_path(args.trust, "EUREKA_TRUST_PATH", "trust list")
@@ -230,9 +322,10 @@ def main() -> int:
     with contextlib.redirect_stdout(sys.stderr):
         node = build_node(identity_path, trust_path)
         print(f"antiochus-client: node {node.node_id} "
-              f"({node.public_key_hex[:16]}...) -> {args.peer}", file=sys.stderr)
-        outcome = asyncio.run(run(node, args.peer, args.url, args.capability,
-                                  args.task_name, args.timeout))
+              f"({node.public_key_hex[:16]}...) -> {args.peer} "
+              f"[{args.capability}, {timeout:g}s]", file=sys.stderr)
+        outcome = asyncio.run(run(node, args.peer, args.subject, args.capability,
+                                  args.task_name, timeout))
 
     json.dump(outcome, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")

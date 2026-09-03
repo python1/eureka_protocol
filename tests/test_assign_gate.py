@@ -866,9 +866,15 @@ def test_a_peer_without_the_inference_grant_is_refused(ollama):
 
 def test_a_peer_with_no_grants_at_all_is_refused(ollama):
     """
-    Where both responders stand today: CT 101 and ct102-openclaw sit in WSL's
-    trust file with empty grants, so this is the live behaviour until somebody
-    decides otherwise.
+    Where CT 101 stands in WSL's trust file today: present, authenticating,
+    granted nothing.
+
+    It stood for ct102-openclaw too until 2026-09-03, when that peer was
+    granted `inference` -- so this is no longer "both responders", and the
+    entry it now describes is the one that was deliberately left alone by that
+    edit. The peer built here is synthetic either way; what the deployment
+    supplies is the reason an empty grant is worth a test of its own rather
+    than a case nobody is in.
     """
     endpoint, _spy = ollama
     daemon = inference_daemon(endpoint)
