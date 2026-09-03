@@ -22,6 +22,17 @@
 # binds anything, so a provisioning mistake is a start failure with a reason in
 # the journal instead of a running daemon that is wrong.
 #
+# Since inference, there is a third thing to check and it is a different KIND
+# of thing. The registry's own startup check is static: it asks whether code
+# exists for every capability advertised, and it cannot ask whether Ollama is
+# running, because that is not a property of the code and is not true or false
+# once and for all. So the liveness half is here -- and it is checked by making
+# the exact call the handler makes, rather than by pinging the port, because
+# "something answers on 11434" and "this model will generate for this request
+# body" are different claims and only the second one is the one being relied
+# on. What remains after this is an Ollama that dies at 03:00, which is a
+# request-time `upstream_unavailable` and is the honest floor rather than a gap.
+#
 # Run by ExecStartPre=. A non-zero exit here stops ExecStart from running at
 # all; the unit's StartLimitBurst then holds the service in `failed` for a
 # human rather than retrying a mistake forever.
@@ -49,7 +60,7 @@ import os
 import sys
 
 from eureka_protocol.src.eureka_daemon.crypto import EurekaCrypto
-from eureka_protocol.src.eureka_daemon.handlers import default_registry
+from eureka_protocol.src.eureka_daemon.handlers import HandlerError, default_registry
 from eureka_protocol.src.eureka_daemon.trust import TrustError, TrustList
 
 identity_path = os.environ["EUREKA_IDENTITY_PATH"]
@@ -79,7 +90,15 @@ if actual != expected:
 # The advertised list comes from the handler registry, exactly as the daemon
 # derives it. Typing a list here is how this check drifts from the daemon and
 # starts passing trust files the daemon will refuse.
-advertised = sorted(default_registry().names())
+#
+# This is also where an unusable EUREKA_INFERENCE surfaces, because that is
+# what the registry reads to decide whether this host offers inference at all.
+# Caught rather than allowed to traceback: the daemon would refuse to start on
+# it either way, and a one-line reason is what the journal is for.
+try:
+    advertised = sorted(default_registry().names())
+except HandlerError as exc:
+    fail(str(exc))
 
 # load(), not load_or_empty(): a missing file has already been caught above,
 # and here a corrupt one must raise rather than degrade to trusting nobody.
@@ -95,10 +114,65 @@ if not peers:
         f"would refuse every handshake it receives"
     )
 
+notes = []
+
+# The live half, and only for what this host actually advertises. On a node
+# with EUREKA_INFERENCE unset there is nothing to check here and nothing is
+# claimed; on one that advertises inference, Ollama must answer this exact
+# request or the daemon does not start.
+if "inference" in advertised:
+    import httpx
+
+    from eureka_protocol.src.eureka_daemon.handlers import (
+        INFERENCE_MODEL,
+        OLLAMA_ENDPOINT,
+        OllamaInference,
+    )
+
+    # Built from the handler's own body builder, so this cannot drift into
+    # checking a request the daemon does not make. num_predict is overridden
+    # down to 1: the question is whether it generates, not what it says.
+    probe = OllamaInference()
+    body = dict(probe.request_body("ping"), options={"num_predict": 1})
+    try:
+        answer = httpx.post(OLLAMA_ENDPOINT, json=body, timeout=120.0)
+    except httpx.ConnectError:
+        fail(
+            f"advertises inference and nothing is listening at "
+            f"{OLLAMA_ENDPOINT} -- start Ollama, or unset EUREKA_INFERENCE so "
+            f"this node stops claiming a capability it cannot serve"
+        )
+    except httpx.HTTPError as exc:
+        fail(f"inference probe to {OLLAMA_ENDPOINT} failed: "
+             f"{type(exc).__name__}: {exc}")
+
+    if answer.status_code == 404:
+        fail(
+            f"Ollama is up and does not have {INFERENCE_MODEL}: "
+            f"run `ollama pull {INFERENCE_MODEL}` on this host"
+        )
+    if answer.status_code != 200:
+        fail(
+            f"Ollama refused the request this handler makes "
+            f"(HTTP {answer.status_code}): {answer.text[:200]}"
+        )
+    try:
+        generated = answer.json().get("response")
+    except ValueError:
+        generated = None
+    if not isinstance(generated, str):
+        fail(f"Ollama answered 200 with no usable completion: "
+             f"{answer.text[:200]}")
+
+    notes.append(f"preflight:   ollama     {OLLAMA_ENDPOINT} generating "
+                 f"with {INFERENCE_MODEL}")
+
 print(f"preflight: {actual} ok")
 print(f"preflight:   identity   {identity_path}")
 print(f"preflight:   trust      {trust_path} ({len(peers)} peers: {', '.join(peers)})")
 print(f"preflight:   advertises {', '.join(advertised) or '(nothing)'}")
+for note in notes:
+    print(note)
 for name in peers:
     key = trust.key_for(name)
     granted = sorted(trust.capabilities_for(key))

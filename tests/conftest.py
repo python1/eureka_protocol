@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 from eureka_protocol.src.eureka_daemon.crypto import IDENTITY_PATH_ENV_VAR
+from eureka_protocol.src.eureka_daemon.handlers import INFERENCE_ENV
 from eureka_protocol.src.eureka_daemon.trust import TRUST_PATH_ENV_VAR
 
 _IDENTITY_DIR = tempfile.mkdtemp(prefix="eureka-test-identity-")
@@ -32,3 +33,12 @@ os.environ.setdefault(
 )
 
 atexit.register(shutil.rmtree, _IDENTITY_DIR, True)
+
+# Assignment, not setdefault, and that difference is on purpose. The two paths
+# above use setdefault so a developer can point the suite at their own files;
+# this one must not be overridable, because it decides what default_registry()
+# builds. An exported EUREKA_INFERENCE would silently change the advertised
+# list under every test that calls it, turning a green suite into a statement
+# about one machine's environment. Tests that want inference registered ask
+# for it explicitly with default_registry(inference=True).
+os.environ[INFERENCE_ENV] = "0"

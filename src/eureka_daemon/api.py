@@ -283,7 +283,8 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
         POST straight into the dispatch stub. It now passes the same gate the
         reads do, plus authorization and a single-use nonce; see assign.py for
         the order and why it matters. Behind the gate is the handler registry,
-        which for this daemon means web-retrieval and nothing else.
+        which means web-retrieval everywhere and inference on a host that sets
+        EUREKA_INFERENCE and has an Ollama for it -- see default_registry.
 
         The answer carries a signature over the result in the assign-result
         domain. The catch-all below cannot: it is the same constant refusal
@@ -323,6 +324,11 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
 # validated against it, which is the startup error this arrangement exists to
 # produce: add "code-exec" here and the daemon does not start, rather than
 # telling a granted peer yes and handing it nothing.
+#
+# default_registry() reads the environment for the one capability that depends
+# on the host rather than on the code: inference needs an Ollama, CT 101 has
+# none, and WSL does. That read happens here, at import, which is early enough
+# that an unrecognised EUREKA_INFERENCE stops the daemon before it binds.
 node_engine = EurekaNode.with_persistent_identity(handlers=default_registry())
 crypto_engine = node_engine.crypto
 app = create_app(node_engine)

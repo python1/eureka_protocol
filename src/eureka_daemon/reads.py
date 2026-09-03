@@ -187,10 +187,12 @@ def answer_logs(node: EurekaNode, document: Any,
     a peer reads back its own history here and nobody else's.
 
     What an entry holds is deliberately thin: the capability, the task name,
-    and the outcome. Not the result. For web-retrieval the result is somebody
-    else's web page, and disclosing it here would hand it back out under this
-    node's signature every time the log is read. node.log_event is where that
-    is enforced; this function only decides who may read what is there.
+    and the outcome. Not the request, and not the result. For web-retrieval the
+    result is somebody else's web page; for inference the request is a peer's
+    prompt and the result is a model's answer to it. Disclosing either would
+    hand it back out under this node's signature every time the log is read.
+    node.log_event is where that is enforced; this function only decides who
+    may read what is there.
 
     An operator reading the local log is not affected by any of this -- that
     path is the journal, not the network.

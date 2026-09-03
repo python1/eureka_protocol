@@ -1,5 +1,5 @@
 """
-The executor: the handler registry, and web-retrieval end to end.
+The executor: the handler registry, web-retrieval end to end, and inference.
 
 `assign()` used to sleep half a second and return a canned string. These tests
 cover what replaced it -- a registry that a node validates its advertised
@@ -14,8 +14,17 @@ things most worth testing here (a body that streams past the cap, a server
 that never answers, a connection that lands somewhere other than where DNS
 said it would) only exist once there is a socket. The default policy, the one
 the daemon runs, is tested separately and refuses that same server.
+
+The inference tests use a second real server, standing in for Ollama, for the
+same reason and one more: the failures worth testing there are a connection
+refused, a read that never finishes, and a 404 -- none of which exist without
+a socket. They never touch a real Ollama. That matters more than it looks,
+because the deployed endpoint is 127.0.0.1:11434 and a developer's machine may
+well have something listening on it; a test that reached the default endpoint
+would pass or fail according to what was installed locally.
 """
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -23,8 +32,13 @@ import time
 import httpx
 import pytest
 import uvicorn
-from fastapi import FastAPI, Response
-from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 
 from eureka_protocol.src.eureka_daemon.crypto import EurekaCrypto
 from eureka_protocol.src.eureka_daemon.handlers import (
@@ -32,22 +46,36 @@ from eureka_protocol.src.eureka_daemon.handlers import (
     HandlerContext,
     HandlerError,
     HandlerRegistry,
+    HANDLER_DEADLINE_SECONDS,
+    INFERENCE_DEADLINE_SECONDS,
+    INFERENCE_ENV,
+    INFERENCE_MODEL,
+    INFERENCE_TIMEOUT_SECONDS,
+    MAX_COMPLETION_TOKENS,
+    MAX_PROMPT_CHARS,
+    OLLAMA_ENDPOINT,
+    OllamaInference,
     REASON_ADDRESS_NOT_ALLOWED,
     REASON_BODY_TOO_LARGE,
     REASON_CONNECTION_FAILED,
     REASON_DNS_FAILED,
     REASON_HANDLER_ERROR,
     REASON_INVALID_PAYLOAD,
+    REASON_MODEL_NOT_AVAILABLE,
     REASON_NOT_IMPLEMENTED,
     REASON_OK,
+    REASON_PROMPT_TOO_LONG,
     REASON_SCHEME_NOT_ALLOWED,
     REASON_TIMEOUT,
     REASON_TOO_MANY_REDIRECTS,
+    REASON_UPSTREAM_ERROR,
+    REASON_UPSTREAM_UNAVAILABLE,
     STATUS_COMPLETED,
     STATUS_FAILED,
     WebRetrieval,
     completed,
     default_registry,
+    inference_enabled,
 )
 from eureka_protocol.src.eureka_daemon.node import EurekaNode
 from eureka_protocol.src.eureka_daemon.trust import TrustList
@@ -152,6 +180,105 @@ def origin():
     thread.join(timeout=10)
 
 
+# ---------------------------------------------------------------------------
+# A stand-in for Ollama, on a real socket
+#
+# One server covers every outcome, chosen by the prompt it is sent, so the
+# tests read as "send this, get that" rather than each rebuilding a server.
+# It also keeps the last request body it received, which is how the tests
+# about what the caller cannot choose are written: they assert on what
+# actually arrived, not on what the handler meant to send.
+# ---------------------------------------------------------------------------
+
+SLOW_PROMPT = "SLEEP"
+NOT_FOUND_PROMPT = "MODEL-MISSING"
+SERVER_ERROR_PROMPT = "BOOM"
+BAD_REQUEST_PROMPT = "REFUSE-THE-REQUEST"
+NOT_JSON_PROMPT = "NOT-JSON"
+NOT_A_STRING_PROMPT = "NOT-A-STRING"
+LONG_PROMPT = "VERY-LONG-ANSWER"
+
+
+class OllamaSpy:
+    """The last body the fake Ollama was sent."""
+
+    def __init__(self):
+        self.last_body = None
+        self.requests = 0
+
+
+def build_fake_ollama(spy):
+    app = FastAPI()
+
+    @app.post("/api/generate")
+    async def generate(request: Request):
+        body = await request.json()
+        spy.last_body = body
+        spy.requests += 1
+        prompt = body.get("prompt", "")
+
+        if prompt == SLOW_PROMPT:
+            await asyncio.sleep(5)
+            return JSONResponse({"response": "eventually", "done": True})
+        if prompt == NOT_FOUND_PROMPT:
+            # The shape a live Ollama returns for a model it does not hold.
+            return JSONResponse({"error": f"model '{body.get('model')}' not found"},
+                                status_code=404)
+        if prompt == SERVER_ERROR_PROMPT:
+            return JSONResponse({"error": "internal"}, status_code=500)
+        if prompt == BAD_REQUEST_PROMPT:
+            return JSONResponse({"error": "does not support thinking"},
+                                status_code=400)
+        if prompt == NOT_JSON_PROMPT:
+            return PlainTextResponse("this is not json",
+                                     media_type="application/json")
+        if prompt == NOT_A_STRING_PROMPT:
+            return JSONResponse({"response": 12345, "done": True})
+        if prompt == LONG_PROMPT:
+            return JSONResponse({"response": "z" * 20000, "done": True,
+                                 "done_reason": "length", "eval_count": 4096})
+        return JSONResponse({
+            "model": body.get("model"),
+            "response": f"echo: {prompt}",
+            "done": True,
+            "done_reason": "stop",
+            "eval_count": 7,
+        })
+
+    return app
+
+
+@pytest.fixture(scope="module")
+def ollama():
+    """A fake Ollama on loopback, plus the spy holding what it was sent."""
+    spy = OllamaSpy()
+    port = free_port()
+    server = uvicorn.Server(uvicorn.Config(
+        build_fake_ollama(spy), host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 20
+    while not server.started and time.time() < deadline:
+        time.sleep(0.05)
+    if not server.started:
+        pytest.fail("fake ollama did not start")
+
+    yield f"http://127.0.0.1:{port}/api/generate", spy
+
+    server.should_exit = True
+    thread.join(timeout=10)
+
+
+def infer(endpoint, **kwargs):
+    """An inference handler pointed at the fake Ollama."""
+    return OllamaInference(endpoint=endpoint, **kwargs)
+
+
+def dead_endpoint():
+    """A loopback port with nothing listening: a real connection refused."""
+    return f"http://127.0.0.1:{free_port()}/api/generate"
+
+
 def opener(**kwargs):
     """A fetcher allowed to reach the loopback origin, and nothing more."""
     kwargs.setdefault("policy", AddressPolicy(allow_loopback=True))
@@ -197,9 +324,19 @@ def test_a_node_given_a_registry_and_no_list_advertises_what_it_can_run():
     assert node.capabilities == ["web-retrieval"]
 
 
-def test_the_deployed_registry_holds_web_retrieval_and_nothing_else():
-    """code-exec has a gate and no sandbox. It must not have a handler."""
-    assert default_registry().names() == frozenset({"web-retrieval"})
+def test_the_deployed_registry_never_holds_code_exec_either_way():
+    """
+    code-exec has a gate and no sandbox. It must not have a handler, on any
+    host and under any setting -- which is now worth saying in both directions,
+    because the deployed registry stopped being one fixed set when inference
+    became a per-host decision. What web-retrieval and inference each depend on
+    is asserted separately below; this is the one that has to hold regardless.
+    """
+    for registry in (default_registry(inference=False),
+                     default_registry(inference=True)):
+        assert "code-exec" not in registry.names()
+        assert "data-analysis" not in registry.names()
+        assert "web-retrieval" in registry.names()
 
 
 def test_a_registered_handler_need_not_be_advertised():
@@ -655,3 +792,361 @@ def test_a_transport_without_a_socket_still_fetches(origin):
 
     assert result.status == STATUS_COMPLETED
     assert result.output["body"] == "mocked"
+
+
+# ---------------------------------------------------------------------------
+# inference: what the caller may choose, which is the prompt and nothing else
+# ---------------------------------------------------------------------------
+
+def test_inference_returns_a_completion(ollama):
+    endpoint, _spy = ollama
+    result = run(infer(endpoint)({"prompt": "say hello"},
+                                 context("inference")))
+
+    assert result.status == STATUS_COMPLETED
+    assert result.reason == REASON_OK
+    assert result.output["completion"] == "echo: say hello"
+    assert result.output["model"] == INFERENCE_MODEL
+    assert result.output["chars"] == len("echo: say hello")
+    assert result.output["truncated"] is False
+    assert result.output["done_reason"] == "stop"
+    assert result.output["eval_count"] == 7
+
+
+def test_the_request_ollama_receives_is_built_from_constants(ollama):
+    """
+    The load-bearing test for this capability. The caller supplies a prompt;
+    every other field Ollama sees is a constant in the module.
+    """
+    endpoint, spy = ollama
+    run(infer(endpoint)({"prompt": "a prompt"}, context("inference")))
+
+    assert spy.last_body == {
+        "model": INFERENCE_MODEL,
+        "prompt": "a prompt",
+        "stream": False,
+        "think": False,
+        "options": {"num_predict": MAX_COMPLETION_TOKENS},
+    }
+
+
+def test_the_payload_cannot_choose_the_model_or_anything_else(ollama):
+    """
+    A caller naming gemma4:e4b would be ordering 9.6 GB into 8 GB of VRAM, and
+    a caller naming a model this host does not have would be ordering a pull.
+    Extra keys are not rejected -- they are never read, which is the stronger
+    property, because it needs no list of forbidden names kept up to date.
+    """
+    endpoint, spy = ollama
+    result = run(infer(endpoint)({
+        "prompt": "hello",
+        "model": "gemma4:e4b",
+        "endpoint": "http://192.168.1.174:11434/api/generate",
+        "url": "http://169.254.169.254/latest/meta-data/",
+        "stream": True,
+        "think": True,
+        "keep_alive": -1,
+        "options": {"num_predict": 999999, "num_ctx": 131072},
+    }, context("inference")))
+
+    assert result.status == STATUS_COMPLETED
+    assert spy.last_body["model"] == INFERENCE_MODEL
+    assert spy.last_body["think"] is False
+    assert spy.last_body["stream"] is False
+    assert spy.last_body["options"] == {"num_predict": MAX_COMPLETION_TOKENS}
+    assert "keep_alive" not in spy.last_body
+    assert set(spy.last_body) == {"model", "prompt", "stream", "think",
+                                  "options"}
+
+
+def test_thinking_is_off_because_qwen3_would_otherwise_spend_the_budget(ollama):
+    """
+    Not a style choice. With thinking on, a reasoning model returns
+    done_reason "length" and an empty response, so the caller gets "" and no
+    error at all -- the worst shape a failure can have.
+    """
+    endpoint, spy = ollama
+    run(infer(endpoint)({"prompt": "anything"}, context("inference")))
+    assert spy.last_body["think"] is False
+
+
+def test_an_over_length_prompt_is_refused_with_its_own_reason(ollama):
+    endpoint, spy = ollama
+    before = spy.requests
+    result = run(infer(endpoint)({"prompt": "x" * (MAX_PROMPT_CHARS + 1)},
+                                 context("inference")))
+
+    assert result.status == STATUS_FAILED
+    assert result.reason == REASON_PROMPT_TOO_LONG
+    # Refused here, so Ollama never saw it: the cap is not advice to the model.
+    assert spy.requests == before
+
+
+def test_a_prompt_exactly_at_the_cap_is_accepted(ollama):
+    """The boundary is inclusive, and a test says which side it falls on."""
+    endpoint, _spy = ollama
+    result = run(infer(endpoint)({"prompt": "x" * MAX_PROMPT_CHARS},
+                                 context("inference")))
+    assert result.status == STATUS_COMPLETED
+
+
+def test_the_refusal_does_not_echo_the_prompt(ollama):
+    """A refusal that quoted the input would put it back on the wire."""
+    endpoint, _spy = ollama
+    secret = "hunter2-" + "y" * MAX_PROMPT_CHARS
+    result = run(infer(endpoint)({"prompt": secret}, context("inference")))
+
+    assert result.reason == REASON_PROMPT_TOO_LONG
+    assert "hunter2" not in json.dumps({"reason": result.reason,
+                                        "output": result.output})
+
+
+def test_a_missing_or_empty_prompt_is_an_invalid_payload(ollama):
+    endpoint, _spy = ollama
+    handler = infer(endpoint)
+    for payload in ({}, {"prompt": ""}, {"prompt": "   "}, {"prompt": 42},
+                    {"prompt": None}, {"prompt": ["a"]}, "not a dict"):
+        result = run(handler(payload, context("inference")))
+        assert result.status == STATUS_FAILED, payload
+        assert result.reason == REASON_INVALID_PAYLOAD, payload
+
+
+def test_the_prompt_is_stripped_before_it_is_measured_or_sent(ollama):
+    endpoint, spy = ollama
+    run(infer(endpoint)({"prompt": "  padded  "}, context("inference")))
+    assert spy.last_body["prompt"] == "padded"
+
+
+def test_ollama_unreachable_is_a_distinct_reason_and_not_a_crash():
+    """A real connection refused on a real loopback port with nothing on it."""
+    result = run(infer(dead_endpoint())({"prompt": "hello"},
+                                        context("inference")))
+    assert result.status == STATUS_FAILED
+    assert result.reason == REASON_UPSTREAM_UNAVAILABLE
+
+
+def test_a_timeout_is_a_distinct_reason(ollama):
+    endpoint, _spy = ollama
+    result = run(infer(endpoint, timeout_seconds=0.4)(
+        {"prompt": SLOW_PROMPT}, context("inference")))
+    assert result.status == STATUS_FAILED
+    assert result.reason == REASON_TIMEOUT
+
+
+def test_a_model_ollama_does_not_hold_is_told_apart_from_ollama_being_down(ollama):
+    """
+    404 and connection-refused are both "you cannot have an answer", and only
+    one of them is fixed by `ollama pull` on this host.
+    """
+    endpoint, _spy = ollama
+    missing = run(infer(endpoint)({"prompt": NOT_FOUND_PROMPT},
+                                  context("inference")))
+    down = run(infer(dead_endpoint())({"prompt": "hello"},
+                                      context("inference")))
+
+    assert missing.reason == REASON_MODEL_NOT_AVAILABLE
+    assert down.reason == REASON_UPSTREAM_UNAVAILABLE
+    assert missing.reason != down.reason
+
+
+def test_every_other_bad_answer_from_ollama_is_upstream_error(ollama):
+    endpoint, _spy = ollama
+    handler = infer(endpoint)
+    for prompt in (SERVER_ERROR_PROMPT, BAD_REQUEST_PROMPT, NOT_JSON_PROMPT,
+                   NOT_A_STRING_PROMPT):
+        result = run(handler({"prompt": prompt}, context("inference")))
+        assert result.status == STATUS_FAILED, prompt
+        assert result.reason == REASON_UPSTREAM_ERROR, prompt
+
+
+def test_nothing_from_ollamas_error_body_reaches_the_caller(ollama):
+    """
+    The 500 body says "internal" and the 400 says why the request was refused.
+    Both are this node's view of its own machine.
+    """
+    endpoint, _spy = ollama
+    result = run(infer(endpoint)({"prompt": SERVER_ERROR_PROMPT},
+                                 context("inference")))
+    assert result.output is None
+    assert result.reason == REASON_UPSTREAM_ERROR
+
+
+def test_an_overlong_completion_is_capped_and_says_so(ollama):
+    """
+    The second bound, for a model that ignores num_predict. `truncated` is how
+    the caller tells a short answer from a cut one.
+    """
+    endpoint, _spy = ollama
+    handler = infer(endpoint, max_completion_chars=100)
+    result = run(handler({"prompt": LONG_PROMPT}, context("inference")))
+
+    assert result.status == STATUS_COMPLETED
+    assert result.output["truncated"] is True
+    assert result.output["chars"] == 100
+    assert len(result.output["completion"]) == 100
+    # Two different ways of being cut short, and the caller gets both.
+    assert result.output["done_reason"] == "length"
+
+
+# ---------------------------------------------------------------------------
+# inference: the endpoint is fixed, and checked rather than trusted
+# ---------------------------------------------------------------------------
+
+def test_the_deployed_endpoint_is_a_literal_loopback_address():
+    assert OLLAMA_ENDPOINT == "http://127.0.0.1:11434/api/generate"
+
+
+def test_an_endpoint_that_is_not_loopback_is_refused_at_construction():
+    for endpoint in ("http://192.168.1.152:11434/api/generate",
+                     "http://169.254.169.254/api/generate",
+                     "http://8.8.8.8:11434/api/generate",
+                     "http://[::ffff:8.8.8.8]:11434/api/generate"):
+        with pytest.raises(HandlerError, match="not loopback"):
+            OllamaInference(endpoint=endpoint)
+
+
+def test_a_named_host_is_refused_even_when_the_name_is_localhost():
+    """
+    The claim is "this handler resolves nothing". A name would make that false,
+    and `localhost` is a name like any other -- /etc/hosts is a file, and files
+    change.
+    """
+    with pytest.raises(HandlerError, match="rather than a literal address"):
+        OllamaInference(endpoint="http://localhost:11434/api/generate")
+
+
+def test_ipv6_loopback_and_the_mapped_form_are_accepted():
+    OllamaInference(endpoint="http://[::1]:11434/api/generate")
+    OllamaInference(endpoint="http://[::ffff:127.0.0.1]:11434/api/generate")
+
+
+def test_a_non_http_endpoint_is_refused():
+    for endpoint in ("file:///etc/passwd", "ftp://127.0.0.1/x", "not a url"):
+        with pytest.raises(HandlerError):
+            OllamaInference(endpoint=endpoint)
+
+
+# ---------------------------------------------------------------------------
+# inference: deadlines, and which timeout is supposed to win
+# ---------------------------------------------------------------------------
+
+def test_the_handler_timeout_is_under_the_deadline_it_runs_within():
+    """
+    The ordering that keeps the distinct reasons reachable. If the registry
+    deadline fired first, every slow inference would come back as the generic
+    timeout and `upstream_unavailable`, `model_not_available` and
+    `upstream_error` would still be correct and never be seen.
+    """
+    assert INFERENCE_TIMEOUT_SECONDS < INFERENCE_DEADLINE_SECONDS
+
+
+def test_inference_gets_its_own_deadline_and_web_retrieval_keeps_the_default():
+    """
+    Raising the shared deadline to fit a model load would have given a wedged
+    fetch three times as long in a concurrency slot for no reason.
+    """
+    registry = default_registry(inference=True)
+    assert registry.deadline_for("inference") == INFERENCE_DEADLINE_SECONDS
+    assert registry.deadline_for("web-retrieval") == HANDLER_DEADLINE_SECONDS
+    assert registry.deadline_for("web-retrieval") == registry.deadline_seconds
+
+
+def test_an_unknown_capability_falls_back_to_the_registry_deadline():
+    registry = default_registry(inference=True)
+    assert registry.deadline_for("code-exec") == HANDLER_DEADLINE_SECONDS
+    assert registry.deadline_for(None) == HANDLER_DEADLINE_SECONDS
+
+
+def test_a_registry_deadline_is_enforced_per_capability():
+    """Not just recorded: the slow one is killed by its own number."""
+    async def slow(payload, ctx):
+        await asyncio.sleep(1)
+        return completed("finished")
+
+    registry = HandlerRegistry(deadline_seconds=5.0)
+    registry.register("quick", slow, deadline_seconds=0.2)
+    registry.register("patient", slow)
+
+    quick = run(registry.run("quick", {}, context("quick")))
+    patient = run(registry.run("patient", {}, context("patient")))
+
+    assert quick.status == STATUS_FAILED
+    assert quick.reason == REASON_TIMEOUT
+    assert patient.status == STATUS_COMPLETED
+
+
+def test_a_nonsense_deadline_is_refused_at_registration():
+    """
+    `inf` is the interesting one: it passes a "> 0" test and disables the
+    deadline entirely, which is the one setting whose whole job is to be
+    there. `nan` compares false against every bound, so it passes too.
+    """
+    for bad in (0, -1, "30", True, float("nan"), float("inf")):
+        with pytest.raises(HandlerError):
+            HandlerRegistry().register("thing", lambda p, c: None,
+                                       deadline_seconds=bad)
+
+
+# ---------------------------------------------------------------------------
+# inference: whether this host offers it at all
+# ---------------------------------------------------------------------------
+
+def test_inference_is_off_unless_the_host_says_otherwise():
+    """
+    CT 101 has no Ollama. Registering the handler unconditionally would make it
+    advertise a capability it cannot serve -- the exact lie validate_advertised
+    exists to prevent, moved one level down where that check cannot see it.
+    """
+    assert default_registry(inference=False).names() == frozenset(
+        {"web-retrieval"})
+    assert inference_enabled({}) is False
+    assert inference_enabled({INFERENCE_ENV: ""}) is False
+
+
+def test_the_host_turns_inference_on_through_the_environment():
+    for value in ("1", "true", "TRUE", "yes", "on", " 1 "):
+        assert inference_enabled({INFERENCE_ENV: value}) is True, value
+    for value in ("0", "false", "no", "off", "OFF"):
+        assert inference_enabled({INFERENCE_ENV: value}) is False, value
+
+
+def test_an_unrecognised_value_stops_the_daemon_rather_than_guessing():
+    """
+    Reading "yes please" as off would leave a node running and quietly not
+    advertising what it was deployed to serve. Reading it as on is worse.
+    """
+    for value in ("yes please", "maybe", "2", "enabled"):
+        with pytest.raises(HandlerError, match="neither on nor off"):
+            inference_enabled({INFERENCE_ENV: value})
+
+
+def test_the_enabled_registry_advertises_both_and_validates_as_such():
+    registry = default_registry(inference=True)
+    assert sorted(registry.names()) == ["inference", "web-retrieval"]
+    # Two capabilities, both with handlers: validate_advertised still holds.
+    registry.validate_advertised(["inference", "web-retrieval"])
+    node = EurekaNode(node_id="node_both", crypto_engine=EurekaCrypto(),
+                      trust_list=TrustList(), handlers=registry)
+    assert node.capabilities == ["inference", "web-retrieval"]
+
+
+def test_advertising_inference_without_a_handler_still_fails_at_startup():
+    """The static half of the guarantee, unchanged by there being two now."""
+    with pytest.raises(HandlerError, match="inference"):
+        EurekaNode(node_id="node_liar_2", crypto_engine=EurekaCrypto(),
+                   capabilities=["web-retrieval", "inference"],
+                   trust_list=TrustList(),
+                   handlers=default_registry(inference=False))
+
+
+def test_enabling_inference_changes_nothing_about_web_retrieval():
+    """
+    CT 101 and WSL both serve web-retrieval and only one of them serves
+    inference. The second capability must not alter the first.
+    """
+    without = default_registry(inference=False)
+    with_ = default_registry(inference=True)
+    assert "web-retrieval" in without.names() and "web-retrieval" in with_.names()
+    assert without.deadline_for("web-retrieval") == with_.deadline_for(
+        "web-retrieval")
+    assert isinstance(with_.get("web-retrieval"), WebRetrieval)

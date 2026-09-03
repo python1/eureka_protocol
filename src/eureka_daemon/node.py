@@ -985,6 +985,12 @@ class EurekaNode:
         dict wholesale. `output` is not read here, and adding a line that
         reads it is the mistake this paragraph exists to prevent.
 
+        Since inference the same rule covers the *request*. `task_info` is the
+        caller's task payload and it holds that capability's prompt; only
+        `task_name` is read out of it, and reading anything else would put a
+        peer's prompt into a signed, peer-readable log. Both directions matter
+        now, and both are protected by the same discipline rather than by two.
+
         `outcome` is the new field: "completed" when the work ran, and
         otherwise the distinct reason it did not -- a refusal from the gate, a
         timeout, an address the fetch policy would not touch. "It ran" and

@@ -8,6 +8,10 @@ peer exercised end to end on 2026-08-29 — see "What the WSL peer proved". That
 peer is now driven by Hermes Agent over MCP; see "Hermes Agent reaching
 Eureka".
 
+WSL gained a second capability on 2026-09-02: `inference`, served from a local
+Ollama, advertised there and on no other host, and granted to nobody yet. See
+"inference: what the caller does not get to choose".
+
 A third node joined on 2026-09-01: `ct102-openclaw` on CT 102, the host that
 holds the origin repo and runs Antiochus. It is an initiator only — no daemon,
 no listening port — and it proved a signed `/v1/assign` against CT 101 the same
@@ -884,12 +888,15 @@ that rule forbids.
 
 ### What it advertises, and what that is not
 
-It advertises **`web-retrieval`, and nothing else** -- not nothing. The
-advertised list is derived from the handler registry (`api.py` builds the node
-with `default_registry()`; `EurekaNode.__init__` takes the list from it), and
-`default_registry()` registers a real `WebRetrieval`. A node cannot advertise
-more than it can run: `validate_advertised` makes an advertised capability with
-no handler a startup error.
+Since 2026-09-02 it advertises **`web-retrieval` and `inference`** -- two
+capabilities, and still nothing it cannot run. The advertised list is derived
+from the handler registry (`api.py` builds the node with `default_registry()`;
+`EurekaNode.__init__` takes the list from it), and a node cannot advertise more
+than it can run: `validate_advertised` makes an advertised capability with no
+handler a startup error, which is unchanged by there now being two.
+
+CT 101 still advertises `web-retrieval` alone, and that is not an omission --
+see "inference is a property of the host" below.
 
 **Advertising is a claim about this node; granting is a decision about a peer,
 and this host grants nothing.** CT 101 and CT 102 are in WSL's trust file with
@@ -901,6 +908,129 @@ and the two questions have to stay separate -- CT 101 has advertised
 
 The refusal for "not granted" and "not offered here" is deliberately identical,
 so nothing readable from the far side distinguishes them.
+
+### inference: what the caller does not get to choose
+
+`inference` takes a prompt and returns a completion from `qwen3:8b` on this
+host's Ollama. **The prompt is the whole of the caller's input.** The model,
+the endpoint, the token budget, the sampling options and `keep_alive` are
+constants in `handlers.py`, and the body sent to Ollama is those constants plus
+one string -- asserted by a test against what the server actually received,
+not against what the handler meant to send.
+
+The model is hardcoded for two reasons and neither is tidiness. This machine
+holds `gemma4:e4b` at 9.6 GB against 8 GB of VRAM, so a caller that could name
+a model could order this node to thrash; and `/api/generate` **pulls a model
+the host does not have**, so a caller that could name one could order an
+arbitrary download from a registry. `qwen3:8b` at 5.2 GB fits, and is the only
+thing this node will run.
+
+**Thinking is turned off in every request, and that is a correctness fix.**
+qwen3 is a reasoning model: left alone it spends the token budget inside a
+thinking block and returns an empty `response`, so the caller gets `""` and no
+error at all. Confirmed against a live Ollama while writing this -- the same
+call with thinking on came back `done_reason: "length"` with an empty string,
+and with `"think": false` came back with the answer.
+
+The limits, and why each number:
+
+| limit | value | why |
+|---|---|---|
+| prompt | 4000 characters | ~1000-1400 tokens, far inside qwen3's window, so a long prompt is refused here rather than silently truncated by the model where nobody sees it. `api.py`'s 64 KiB body cap refuses a gross one a layer earlier. |
+| completion | 512 tokens | the real lever on how long a request takes, since generation is close to linear in tokens produced. 13-17s at the ~30-40 tok/s this GPU does on an 8B model. |
+| completion, again | 8000 characters | a second bound in case a model ignores `num_predict`; `truncated` in the output is how the caller tells a short answer from a cut one. |
+| connect | 2 seconds | the endpoint is loopback. A connect that does not complete instantly means nothing is listening, and waiting longer only delays a refusal this node already knows it will give. |
+| request | 75 seconds | a cold start dominates it: the first request after the model is evicted pays to load 5.2 GB into VRAM before a single token. |
+| deadline | 90 seconds | the registry's, for this capability only. |
+
+Measured on this host, 2026-09-02, on the first call after the pull:
+`load_duration` 3.49s of a 3.58s total -- the load really does dominate a cold
+request, and it is also nowhere near 75 seconds. That is a warm cold start,
+with the model's files still in the page cache; the budget is sized for the
+case where they are not, and for a request that then generates 512 tokens
+rather than the 2 this one did. It is deliberately not tight, because the cost
+of a too-large timeout here is one slow request occupying one of eight slots,
+and the cost of a too-small one is a capability that fails whenever the machine
+is cold.
+
+**75 and 90 are in that order on purpose, and the registry's 30s deadline had
+to change to allow it.** The executor wraps every handler in a deadline; it was
+one number, 30 seconds, chosen for an HTTP fetch, and a model load does not fit
+in it. Raising the shared number would have handed `web-retrieval` a
+90-second window it has no use for -- meaning a wedged fetch would sit in a
+concurrency slot three times as long for the sake of a capability it is not.
+So the deadline is now per capability: `web-retrieval` keeps 30, `inference`
+gets 90, and 90 is above the handler's own 75 so that **the handler loses
+first**. If the deadline fired first, every slow inference would come back as
+the executor's generic `timeout` and the handler's own reasons would still be
+correct and never be seen -- which is the kind of failure nobody notices.
+
+Each failure is its own outcome, because each has a different fix:
+
+| reason | what it means |
+|---|---|
+| `prompt_too_long` | the caller's, and shortening it fixes it. Refused before Ollama sees it. |
+| `upstream_unavailable` | nothing is listening on 11434. Start Ollama. |
+| `model_not_available` | Ollama is up and does not hold the model. `ollama pull qwen3:8b`. |
+| `upstream_error` | Ollama answered and the answer was not usable -- a 400, a 500, a non-JSON body, a completion that is not a string. |
+| `timeout` | the handler's 75s, or the registry's 90s behind it. |
+| `invalid_payload` | no prompt, or one that is not a non-empty string. |
+
+Nothing from Ollama's error body travels, and **nothing echoes the prompt** --
+including the refusal for a prompt that was too long, which is the one place it
+would be tempting.
+
+**It is not an SSRF hole, and the reason is structural rather than careful.**
+The endpoint is `http://127.0.0.1:11434/api/generate`, a literal address,
+checked at construction: `_require_loopback` refuses anything that is not
+loopback and refuses a *name* outright, `localhost` included, because a name is
+resolved and /etc/hosts is a file. So this handler does no DNS, has nothing to
+rebind, and follows no redirects -- where `web-retrieval` must reason about
+addresses because the peer picks them, this one has exactly one address and
+cannot be argued into a second.
+
+**The prompt and the completion are not in the audit log.** That is not
+enforced by this handler; it is enforced above it, by `log_event` assembling
+its entry from named scalars and never reading `payload` or `output` -- the
+same property that keeps fetched pages out. The entry records the peer, the
+capability, the task name and the outcome, and a test asserts against the
+serialised entry rather than a list of fields, because the failure it guards
+against is a field somebody adds later.
+
+### inference is a property of the host, not of the code
+
+CT 101 has no Ollama. WSL does. So `default_registry()` reads
+`EUREKA_INFERENCE` from the environment, and the unit file is where a host
+declares it:
+
+    Environment=EUREKA_INFERENCE=1
+
+Registering the handler unconditionally was the obvious alternative and is
+wrong: CT 101 would then advertise a capability it cannot serve, which is
+exactly the lie `validate_advertised` exists to prevent -- only moved one level
+down where that check cannot see it, since the *handler* would exist and the
+static check would pass. The discovery would come at request time, to a peer
+that had been told yes by every gate. Unset means off; an unrecognised value is
+a start failure rather than either answer, because a typo read as "off" leaves
+a daemon running and quietly not offering what it was deployed for.
+
+Reading it inside `default_registry()` rather than at each call site is what
+keeps the answers consistent: `api.py` builds the node from it and
+`wsl-preflight.sh` derives the advertised list from it, and the two cannot
+disagree about a host because they ask the same function on it.
+
+**This will bite demo.sh the day something is granted inference.** demo.sh
+builds throwaway client nodes and takes their advertised list from
+`default_registry()` too -- inheriting the *shell's* environment, which is not
+the unit's. A trust file that grants `inference` will not load against a node
+advertising only `web-retrieval` (`TrustError`: granted a capability this node
+does not advertise), which is the same failure the hardcoded `fast-inference`
+list used to cause. So on WSL, once a grant exists:
+
+    EUREKA_INFERENCE=1 ... ./demo.sh https://...
+
+It is left inherited rather than forced on inside demo.sh, because forcing it
+would have demo.sh claim inference on CT 101.
 
 ### Why supervision needed deciding before anything was written
 
@@ -938,6 +1068,8 @@ and the differences are all forced by the host; see below.
 | `--tls-dir /var/lib/eureka/tls` | `--tls-dir /var/lib/eureka-wsl/tls` | **not the default.** The default writes the certificate *and its key* beside the identity file, which would put a second copy of this node's private key inside `~/.eureka`. Explicit keeps that directory read-only in practice as well as in policy. |
 | — | `PYTHONDONTWRITEBYTECODE=1` | the repo is on a read-only mount for this service, so CPython cannot write `__pycache__` beside the source. Saying so beats letting it discover that per import. |
 | — | `ExecStartPre=deploy/wsl-preflight.sh` | see below. |
+| — | `Environment=EUREKA_INFERENCE=1` | this host has an Ollama and CT 101 does not, so `inference` is registered and advertised here and nowhere else. See "inference is a property of the host". |
+| — | `TimeoutStartSec=300` | the preflight now makes a real generate call, and the first one after a boot pays to load 5.2 GB into VRAM. systemd's default 90s start timeout would kill the start for the one reason that is not a fault. |
 
 ### The preflight, and the two things it refuses to default
 
@@ -969,6 +1101,29 @@ intention into a check: `EUREKA_EXPECT_NODE_ID=node_ef0a1f59`.
 It derives the advertised list from `default_registry()` rather than taking a
 list typed into the script -- typing one is how a check like this drifts from
 the daemon and starts passing trust files the daemon will refuse.
+
+**Since inference there is a fifth check, and it is a different kind of
+thing.** The four above are static: they ask what is on disk and what the code
+says. Whether Ollama is *running* is neither, and the registry cannot ask it --
+`validate_advertised` checks that code exists for what is advertised, which is
+true whether or not a service is up. So the liveness half lives here, and only
+fires on a host that actually advertises inference:
+
+    preflight: advertises inference and nothing is listening at http://127.0.0.1:11434/api/generate -- start Ollama, or unset EUREKA_INFERENCE so this node stops claiming a capability it cannot serve
+    preflight: Ollama is up and does not have qwen3:8b: run `ollama pull qwen3:8b` on this host
+    preflight: EUREKA_INFERENCE='yes please' is neither on nor off; use one of ['1', 'on', 'true', 'yes'] or leave it unset
+
+It checks by **making the exact call the handler makes** -- built from
+`OllamaInference.request_body()`, with `num_predict` turned down to 1 -- rather
+than by pinging the port. "Something answers on 11434" and "this model will
+generate for this request body" are different claims, and only the second is
+the one being relied on; a preflight that proves the first goes green while the
+real call is being refused for a reason nobody has looked at yet.
+
+What it still cannot promise is that Ollama will be up in an hour. A service
+that dies at 03:00 is `upstream_unavailable` on the next request, and that is
+the honest floor rather than a gap: liveness is not something a startup check
+can hold.
 
 All four refusals, exercised 2026-09-01 before install:
 
@@ -1116,6 +1271,83 @@ note above: every port on .152 timing out while the host is plainly up. If that
 ever needs to change, it is a different Task Scheduler trigger, not a change to
 the unit.
 
+### Rolling inference out to WSL
+
+Four steps, in this order, and the third is the one that must not be skipped.
+
+**1. Get the model.** The daemon will not start advertising inference without
+it, which is the point, but finding that out from a failed start is slower than
+pulling it first.
+
+    ollama pull qwen3:8b
+    ollama list | grep qwen3          # ~5.2 GB
+    curl -s http://127.0.0.1:11434/api/version
+
+**2. Prove the exact call works, before anything depends on it.** This is the
+body the handler sends, `think: false` included -- if this returns an empty
+`response` or a non-200, the preflight will refuse the start for the same
+reason and you will already know why:
+
+    curl -s -X POST http://127.0.0.1:11434/api/generate \
+      -d '{"model":"qwen3:8b","prompt":"Say the single word: ping","stream":false,
+           "think":false,"options":{"num_predict":16}}'
+
+**3. Update the code and the unit together.** The unit gains
+`Environment=EUREKA_INFERENCE=1` and `TimeoutStartSec=300`; without the first
+the new code changes nothing here, and without the second a cold model load can
+outrun systemd's default 90-second start timeout.
+
+    sudo cp ~/eureka/eureka_protocol/deploy/eureka-daemon-wsl.service \
+      /etc/systemd/system/eureka-daemon-wsl.service
+    sudo systemctl daemon-reload
+
+**4. Restart, and read the preflight rather than the exit code.** It now prints
+what this node advertises and what it proved about Ollama:
+
+    sudo systemctl restart eureka-daemon-wsl
+    systemctl is-active eureka-daemon-wsl
+    journalctl -u eureka-daemon-wsl -n 30 --no-pager | grep preflight
+
+    # expected:
+    #   preflight: node_ef0a1f59 ok
+    #   preflight:   advertises inference, web-retrieval
+    #   preflight:   ollama     http://127.0.0.1:11434/api/generate generating with qwen3:8b
+    #   preflight:   grants     eureka-node: (nothing)
+    #   preflight:   grants     ct102-openclaw: (nothing)
+
+The grants lines must still say `(nothing)`. Advertising is not granting, and
+this change deliberately does not touch the trust file.
+
+**How the commit reaches WSL: `git pull`, and that is the whole of it.**
+Recorded here on 2026-09-02, because this document had described CT 101's
+bundle procedure in detail and said nothing about this host. WSL has an
+`origin`, and it points straight at CT 102's working repo over ssh:
+
+    git -C ~/eureka/eureka_protocol remote -v
+    # origin  root@192.168.1.174:/root/.openclaw/workspace/eureka_protocol
+
+    git -C ~/eureka/eureka_protocol pull
+    git -C ~/eureka/eureka_protocol log --oneline -1
+
+**This is a different route from the `macbook` remote, and the difference
+matters when a commit looks missing.** CT 102 is the origin repo and pushes to
+`macbook` as the shared source of truth; WSL pulls from **CT 102**, not from
+the MacBook. So a commit that exists on the MacBook and not on CT 102 is
+invisible here, and the fix is to look at CT 102's `master` rather than at the
+MacBook's. Fetching from a non-bare repo like CT 102's is fine -- it is the
+checked-out `master` that WSL reads.
+
+**Why this host gets a pull and CT 101 gets bundles** is not a preference: CT
+101 has no remote at all, deliberately, and no private key to authenticate one
+with. WSL has both. The pull is the simpler route and it is available here for
+that reason alone.
+
+Afterwards the check is the same one CT 101 uses -- `log --oneline -1` must
+name the commit you meant -- plus the one this host adds: **the daemon must be
+restarted after it lands.** A running daemon does not notice a changed file
+underneath it, and on this host the preflight is part of the start, so a
+restart is also when the new checks actually run.
+
 ### Verifying it
 
 From CT 101 and CT 102, in that order -- CT 101 already trusted this key, CT 102
@@ -1126,6 +1358,10 @@ had to be provisioned:
 `demo.sh` is the real check, because the untrusted scenario is what shows the
 handshake was doing something. Both hosts need the identity paths on the command
 line, for the reason in "demo.sh needs the identity paths too".
+
+The manifest is also where the second capability becomes visible from off the
+host: an authenticated peer reading it should now see both names, and CT 101's
+should still show one.
 
 A responder cannot run the trusted scenario against itself -- a node does not
 carry its own key in its own allowlist -- so this is checked from the peers,
@@ -2191,3 +2427,11 @@ without the agent, the model or the MCP transport in the way.
 
 Mutual TLS is evaluated and deliberately not planned; see the TLS section above
 for why.
+
+`inference` was added on 2026-09-02 and **is granted to nobody.** WSL
+advertises it, WSL can run it, and both peers sit in WSL's trust file with
+`"capabilities": []`, so an `/v1/assign` naming it is refused before dispatch
+exactly as before. Advertising and granting stay two decisions and only the
+first has been taken -- the same position `web-retrieval` was in on this host
+on 2026-09-01. Granting it is the next task, and the demo.sh note above becomes
+live the moment it happens.

@@ -137,7 +137,8 @@ reconnect.
 This function now has a real caller: the assign endpoint consults it on every
 request, after authentication and before anything is dispatched — see the
 next section. What sits behind it is no longer a stub either: the grant gates
-a registry of handlers, and one capability, `web-retrieval`, is implemented.
+a registry of handlers, and two capabilities are implemented — `web-retrieval`
+everywhere, and `inference` on a host that has a local Ollama to run it.
 
 The advertised list is not written down twice. A node built with a handler
 registry takes its capabilities from that registry, or is checked against it —
@@ -192,13 +193,16 @@ declined to make is still a request it accepted, which is a different fact from
 a peer that may not ask.
 
 Every decision lands in the audit log with the capability, the requesting peer
-and the outcome — and never the result body. For `web-retrieval` that body is
-somebody else's web page, and copying it into a signed, peer-readable log would
-republish it under this node's name.
+and the outcome — and never the request or the result. For `web-retrieval` the
+result is somebody else's web page; for `inference` the request is a peer's
+prompt and the result is a model's answer to it. Copying either into a signed,
+peer-readable log would republish it under this node's name, so the entry is
+assembled from named scalars — who asked, which capability, what came of it —
+and never from the payload or the result.
 
 ### web-retrieval
 
-The one implemented capability. It fetches a URL a peer names and returns the
+It fetches a URL a peer names and returns the
 status, content type and body, under limits that exist because the peer chooses
 the URL: a body cap, a wall-clock timeout, a redirect cap, and http/https only.
 A body over the cap is refused when the target declares the size and truncated
@@ -222,6 +226,52 @@ the HTTP client resolves the name a second time and a name can answer
 differently the second time. And it runs again on every redirect — hops are
 followed by hand precisely so that a URL which passes and then redirects into
 the private network is refused at the hop.
+
+### inference
+
+It runs a prompt through a local Ollama and returns the completion. The two
+capabilities have opposite shapes and it is worth saying why. `web-retrieval`
+lets the peer choose the target, so almost all of its design is about where
+this node may be pointed. `inference` lets the peer choose **nothing but the
+text**: the model, the endpoint, the token budget, the sampling options and
+the model's residency are all constants in the module, and the request sent to
+Ollama is those constants plus one string.
+
+That is not fastidiousness. A caller that could name a model could name one
+larger than this host's VRAM, and Ollama will *pull* a model it does not have
+— which turns "run my prompt" into "fetch an arbitrary blob from a registry
+and load it". The endpoint is a literal loopback address, checked at
+construction and refusing even the name `localhost`, because a name is
+resolved and this handler's claim is that it resolves nothing. So there is no
+DNS in the path, nothing to rebind, and no redirect to follow: where
+web-retrieval must reason carefully about addresses, this handler has exactly
+one and cannot be argued into a second.
+
+The limits are a maximum prompt length, a maximum number of generated tokens,
+and a timeout — the last of which is longer than a fetch's, because a model
+that has to be loaded into VRAM before it emits a token does not fit in a
+fetch's budget. That is why the executor's deadline became per capability
+rather than one number: raising the shared one to fit a model load would have
+handed `web-retrieval` a window three times longer than it has any use for.
+Every failure is a distinct outcome — the prompt was too long, Ollama is not
+answering, Ollama does not have the model, Ollama answered with something
+unusable, it took too long — because those have different fixes and only one
+of them is the operator's.
+
+**Whether a node offers it is a property of the host, not of the code.**
+Ollama is installed on some machines and not others, so registering the
+handler unconditionally would make a machine without one advertise a
+capability it cannot serve — the same lie the registry's startup check exists
+to prevent, moved somewhere that check cannot see it. The host declares it,
+the daemon's unit file is where it declares it, and an unrecognised value
+stops the daemon rather than being read as either answer.
+
+What that still cannot promise is that Ollama is *running*: the registry's
+check is static, and liveness is not. The deployment's preflight closes that
+by making the exact call the handler makes before the daemon starts, so a
+missing service or an unpulled model is a start failure with a reason in the
+journal. After that, an Ollama that dies is `upstream_unavailable` on the next
+request, which is the honest floor rather than a gap.
 
 `code-exec` and `data-analysis` have no handlers, deliberately, and so are not
 advertised at all. Registering a handler is the act that makes a standing grant
@@ -359,8 +409,10 @@ existing, rather than by promising not to look. The cost is real and is not
 hidden: provisioning is manual, there is no place to look a peer up, and a mesh
 of any size becomes an operator's problem.
 
-**No code execution.** `web-retrieval` is implemented; `code-exec` is not, and
-is not advertised. Running code a peer asked for, over a network, with no
+**No code execution.** `web-retrieval` and `inference` are implemented;
+`code-exec` is not, and is not advertised. Inference is not an exception to
+this: it runs a fixed local model over text and executes nothing the peer
+supplies. Running code a peer asked for, over a network, with no
 sandbox is the one part of this design that fails catastrophically rather than
 gracefully, and it stays unbuilt until there is an isolation boundary to put it
 behind. The gate in front of it has been real for some time — the order was
@@ -465,10 +517,10 @@ src/eureka_daemon/
   discovery.py      signed caller-driven address gossip
   reads.py          authenticated reads of the peer table, log and manifest
   assign.py         the assign gate: authorization and single-use requests
-  handlers.py       the executor: handler registry, fetch policy, web-retrieval
+  handlers.py       the executor: registry, fetch policy, web-retrieval, inference
   signed_request.py the one gate every authenticated request passes through
   address_book.py   bounded address table with expiry
-tests/              525 tests
+tests/              658 tests
 demo.sh             trusted and untrusted handshake, side by side
 ```
 

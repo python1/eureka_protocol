@@ -16,6 +16,7 @@ at the end of this file are the other half: a real capability, fetched over a
 real socket, through the whole gate.
 """
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -36,7 +37,14 @@ from eureka_protocol.src.eureka_daemon.crypto import EurekaCrypto
 from eureka_protocol.src.eureka_daemon.handlers import (
     AddressPolicy,
     HandlerRegistry,
+    INFERENCE_DEADLINE_SECONDS,
+    INFERENCE_MODEL,
+    MAX_PROMPT_CHARS,
+    OllamaInference,
     REASON_ADDRESS_NOT_ALLOWED,
+    REASON_PROMPT_TOO_LONG,
+    REASON_TIMEOUT,
+    REASON_UPSTREAM_UNAVAILABLE,
     STATUS_COMPLETED,
     STATUS_FAILED,
     WebRetrieval,
@@ -54,7 +62,14 @@ from eureka_protocol.src.eureka_daemon.signed_request import PROTOCOL
 from eureka_protocol.src.eureka_daemon.trust import TrustList
 # The origin server these tests fetch from is the one test_handlers.py builds:
 # one real HTTP server, defined once, rather than two that can drift apart.
-from eureka_protocol.tests.test_handlers import origin   # noqa: F401  (fixture)
+# Same for the fake Ollama the inference tests at the bottom of this file run
+# against, and for the prompts that steer it.
+from eureka_protocol.tests.test_handlers import (   # noqa: F401  (fixtures)
+    SLOW_PROMPT,
+    dead_endpoint,
+    ollama,
+    origin,
+)
 
 
 def run(coro):
@@ -747,3 +762,274 @@ def test_concurrent_assigns_do_not_interfere_and_do_not_stall_a_handshake(origin
     assert shaken["mutual"] is True
     assert timings["handshake"] < timings["slow"]
     assert timings["fast"] < timings["slow"]
+
+
+# ---------------------------------------------------------------------------
+# inference behind the same gate
+#
+# The second capability, and the first one whose input is worth protecting.
+# These run against the fake Ollama on loopback, never a real one, so what is
+# under test is this node's behaviour rather than a model's.
+# ---------------------------------------------------------------------------
+
+def inference_daemon(endpoint, **kwargs):
+    """
+    A daemon advertising inference and web-retrieval, as WSL will.
+
+    The endpoint is the one difference from the deployed node, and it is still
+    loopback -- OllamaInference refuses anything else at construction, so a
+    test cannot widen this into a network client even by trying.
+    """
+    registry = HandlerRegistry()
+    registry.register("web-retrieval",
+                      WebRetrieval(policy=AddressPolicy(allow_loopback=True),
+                                   timeout_seconds=5.0))
+    registry.register("inference", OllamaInference(endpoint=endpoint, **kwargs),
+                      deadline_seconds=INFERENCE_DEADLINE_SECONDS)
+    return make_node("node_infer",
+                     capabilities=["inference", "web-retrieval"],
+                     handlers=registry)
+
+
+def infer_answer(daemon, peer, prompt, task_name="infer"):
+    return run(answer_assign(daemon, build_assign_query(
+        peer, "inference", task_name, {"prompt": prompt})))
+
+
+def test_a_granted_peer_gets_a_real_completion(ollama):
+    """The acceptance criterion: a grant, a prompt, and an answer back."""
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint)
+    peer = handshaked(make_node("node_asker", capabilities=[]), daemon,
+                      grants=["inference"])
+
+    answer = infer_answer(daemon, peer, "what is the capital of France")
+    result = answer["result"]
+
+    assert answer["reason"] == REASON_OK
+    assert result["status"] == STATUS_COMPLETED
+    assert result["capability"] == "inference"
+    assert result["output"]["completion"] == (
+        "echo: what is the capital of France")
+    assert result["output"]["model"] == INFERENCE_MODEL
+    assert result["output"]["truncated"] is False
+
+
+def test_the_inference_result_is_signed_in_the_result_domain_and_no_other(ollama):
+    """
+    Same guarantee web-retrieval has. A completion is this node saying what it
+    did, in a domain nothing else in the protocol can mint -- so a result
+    cannot be handed back to it as a request to run something.
+    """
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint)
+    peer = handshaked(make_node("node_infer_verifier", capabilities=[]),
+                      daemon, grants=["inference"])
+
+    answer = infer_answer(daemon, peer, "hello")
+    pub, signature, result = (daemon.public_key_hex,
+                              answer["result_signature"], answer["result"])
+
+    assert EurekaCrypto.verify_assign_result(pub, signature, result) is True
+    assert EurekaCrypto.verify_assign_query(pub, signature, result) is False
+    assert EurekaCrypto.verify_read_query(pub, signature, result) is False
+    assert EurekaCrypto.verify_discovery_query(pub, signature, result) is False
+    assert EurekaCrypto.verify_handshake(pub, signature, result) is False
+    assert EurekaCrypto.verify_handshake_offer(pub, signature, result) is False
+    assert EurekaCrypto.verify_handshake_confirm(pub, signature, result) is False
+    assert EurekaCrypto.verify_audit_log(pub, signature, result) is False
+
+
+def test_a_peer_without_the_inference_grant_is_refused(ollama):
+    """
+    Holding web-retrieval is not holding inference. The refusal is the same
+    constant every other refusal is, so it discloses nothing about which of
+    the two this node offers.
+    """
+    endpoint, spy = ollama
+    daemon = inference_daemon(endpoint)
+    peer = handshaked(make_node("node_ungranted", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+    before = spy.requests
+
+    answer = infer_answer(daemon, peer, "let me in")
+
+    assert answer["reason"] == REASON_NOT_PERMITTED
+    assert answer == rejected(REASON_NOT_PERMITTED)
+    # The refusal is the shared constant, so its result is the empty dict
+    # every other refusal carries -- not an empty completion, which would be
+    # a different thing to have been told.
+    assert answer["result"] == {}
+    # Refused before dispatch: the prompt never reached Ollama.
+    assert spy.requests == before
+
+
+def test_a_peer_with_no_grants_at_all_is_refused(ollama):
+    """
+    Where both responders stand today: CT 101 and ct102-openclaw sit in WSL's
+    trust file with empty grants, so this is the live behaviour until somebody
+    decides otherwise.
+    """
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint)
+    peer = handshaked(make_node("node_nogrants", capabilities=[]), daemon,
+                      grants=[])
+
+    assert infer_answer(daemon, peer, "hello") == rejected(REASON_NOT_PERMITTED)
+
+
+def test_the_audit_log_records_the_peer_and_outcome_and_not_the_prompt(ollama):
+    """
+    The reason this capability can exist. The entry has to be enough to answer
+    "who asked this node to do what, and what came of it" and must contain
+    neither the question nor the answer -- a log is read by every peer with
+    the logs grant and kept for as long as the log is kept.
+    """
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint)
+    peer = handshaked(make_node("node_logged", capabilities=[]), daemon,
+                      grants=["inference"])
+
+    prompt = "my bank password is correct-horse-battery-staple"
+    answer = infer_answer(daemon, peer, prompt, task_name="private-question")
+    completion = answer["result"]["output"]["completion"]
+
+    entries = audit_entries_for(daemon, "node_logged")
+    assert len(entries) == 1
+    payload = entries[0]["payload"]
+
+    # What it must record.
+    assert payload["peer"] == "node_logged"
+    assert payload["capability"] == "inference"
+    assert payload["result"] == STATUS_COMPLETED
+    assert payload["outcome"] == STATUS_COMPLETED
+    assert payload["task_summary"] == "private-question"
+
+    # What it must not. Checked against the serialised entry rather than a
+    # list of fields, because the failure this guards against is a new field
+    # somebody adds later, which no assertion about today's fields would see.
+    serialised = json.dumps(entries[0])
+    assert "correct-horse-battery-staple" not in serialised
+    assert prompt not in serialised
+    assert completion not in serialised
+    assert "prompt" not in serialised
+    assert "completion" not in serialised
+
+
+def test_a_refused_inference_is_logged_as_a_refusal_without_the_prompt(ollama):
+    """
+    The other half: "we said no to X" is part of the record of what this node
+    did about X, and it must not be the record of what X asked.
+    """
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint)
+    peer = handshaked(make_node("node_refused_infer", capabilities=[]), daemon,
+                      grants=["web-retrieval"])
+
+    infer_answer(daemon, peer, "secret-phrase-nobody-should-see")
+
+    entries = audit_entries_for(daemon, "node_refused_infer")
+    assert len(entries) == 1
+    assert entries[0]["payload"]["outcome"] == REASON_NOT_PERMITTED
+    assert "secret-phrase-nobody-should-see" not in json.dumps(entries[0])
+
+
+def test_a_failed_inference_is_logged_by_its_reason_and_still_not_the_prompt(ollama):
+    """
+    An upstream that is not there is a request this node accepted, ran, and
+    could not complete -- the log says which, and the caller is not told its
+    grant was taken away.
+    """
+    daemon = inference_daemon(dead_endpoint())
+    peer = handshaked(make_node("node_upstream_down", capabilities=[]), daemon,
+                      grants=["inference"])
+
+    answer = infer_answer(daemon, peer, "unreachable-prompt-text")
+
+    assert answer["reason"] == REASON_OK          # the gate said yes
+    assert answer["result"]["status"] == STATUS_FAILED
+    assert answer["result"]["reason"] == REASON_UPSTREAM_UNAVAILABLE
+    assert answer["result"]["output"] is None
+
+    entries = audit_entries_for(daemon, "node_upstream_down")
+    assert entries[-1]["payload"]["outcome"] == REASON_UPSTREAM_UNAVAILABLE
+    assert "unreachable-prompt-text" not in json.dumps(entries[-1])
+
+
+def test_an_over_length_prompt_is_refused_through_the_gate(ollama):
+    """
+    Accepted by the gate, refused by the handler, and the two are different
+    records: this peer's grant is intact and its prompt was too long.
+    """
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint)
+    peer = handshaked(make_node("node_verbose", capabilities=[]), daemon,
+                      grants=["inference"])
+
+    answer = infer_answer(daemon, peer, "w" * (MAX_PROMPT_CHARS + 1))
+
+    assert answer["reason"] == REASON_OK
+    assert answer["result"]["status"] == STATUS_FAILED
+    assert answer["result"]["reason"] == REASON_PROMPT_TOO_LONG
+    entries = audit_entries_for(daemon, "node_verbose")
+    assert entries[-1]["payload"]["outcome"] == REASON_PROMPT_TOO_LONG
+
+
+def test_a_timeout_comes_back_through_the_gate_as_a_timeout(ollama):
+    """
+    The handler's own timeout fires first, well inside the registry deadline.
+    Both say `timeout` to the caller; what matters is that neither raises and
+    the request is not left to occupy a slot for 90 seconds.
+    """
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint, timeout_seconds=0.4)
+    peer = handshaked(make_node("node_slow_infer", capabilities=[]), daemon,
+                      grants=["inference"])
+
+    answer = infer_answer(daemon, peer, SLOW_PROMPT)
+
+    assert answer["result"]["status"] == STATUS_FAILED
+    assert answer["result"]["reason"] == REASON_TIMEOUT
+    entries = audit_entries_for(daemon, "node_slow_infer")
+    assert entries[-1]["payload"]["outcome"] == REASON_TIMEOUT
+
+
+def test_web_retrieval_is_unchanged_on_a_node_that_also_serves_inference(origin,
+                                                                        ollama):
+    """
+    WSL will advertise two capabilities and CT 101 one. The second must not
+    disturb the first: same grant, same result, same separation between them.
+    """
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint)
+    fetcher = handshaked(make_node("node_still_fetching", capabilities=[]),
+                         daemon, grants=["web-retrieval"])
+
+    answer = run(answer_assign(daemon, build_assign_query(
+        fetcher, "web-retrieval", "fetch", {"url": f"{origin}/hello"})))
+
+    assert answer["result"]["status"] == STATUS_COMPLETED
+    assert answer["result"]["output"]["body"] == "hello from the origin"
+    # And the fetcher still cannot reach the other capability.
+    assert infer_answer(daemon, fetcher, "hello") == rejected(
+        REASON_NOT_PERMITTED)
+
+
+def test_the_two_capabilities_are_granted_independently(ollama, origin):
+    """
+    Two grants, two peers, and neither one implies the other. This is what
+    makes advertising two capabilities safe: the trust file still decides
+    each one separately.
+    """
+    endpoint, _spy = ollama
+    daemon = inference_daemon(endpoint)
+    both = handshaked(make_node("node_both_grants", capabilities=[]), daemon,
+                      grants=["inference", "web-retrieval"])
+
+    assert daemon.granted_capabilities("node_both_grants") == {
+        "inference", "web-retrieval"}
+    assert infer_answer(daemon, both, "hi")["result"]["status"] == (
+        STATUS_COMPLETED)
+    fetched = run(answer_assign(daemon, build_assign_query(
+        both, "web-retrieval", "fetch", {"url": f"{origin}/hello"})))
+    assert fetched["result"]["status"] == STATUS_COMPLETED

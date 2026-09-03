@@ -71,6 +71,15 @@ from eureka_protocol.src.eureka_daemon.handlers import default_registry
 # It survived that long because the hosts that run demo.sh most were the ones
 # granting nothing, where an arbitrary list validates fine against an empty
 # grant. Deriving it means the check cannot drift from the deployment again.
+#
+# Since inference the list is per HOST, because default_registry() reads
+# EUREKA_INFERENCE -- so this inherits whatever the shell running demo.sh has,
+# which is NOT automatically what the systemd unit sets. On a host that both
+# serves inference and grants it to somebody, run demo.sh with
+# EUREKA_INFERENCE=1 in the environment or this node will advertise less than
+# the trust file grants and die with the same TrustError described above. It is
+# left inherited rather than forced on, because forcing it would have demo.sh
+# claim inference on CT 101, which has no Ollama.
 ADVERTISED = sorted(default_registry().names())
 
 # https gets require_tls: this node will not fall back to speaking in the clear

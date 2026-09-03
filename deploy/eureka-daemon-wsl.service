@@ -36,12 +36,35 @@ Environment=EUREKA_IDENTITY_PATH=/home/stunner/.eureka/identity.key
 Environment=EUREKA_TRUST_PATH=/home/stunner/.eureka/trust.json
 Environment=EUREKA_EXPECT_NODE_ID=node_ef0a1f59
 
+# --- Capabilities: which of them this HOST can actually serve ---------------
+# web-retrieval needs nothing but an outbound socket, so it is registered
+# everywhere. inference needs an Ollama on this machine, which CT 101 does not
+# have -- so registering it unconditionally would make CT 101 advertise a
+# capability it cannot serve, which is the exact lie the registry's startup
+# check exists to prevent, only moved one level down where that check cannot
+# see it. The decision is therefore per host, and this is where a host says so,
+# next to the other three variables that are true of this machine and no other.
+#
+# Unset means off. An unrecognised value is a start failure rather than either
+# answer -- a typo that read as "off" would leave a daemon running and quietly
+# not offering what it was deployed for.
+Environment=EUREKA_INFERENCE=1
+
 WorkingDirectory=/home/stunner/eureka
 
 # Checked before uvicorn binds anything: paths present, identity is the node
 # peers already trust, trust file loads against the advertised list. A non-zero
 # exit here means ExecStart never runs, and the reason is in the journal.
 ExecStartPre=/home/stunner/eureka/eureka_protocol/deploy/wsl-preflight.sh
+
+# The preflight now makes a real generate call against Ollama, and the first
+# one after a boot pays to load 5.2 GB into VRAM before it answers. systemd's
+# default start timeout is 90s, which a cold model load can plausibly exceed on
+# this GPU -- and a timeout there would kill the start for the one reason that
+# is not a fault. Five minutes is not a budget anything is expected to use; it
+# is the difference between "Ollama is slow this morning" and "the daemon
+# failed to start".
+TimeoutStartSec=300
 
 # TLS only, exactly as CT 101 serves. --no-plain refuses to start without
 # --tls-port, so a half-edit cannot produce a daemon listening on nothing.

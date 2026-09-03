@@ -71,9 +71,68 @@ The rest of the limits are because this runs on a daemon and the peer chooses
 the URL: a body cap (a peer must not be able to point this node at an endless
 stream and make it allocate), a wall-clock timeout, and http/https only --
 `file://` would read the disk, and everything else is somebody's gadget.
+
+----------------------------------------------------------------------------
+inference, and the things the caller does not get to choose
+----------------------------------------------------------------------------
+
+`inference` runs a prompt through a local Ollama and hands back the
+completion. It is the mirror image of web-retrieval's problem: there the peer
+names the target and the danger is where this node is pointed, here the peer
+names nothing but the text, and the danger is everything it would otherwise be
+able to name.
+
+**The caller supplies a prompt. That is the whole of its input.** Not the
+model, not the endpoint, not the token budget, not the sampling options, not
+`keep_alive`. Every one of those is a constant in this module, and the request
+body sent to Ollama is built from those constants plus one string. A model
+name from the caller is the sharp one: this host has `gemma4:e4b` on disk at
+9.6 GB against 8 GB of VRAM, so a caller that could name a model could order
+this node to thrash, and `/api/generate` will also pull a model it does not
+have -- which turns "run a prompt" into "fetch an arbitrary blob from a
+registry and load it". `qwen3:8b` is hardcoded for that reason and not for
+neatness.
+
+**The endpoint is a literal loopback address, checked at construction.**
+`http://127.0.0.1:11434/api/generate`, and `_require_loopback` refuses
+anything else -- including the *name* `localhost`, because a name is resolved
+and a resolver is a thing that can be changed. So there is no DNS in this path
+at all, nothing to rebind, and no redirect following: unlike web-retrieval,
+which must reason about addresses because the peer picks them, this handler
+has exactly one address and cannot be argued into a second. The constructor
+argument exists so a test can point it at a real server on 127.0.0.1; it
+cannot reach off-host even then, and no deployed path passes one.
+
+**Thinking is turned off, and that is a correctness fix rather than a taste.**
+qwen3 is a reasoning model: left alone it spends the token budget on a
+thinking block and returns an empty `response`, so a caller asking for a
+completion gets `""` and no error. `"think": false` is sent with every
+request. Confirmed against a live Ollama -- the same call with thinking on
+returned `done_reason: "length"` and an empty string, and with it off returned
+the answer.
+
+**The prompt does not go in the audit log, and neither does the completion.**
+That is not a rule this handler enforces -- it is enforced above, by
+`log_event` building its entry from named scalars and never reading `payload`
+or `output` -- but it is the reason this capability can exist at all. A prompt
+is at least as sensitive as a fetched page and usually more so, because it was
+written by the peer rather than published by a stranger. Nothing here prints
+it either: the registry's last-resort handler prints an exception's type and
+message, so the rule for this file is that no exception it raises may carry
+the prompt.
+
+**Ollama being up is not something this node can promise at construction.**
+See `HandlerError`'s docstring and the note on `default_registry`: the
+registry's startup check is static -- does code exist for what is advertised
+-- and a live upstream is not a static property. The dynamic half is checked
+by `deploy/wsl-preflight.sh` before the daemon starts, and what remains after
+that is a service that can die at 03:00, which is why `upstream_unavailable`
+exists as an outcome.
 """
 import asyncio
 import ipaddress
+import math
+import os
 import socket
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
@@ -106,6 +165,18 @@ REASON_TIMEOUT = "timeout"
 REASON_TOO_MANY_REDIRECTS = "too_many_redirects"
 REASON_BODY_TOO_LARGE = "body_too_large"
 REASON_CONNECTION_FAILED = "connection_failed"
+# inference. Four outcomes that a caller can act on differently, which is the
+# whole reason they are not one reason with a message attached:
+#   prompt_too_long      -- your fault, and shortening it fixes it
+#   upstream_unavailable -- this node's Ollama is not answering at all
+#   model_not_available  -- Ollama is up and does not have the model
+#   upstream_error       -- Ollama answered, and the answer was not usable
+# The last two are worth telling apart because only one of them is fixed by an
+# operator running `ollama pull` on this host.
+REASON_PROMPT_TOO_LONG = "prompt_too_long"
+REASON_UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+REASON_MODEL_NOT_AVAILABLE = "model_not_available"
+REASON_UPSTREAM_ERROR = "upstream_error"
 # The last-resort reason: a handler raised something nobody predicted. The
 # exception is printed locally and never travels.
 REASON_HANDLER_ERROR = "handler_error"
@@ -123,6 +194,58 @@ ALLOWED_SCHEMES = frozenset({"http", "https"})
 # sockets as it has nonces.
 HANDLER_DEADLINE_SECONDS = 30.0
 MAX_CONCURRENT_HANDLERS = 8
+
+# ---------------------------------------------------------------------------
+# inference: the constants a caller cannot reach
+#
+# Every one of these is here rather than in the payload, and the docstring
+# above says why for each. The numbers are chosen for the host that runs this
+# -- an RTX 3070 mobile with 8 GB of VRAM, holding qwen3:8b at 5.2 GB -- and
+# they are deliberately conservative, because this is a network daemon and the
+# thing being bounded is what one granted peer can order per request.
+# ---------------------------------------------------------------------------
+OLLAMA_ENDPOINT = "http://127.0.0.1:11434/api/generate"
+INFERENCE_MODEL = "qwen3:8b"
+
+# 4000 characters, roughly 1000-1400 tokens: far inside qwen3's context window,
+# so a long prompt is refused here rather than silently truncated by the model
+# where nobody would see it happen. Measured in characters and not bytes,
+# because characters are what map to tokens; the byte size is bounded anyway by
+# api.py's 64 KiB cap on the request body, which refuses an oversized prompt
+# one layer earlier and without parsing it.
+MAX_PROMPT_CHARS = 4000
+
+# The real lever on how long a request takes, since generation time is close to
+# linear in tokens produced. 512 tokens at the ~30-40 tok/s this GPU does on an
+# 8B model is 13-17 seconds of generation.
+MAX_COMPLETION_TOKENS = 512
+
+# A second, independent bound on what comes back, in case a model ignores
+# num_predict. `truncated` in the output is how the caller can tell.
+MAX_COMPLETION_CHARS = 8000
+
+# Two seconds to connect: the endpoint is loopback, so a connect that does not
+# complete essentially instantly means nothing is listening, and waiting longer
+# only delays a refusal this node already knows it will give.
+INFERENCE_CONNECT_TIMEOUT_SECONDS = 2.0
+
+# 75 seconds for the whole exchange. A cold start dominates it: qwen3:8b is
+# 5.2 GB, and the first request after the model is evicted pays for loading it
+# from disk into VRAM before a single token is generated.
+INFERENCE_TIMEOUT_SECONDS = 75.0
+
+# The registry deadline this capability runs under, and it must stay ABOVE the
+# handler's own timeout. If the deadline fired first, every slow inference
+# would come back as the registry's generic `timeout` and the handler's own
+# reasons would become unreachable -- the outcomes would still be safe and
+# would stop being informative, which is the failure mode nobody notices.
+# 90 > 75 leaves the handler room to lose first and say why.
+INFERENCE_DEADLINE_SECONDS = 90.0
+
+# Set this in the unit file on a host that has Ollama. Unset means the
+# capability is not registered, not advertised, and not runnable -- see
+# `default_registry`.
+INFERENCE_ENV = "EUREKA_INFERENCE"
 
 
 class HandlerError(Exception):
@@ -473,6 +596,213 @@ class WebRetrieval:
 
 
 # ---------------------------------------------------------------------------
+# inference
+# ---------------------------------------------------------------------------
+
+def _require_loopback(endpoint: str) -> str:
+    """
+    The endpoint must be a literal loopback address. Raises if it is not.
+
+    A construction-time check, so a mistake here is a startup error on the host
+    that made it rather than a request-time surprise on a node somebody trusts.
+
+    A *name* is refused along with everything else, `localhost` included. That
+    looks pedantic and is not: a name is resolved, a resolver reads
+    /etc/hosts and then the network, and this handler's whole claim is that it
+    has no DNS in it and therefore nothing to rebind. Requiring the literal
+    address is what makes that claim checkable instead of customary.
+    """
+    parts = urlsplit(endpoint)
+    if parts.scheme.lower() not in ALLOWED_SCHEMES:
+        raise HandlerError(
+            f"inference endpoint {endpoint!r} must be http or https"
+        )
+    host = parts.hostname
+    if not host:
+        raise HandlerError(f"inference endpoint {endpoint!r} names no host")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        raise HandlerError(
+            f"inference endpoint {endpoint!r} names a host rather than a "
+            f"literal address; this handler resolves nothing, so give it "
+            f"127.0.0.1 (not localhost)"
+        ) from None
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if not ip.is_loopback:
+        raise HandlerError(
+            f"inference endpoint {endpoint!r} is not loopback; this handler "
+            f"talks to an Ollama on this host and to nothing else"
+        )
+    return endpoint
+
+
+class OllamaInference:
+    """
+    Run one prompt through the local Ollama and return the completion.
+
+    The payload contributes a prompt and nothing else. Extra keys in it are not
+    rejected, they are simply never read -- which is the property worth having,
+    because "the request body is built from constants plus one string" is
+    easier to verify than a list of keys somebody has to remember to keep
+    refusing.
+
+    Every constructor argument has a deployed default and no deployed caller
+    passes one; they exist so tests can point this at a fake Ollama on
+    127.0.0.1 and drive the real socket paths. `endpoint` is checked against
+    loopback either way, so even a test cannot widen it into a network client.
+    """
+
+    def __init__(self, *,
+                 endpoint: str = OLLAMA_ENDPOINT,
+                 model: str = INFERENCE_MODEL,
+                 max_prompt_chars: int = MAX_PROMPT_CHARS,
+                 max_completion_tokens: int = MAX_COMPLETION_TOKENS,
+                 max_completion_chars: int = MAX_COMPLETION_CHARS,
+                 timeout_seconds: float = INFERENCE_TIMEOUT_SECONDS,
+                 connect_timeout_seconds: float = INFERENCE_CONNECT_TIMEOUT_SECONDS,
+                 client_factory: Optional[Callable[[], httpx.AsyncClient]] = None):
+        self.endpoint = _require_loopback(endpoint)
+        self.model = model
+        self.max_prompt_chars = max_prompt_chars
+        self.max_completion_tokens = max_completion_tokens
+        self.max_completion_chars = max_completion_chars
+        self.timeout_seconds = timeout_seconds
+        self.connect_timeout_seconds = connect_timeout_seconds
+        self.client_factory = client_factory
+
+    def _new_client(self) -> httpx.AsyncClient:
+        if self.client_factory is not None:
+            return self.client_factory()
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(self.timeout_seconds,
+                                  connect=self.connect_timeout_seconds),
+            # Nothing is followed. Ollama does not redirect, and a redirect
+            # arriving from something claiming to be Ollama is either a
+            # misconfiguration or the one way this fixed endpoint could be
+            # turned into a variable one.
+            follow_redirects=False,
+        )
+
+    def request_body(self, prompt: str) -> Dict[str, Any]:
+        """
+        Exactly what goes to Ollama. One caller-supplied value, by construction.
+
+        Public, and not for tidiness: `deploy/wsl-preflight.sh` builds its
+        startup probe from this method so that what it proves at boot is the
+        request the daemon actually makes. A preflight that checks a request
+        nobody sends is a preflight that goes green while the real call is
+        being refused.
+
+        `think: false` is not optional -- see the module docstring. `keep_alive`
+        is deliberately absent: how long this host keeps 5.2 GB resident is an
+        operator's decision about the machine, not a peer's about its request,
+        and Ollama's own default is the operator's to change.
+        """
+        return {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "think": False,
+            "options": {"num_predict": self.max_completion_tokens},
+        }
+
+    async def __call__(self, payload: Dict[str, Any],
+                       context: HandlerContext) -> HandlerResult:
+        prompt = payload.get("prompt") if isinstance(payload, dict) else None
+        if not isinstance(prompt, str) or not prompt.strip():
+            return failed(REASON_INVALID_PAYLOAD)
+        prompt = prompt.strip()
+        if len(prompt) > self.max_prompt_chars:
+            # The length is not echoed back and neither is the prompt. The
+            # caller knows what it sent; the cap is documented; and a daemon
+            # that quotes the input back in a refusal is a daemon that logs
+            # and returns input on a path that was supposed to have neither.
+            return failed(REASON_PROMPT_TOO_LONG)
+
+        client = self._new_client()
+        try:
+            return await self._generate(client, prompt)
+        finally:
+            await client.aclose()
+
+    async def _generate(self, client: httpx.AsyncClient,
+                        prompt: str) -> HandlerResult:
+        try:
+            response = await client.post(self.endpoint,
+                                         json=self.request_body(prompt))
+        except (httpx.TimeoutException, asyncio.TimeoutError):
+            return failed(REASON_TIMEOUT)
+        except httpx.ConnectError:
+            # Loopback refusing a connection means the service is not there.
+            # This is the one that says "start Ollama", and it is separated
+            # from every other transport failure because it is the only one an
+            # operator can act on without looking anything up.
+            return failed(REASON_UPSTREAM_UNAVAILABLE)
+        except httpx.HTTPError:
+            return failed(REASON_CONNECTION_FAILED)
+
+        if response.status_code == 404:
+            # Ollama's answer for a model it does not hold, confirmed against a
+            # live instance: 404 with {"error": "model '...' not found"}. It is
+            # not an error in the request and it is not the service being down,
+            # so it gets its own reason and an operator gets `ollama pull`.
+            return failed(REASON_MODEL_NOT_AVAILABLE)
+        if response.status_code != 200:
+            # A 400 (the model cannot generate, or rejects `think`), a 500, or
+            # anything else. One reason: the body of Ollama's error is this
+            # node's view of its own machine and does not travel.
+            return failed(REASON_UPSTREAM_ERROR)
+
+        try:
+            data = response.json()
+        except ValueError:
+            return failed(REASON_UPSTREAM_ERROR)
+        if not isinstance(data, dict):
+            return failed(REASON_UPSTREAM_ERROR)
+
+        completion = data.get("response")
+        if not isinstance(completion, str):
+            # Including the case where Ollama returned 200 with an "error"
+            # key. A non-string completion is not a completion.
+            return failed(REASON_UPSTREAM_ERROR)
+
+        truncated = len(completion) > self.max_completion_chars
+        if truncated:
+            completion = completion[:self.max_completion_chars]
+        return completed(self._describe(data, completion, truncated))
+
+    def _describe(self, data: Dict[str, Any], completion: str,
+                  truncated: bool) -> Dict[str, Any]:
+        """
+        What the peer gets back.
+
+        `truncated` and `done_reason` are two different ways of being cut short
+        and the caller needs both: `truncated` is this node's character cap,
+        `done_reason: "length"` is the token budget, and a completion can hit
+        either without hitting the other. `model` is echoed because the caller
+        did not choose it and is entitled to know what answered.
+        """
+        # Both are typed on the way out rather than passed through. Ollama is
+        # local and trusted here, so this is not defence against it -- it is
+        # the same rule the rest of this file follows: what leaves this node is
+        # built, not forwarded, so a field that changes shape upstream cannot
+        # change the shape of what a peer receives.
+        eval_count = data.get("eval_count")
+        done_reason = data.get("done_reason")
+        return {
+            "model": self.model,
+            "completion": completion,
+            "chars": len(completion),
+            "truncated": truncated,
+            "done_reason": done_reason if isinstance(done_reason, str) else None,
+            "eval_count": eval_count if isinstance(eval_count, int) else None,
+        }
+
+
+# ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
 
@@ -484,12 +814,22 @@ class HandlerRegistry:
     against it at startup, and it runs one handler under a deadline and a
     concurrency cap without ever raising. Everything else about a capability
     lives in the handler.
+
+    The deadline is per capability, falling back to the registry's own. It was
+    one number for everything until inference arrived, and the reason it could
+    not stay one number is that 30 seconds was chosen for an HTTP fetch: a
+    model that has to be loaded into VRAM before it generates its first token
+    does not fit in it, and raising the shared number to fit would hand
+    web-retrieval a 90-second window it has no use for -- meaning a wedged
+    fetch would sit in a concurrency slot three times as long for the sake of a
+    capability it is not. How long work may take is a property of the work.
     """
 
     def __init__(self, *,
                  deadline_seconds: float = HANDLER_DEADLINE_SECONDS,
                  max_concurrent: int = MAX_CONCURRENT_HANDLERS):
         self._handlers: Dict[str, Handler] = {}
+        self._deadlines: Dict[str, float] = {}
         self.deadline_seconds = deadline_seconds
         self.max_concurrent = max_concurrent
         # Created lazily, and per loop. A Semaphore binds itself to the loop
@@ -503,13 +843,18 @@ class HandlerRegistry:
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
 
-    def register(self, capability: str, handler: Handler) -> "HandlerRegistry":
+    def register(self, capability: str, handler: Handler, *,
+                 deadline_seconds: Optional[float] = None) -> "HandlerRegistry":
         """
         Add one capability. Refuses to replace an existing one.
 
         Silent replacement is how a node ends up running something other than
         what the operator thinks it runs -- two registrations of the same name
         in different modules, and which one wins depends on import order.
+
+        `deadline_seconds` overrides the registry's own for this capability.
+        None means the shared default, which is what everything but inference
+        wants.
         """
         if not isinstance(capability, str) or not capability.strip():
             raise HandlerError("a capability name must be a non-empty string")
@@ -518,8 +863,29 @@ class HandlerRegistry:
             raise HandlerError(f"capability {name!r} is already registered")
         if not callable(handler):
             raise HandlerError(f"handler for {name!r} is not callable")
+        if deadline_seconds is not None:
+            # bool before int, because True is an int and a deadline of one
+            # second is not what anybody typing True meant. Finite, because
+            # `inf` would silently disable the deadline -- the one setting
+            # whose whole job is to be there -- and `nan` compares false
+            # against everything, so neither is caught by a range test.
+            if (isinstance(deadline_seconds, bool)
+                    or not isinstance(deadline_seconds, (int, float))
+                    or not math.isfinite(deadline_seconds)
+                    or deadline_seconds <= 0):
+                raise HandlerError(
+                    f"deadline for {name!r} must be a positive, finite number "
+                    f"of seconds, got {deadline_seconds!r}"
+                )
+            self._deadlines[name] = float(deadline_seconds)
         self._handlers[name] = handler
         return self
+
+    def deadline_for(self, capability: object) -> float:
+        """How long this capability gets, falling back to the registry's own."""
+        if isinstance(capability, str):
+            return self._deadlines.get(capability.strip(), self.deadline_seconds)
+        return self.deadline_seconds
 
     def get(self, capability: object) -> Optional[Handler]:
         if not isinstance(capability, str):
@@ -554,10 +920,11 @@ class HandlerRegistry:
 
         The deadline is the executor's own, over and above whatever timeouts
         the handler sets for itself: a handler that forgets one, or holds a
-        connection that never closes, still cannot occupy a slot forever. The
-        semaphore bounds how many run at once -- the work is awaited, so the
-        loop stays free for handshakes either way, but sockets and memory are
-        finite in a way the event loop is not.
+        connection that never closes, still cannot occupy a slot forever. It
+        is the capability's if it has one -- see `register` -- and the
+        registry's otherwise. The semaphore bounds how many run at once -- the
+        work is awaited, so the loop stays free for handshakes either way, but
+        sockets and memory are finite in a way the event loop is not.
         """
         handler = self.get(capability)
         if handler is None:
@@ -570,8 +937,9 @@ class HandlerRegistry:
 
         try:
             async with self._semaphore:
-                return await asyncio.wait_for(handler(payload, context),
-                                              timeout=self.deadline_seconds)
+                return await asyncio.wait_for(
+                    handler(payload, context),
+                    timeout=self.deadline_for(capability))
         except (asyncio.TimeoutError, TimeoutError):
             return failed(REASON_TIMEOUT)
         except asyncio.CancelledError:
@@ -587,9 +955,39 @@ class HandlerRegistry:
             return failed(REASON_HANDLER_ERROR)
 
 
-def default_registry(**kwargs) -> HandlerRegistry:
+# Values accepted for INFERENCE_ENV, and nothing else is guessed at.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "no", "off", ""})
+
+
+def inference_enabled(environ: Optional[Dict[str, str]] = None) -> bool:
     """
-    What a deployed daemon runs: web-retrieval, and nothing else.
+    Whether this host offers inference. Unset means no.
+
+    An unrecognised value raises rather than being read as either answer.
+    Defaulting it to off would be the quiet failure -- a typo'd `EUREKA_INFRENCE`
+    or a value of "yes please" would leave the daemon running and no longer
+    advertising a capability it was deployed to serve, which looks like a
+    working node right up until a peer asks. Defaulting it to on is worse.
+    So it is neither, and the daemon does not start.
+    """
+    source = os.environ if environ is None else environ
+    raw = source.get(INFERENCE_ENV, "")
+    value = raw.strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    raise HandlerError(
+        f"{INFERENCE_ENV}={raw!r} is neither on nor off; use one of "
+        f"{sorted(_TRUTHY)} or leave it unset"
+    )
+
+
+def default_registry(*, inference: Optional[bool] = None,
+                     **kwargs) -> HandlerRegistry:
+    """
+    What a deployed daemon runs: web-retrieval always, inference where it can.
 
     `code-exec` and `data-analysis` are deliberately absent. The gate in front
     of them is real, but there is no sandbox behind them, and registering a
@@ -597,5 +995,32 @@ def default_registry(**kwargs) -> HandlerRegistry:
     a node validates its advertised list against this registry, their absence
     is now enforced rather than merely intended: a daemon that advertises
     code-exec does not start.
+
+    **inference is per host, because Ollama is per host.** CT 101 has no
+    Ollama; WSL does. Registering it unconditionally would make CT 101
+    advertise a capability it cannot serve, which is precisely the lie
+    `validate_advertised` exists to prevent, only moved one level down where
+    that check cannot see it -- the handler would exist, so the static check
+    would pass, and the discovery would come at request time. So the decision
+    is read from the environment, where the unit file sets it, alongside the
+    identity and trust paths that are host-specific for the same reason.
+
+    Reading it here rather than at each call site is what keeps the answers
+    consistent: api.py builds the daemon's node from this, and
+    `wsl-preflight.sh` derives the advertised list from this, and the two
+    cannot disagree about a host because they ask the same function on it.
+
+    What this still cannot promise is that Ollama is *up* -- that is a
+    liveness property and this is a construction-time check. The preflight
+    tests the live service before the daemon starts; after that, an Ollama
+    that dies is `upstream_unavailable` on the next request, which is the
+    honest floor rather than a gap.
     """
-    return HandlerRegistry(**kwargs).register("web-retrieval", WebRetrieval())
+    if inference is None:
+        inference = inference_enabled()
+    registry = HandlerRegistry(**kwargs).register("web-retrieval",
+                                                  WebRetrieval())
+    if inference:
+        registry.register("inference", OllamaInference(),
+                          deadline_seconds=INFERENCE_DEADLINE_SECONDS)
+    return registry
