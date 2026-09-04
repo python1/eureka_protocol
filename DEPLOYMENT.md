@@ -1810,6 +1810,20 @@ peers from the table it checks against.
   arrived**, so no tool ran, and the Eureka config is not implicated. Check
   that before touching `mcp.servers` -- a silent agent after a config change
   is the moment this will be blamed on the new config.
+- **`openclaw mcp reload` does not respawn a running stdio MCP server, so new
+  environment variables do not reach it.** Seen twice on 2026-09-03. A stdio
+  server's env is fixed at spawn; `reload` disposes the cached runtimes, but a
+  live agent holding a built runtime keeps the child it already has. The
+  symptom accuses the wrong thing: `openclaw mcp probe` reports the server
+  healthy and the agent refuses `inference_peer_not_configured` with the
+  variable set correctly in `openclaw.json` -- because `probe` spawns its own
+  fresh subprocess and is answering about a process that is not serving the
+  agent. **If probe shows the tool and the agent says the peer is not
+  configured, the running subprocess predates the change**: restart the
+  gateway, and do not go hunting for a missing grant on the peer. A scratch
+  `openclaw agent --session-id` turn will pass while Telegram fails, because a
+  new session builds a new runtime. Full account under "Applying config
+  changes, and when a restart is unavoidable".
 - WSL2 is behind NAT unless `networkingMode=mirrored`, which this host sets:
   it shares the Windows LAN interface, so 192.168.1.152 is the same address
   Windows answers on and inbound meets the **Windows** firewall first. That was
@@ -2706,7 +2720,7 @@ The two `hermes-fetch` entries CT 102 wrote on 2026-09-01 between 06:14 and
 make it tidy; those entries are a true record that the daemon logged that name,
 and this paragraph is the record of why it was wrong.
 
-### Applying config changes without restarting the agent
+### Applying config changes, and when a restart is unavoidable
 
 Antiochus is a live Telegram agent, so the sequence matters:
 
@@ -2722,9 +2736,55 @@ Antiochus is a live Telegram agent, so the sequence matters:
 candidate itself, so the diff is the tool's own output rather than a
 hand-built guess at what it would do.
 
-**`openclaw mcp reload` disposes the cached MCP runtimes and agents pick up the
-new config on their next turn. The gateway is never restarted** -- PID unchanged
-across both changes made on 2026-09-01, `NRestarts=0`, no Telegram downtime.
+**`openclaw mcp reload` is enough to add or remove a server. It is NOT enough
+to change the environment of a server that is already running.** The
+2026-09-01 changes were adds -- no `eureka` subprocess existed yet, so the next
+turn spawned one and it read the new config on the way up. PID unchanged,
+`NRestarts=0`, no Telegram downtime; the claim was true for what was done, and
+it does not generalise.
+
+Changing `env` on a live server is the other case, and it cost two rounds on
+2026-09-03 before it was named. A stdio MCP server's environment is fixed at
+spawn. `reload` disposes the cached *runtimes*, so the next runtime build
+spawns a fresh child carrying the current config -- but a live agent holding a
+built runtime does not necessarily rebuild it, and its existing child keeps the
+environment it started with. Restart the gateway:
+
+    systemctl --user restart openclaw-gateway
+    # XDG_RUNTIME_DIR=/run/user/0 when not on a login session
+
+#### The symptom points at the one thing that is not wrong
+
+Every check an operator would run looks healthy, and the refusal accuses the
+config:
+
+    openclaw mcp probe              -> eureka: 3 tools               (healthy)
+    grep EUREKA_INFERENCE_PEER ...  -> set, correct address          (healthy)
+    the agent, asked for inference  -> inference_peer_not_configured (refusal)
+
+The config says the peer is configured and the tool says it is not, so the
+instinct is to doubt one of them. Both are fine. `probe` spawns its own fresh
+subprocess to ask, which inherits the new environment and answers honestly
+about a process that is not the one serving the agent. The gateway's
+long-lived child is the one that answered the agent, and it predates the
+change. `inference_peer_not_configured` is that process reading its own env at
+call time -- the truth about the process it is in, and a lie about the file.
+
+**Discriminator: if `probe` shows the tool but the agent refuses
+`inference_peer_not_configured`, the running subprocess predates the config
+change.** Restart the gateway; do not go looking for a grant on the peer.
+
+#### A scratch session does not test an env change
+
+`openclaw agent --session-id <scratch>` is the method used below, and for an
+env change it passes while Telegram still fails. A new session id builds a new
+runtime, which spawns a new subprocess with the new environment; the live
+agent's already-built runtime is untouched. On 2026-09-03 a scratch turn
+returned a verified completion from the new peer while the Telegram agent was
+still refusing every call. **After an env change, verify from the channel the
+agent actually serves, or verify after a restart. A passing scratch turn is
+not evidence about the live one** -- it is a different process reading a
+different environment.
 
 Rollback is `openclaw mcp unset eureka && openclaw mcp reload`, or restoring the
 backup. **Do not roll back to `openclaw.json.last-good`**: OpenClaw refreshes
@@ -2776,7 +2836,10 @@ before it used `openclaw agent`, which runs a turn through the Gateway and is
 and the message from the phone is the observation. Keep the distinction when
 reading the rest of this section: an agent turn is the right tool for iterating,
 because it needs no phone and delivers nothing to the channel, and it is a proxy
-until somebody sends a real message.
+until somebody sends a real message. 2026-09-03 supplied the case where the
+proxy does not merely fall short of the observation but contradicts it: after
+an env change a scratch turn spawns a new subprocess and passes, while the live
+agent holds an old one and fails. See the discriminator above.
 
 ### What was proven, 2026-09-03: the inference tool
 
@@ -2830,6 +2893,34 @@ And WSL's own audit log, read back over the protocol with an authenticated
 Which is also the third row of the task-name table, observed rather than
 asserted: the entry says an inference ran, and says so under a name that does
 not claim it was a fetch.
+
+### What was proven, 2026-09-03: end to end from Telegram
+
+The raw-stdio run above proved the server. This is the capability reached the
+way it is actually used: a message to Antiochus in Telegram, answered by the
+model on the connected peer.
+
+Asked a question with one right answer, Antiochus replied **"Paris"** and named
+**qwen3:8b** as the model on the connected peer -- WSL's model, not one of its
+own and not a guess it could have made without leaving the host.
+
+Confirmed on the responder, in WSL's journal rather than in anything the caller
+said about itself:
+
+    Sep 03 22:24:25  Dispatching task: antiochus-inference (inference)
+    Sep 03 22:24:28  EUREKA-LOG generated for task antiochus-inference
+
+Three seconds between dispatch and log. The task name is the one CT 102
+configured, which is the task-name table's third row observed rather than
+asserted: WSL's audit log says an inference ran, under a name that does not
+claim it was a fetch. Both ends agree and neither is quoting the other.
+
+It took a gateway restart to get there, twice. The config was correct and
+`openclaw mcp reload` had been run; the Telegram agent was still holding a
+subprocess spawned before the change. That is the trap documented under
+"Applying config changes, and when a restart is unavoidable" -- it was found
+here, at the cost of two rounds, and it is the reason that section no longer
+says the gateway is never restarted.
 
 ## Not yet done
 
