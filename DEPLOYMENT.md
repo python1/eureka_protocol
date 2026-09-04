@@ -1640,12 +1640,22 @@ Config, in `~/.hermes/config.yaml`, written by `hermes mcp add`:
           EUREKA_PEER: https://192.168.1.180:8443
         connect_timeout: 60
 
-It exposes two tools. `eureka_fetch(url, max_chars)` handshakes, issues a
+It exposes three tools. `eureka_fetch(url, max_chars)` handshakes, issues a
 signed `web-retrieval` assign, **verifies the result signature before returning
-any content**, and hands back JSON. `eureka_peer_status()` handshakes and reads
+any content**, and hands back JSON. `eureka_inference(prompt)` does the same
+for `inference` against its own peer -- added 2026-09-03, see "Asking WSL for a
+completion from Telegram". `eureka_peer_status(capability)` handshakes and reads
 the peer's manifest, which is what tells a provisioning problem
 (`untrusted_key`) apart from a permission problem (`capability_not_granted`)
-without running anything.
+without running anything; its argument names which of the two peers to check
+and defaults to `web-retrieval`, so a call with no argument does what it always
+did.
+
+**On this host `eureka_inference` refuses every call**, and correctly.
+`EUREKA_INFERENCE_PEER` is absent from the `env:` block above, and WSL is
+itself the node that serves `inference` -- pointing this server back at its own
+daemon would be a loop with a network in the middle. The refusal names the
+variable and says nothing was sent.
 
 **`peer_advertises` is what the peer offers, not what this node may run**, and
 the distinction is not pedantic. `is_permitted` intersects the advertised list
@@ -2423,22 +2433,37 @@ callers would have diverged on the day one of them was fixed.
       --env EUREKA_PEER=https://192.168.1.180:8443 \
       --env EUREKA_MAX_CHARS=8000 \
       --env EUREKA_TASK_NAME=antiochus-fetch \
-      --timeout 90
+      --env EUREKA_INFERENCE_PEER=https://192.168.1.152:8443 \
+      --env EUREKA_INFERENCE_TASK_NAME=antiochus-inference \
+      --timeout 150
 
 `mcp add` **probes the server before saving**, so a command that cannot start is
 not written into the config at all. It lands under `mcp.servers` in
 `~/.openclaw/openclaw.json`.
 
-Three of those values are load bearing:
+The last three lines were not in the command run on 2026-09-01. They were added
+on 2026-09-03 with `mcp set`, by the procedure in "Applying config changes
+without restarting the agent" below, and the block above is the whole command
+as it now stands rather than a record of what was typed then.
 
-- **`--timeout 90`** is OpenClaw's per-request ceiling and must sit *above* the
-  client's own `EUREKA_CLIENT_TIMEOUT` (60s), which in turn sits above the
-  responder's 30s registry deadline. Set it lower and OpenClaw cuts off a fetch
-  the client is still legitimately waiting on, which presents as a tool failure
-  rather than as the timeout it is.
+Five of those values are load bearing:
+
+- **`--timeout 150`** is OpenClaw's per-request ceiling and is the top of a
+  four-layer ladder; the whole ladder is in the next section. It was 90 while
+  `web-retrieval` was the only capability, which was above the client's 60s and
+  therefore fine. `inference` waits 120s, so 90 would have cut off a request
+  the client was still legitimately waiting on -- and OpenClaw cutting a tool
+  off presents as a tool failure rather than as the timeout it is.
 - **`EUREKA_MAX_CHARS=8000`**, not the 20000 default. That default was sized for
-  Hermes's context window; a Telegram reply is not that.
+  Hermes's context window; a Telegram reply is not that. It bounds `eureka_fetch`
+  only; completions are bounded by the peer, which is the node that signs the
+  flag saying whether it cut one.
 - **`EUREKA_TASK_NAME=antiochus-fetch`** -- see below.
+- **`EUREKA_INFERENCE_PEER=https://192.168.1.152:8443`** is WSL, and it is a
+  *separate variable from `EUREKA_PEER` on purpose*, with no default and no
+  fallback. See the next section.
+- **`EUREKA_INFERENCE_TASK_NAME=antiochus-inference`** -- the audit-log name for
+  the other capability, for the same reason `antiochus-fetch` exists.
 
 No `cwd` is set. `_find_package_root()` resolves the package from `__file__`,
 so the server runs from any working directory, and a `cwd` here would be one
@@ -2449,6 +2474,177 @@ with `mcp` added to it. Installing it changed nothing else: `httpx` stayed at
 0.28.1 and `cryptography` at 50.0.0, because `mcp` pulls `httpx2`/`httpcore2`
 as *separate* packages rather than upgrading either. The freeze diff was
 additions only, and the 616 tests still pass on that interpreter.
+
+### Two peers, one per capability
+
+Added 2026-09-03, with `eureka_inference`. The server had one peer in its env
+and that stopped being enough the moment a second capability existed, because
+**`inference` is not served by the host that serves `web-retrieval`**. CT 101
+fetches and has no Ollama; WSL runs the model and grants `inference` to
+`ct102-openclaw` alone. One address cannot name both.
+
+The failure this shape exists to avoid is specific. Send an `inference` assign
+to CT 101 and it comes back `capability_not_granted` -- which is exactly what a
+missing grant on WSL would say, because the peer deliberately folds "not
+granted" and "not offered here" into one refusal so that neither can be used to
+enumerate the other. So a wrong peer does not look like a wrong peer. It looks
+like a provisioning fault, on a machine that is fine, and the person reading it
+goes and edits a trust file that was already correct.
+
+Three ways to tell the server which peer serves what were on the table:
+
+| | |
+|---|---|
+| a second env var, `EUREKA_INFERENCE_PEER` | chosen |
+| a capability→peer map in one JSON env var | more general, and pays for it |
+| a per-tool default baked into the module | wrong layer |
+
+The map is the tempting one and is what a third capability would want. It was
+not chosen because it buys generality this mesh has no use for yet and charges
+a real price now: it introduces a parse failure at startup that the flat
+variables cannot have, it rewrites the working `EUREKA_PEER` line on both
+deployed hosts to gain nothing for the one that only fetches, and a malformed
+map is a new way for a live agent's fetch tool to stop working. Two flat
+variables are additive -- WSL's env block is untouched and its `eureka_fetch`
+cannot be affected by a variable it does not set. When a third capability
+lands, the map is the right thing to do and this paragraph is the argument for
+doing it then.
+
+A per-tool default in the module is wrong for the reason there is only one copy
+of this file: `192.168.1.152` is a fact about CT 102's view of the mesh, not
+about the code, and the same bytes run on WSL where that address is the local
+machine.
+
+**Unset fails loudly and never falls back.** `EUREKA_INFERENCE_PEER` has no
+default at all -- the one value available to default to is `EUREKA_PEER`, and
+that is precisely the wrong answer. Unset produces:
+
+    {"ok": false, "stage": "config", "reason": "inference_peer_not_configured",
+     "outcome": "This server has no inference peer: EUREKA_INFERENCE_PEER is
+     unset in its env. Nothing was sent. It will not fall back to the
+     web-retrieval peer ..."}
+
+and a line on stderr at startup, before anything asks, because that is where an
+operator looks after wiring an env block and wondering whether it took.
+
+Two deliberate choices inside that:
+
+- **The refusal happens at call time, not at import.** Dying at startup on an
+  unset variable would take `eureka_fetch` down on every host that does not do
+  inference -- including WSL, which is live. A missing inference peer is not a
+  reason for the fetch tool to stop existing.
+- **The tool is registered even when it cannot work.** Hiding it would make a
+  misconfigured host present as one where the model says "I have no such tool",
+  which is the same class of misleading answer this section is about. A
+  registered tool that refuses with a sentence naming the variable is a tool
+  that diagnoses itself.
+
+`eureka_peer_status` grew a `capability` argument in the same change, defaulting
+to `web-retrieval`. Without it the inference peer is the one node in the mesh
+that cannot be checked, which matters most precisely when something is wrong
+with it. The argument names a *capability*, not a URL: the peer is then looked
+up in config, and a model cannot point this node's handshake at an address it
+invented.
+
+### The timeout ladder
+
+Four layers, each of which must outlast the one below it. Two are on WSL, one
+is in this file, one is in `openclaw.json`.
+
+| layer | seconds | set in |
+|---|---|---|
+| OpenClaw per-request ceiling | 150 | `mcp.servers.eureka.timeout` |
+| this client, for inference | 120 | `EUREKA_INFERENCE_TIMEOUT` |
+| WSL's registry deadline for `inference` | 90 | `INFERENCE_DEADLINE_SECONDS` |
+| WSL's Ollama exchange | 75 | `INFERENCE_TIMEOUT_SECONDS` |
+
+Read it from the bottom.
+
+**90 > 75** is the responder's own rule and predates this work. If the registry
+deadline fired first, every slow inference would come back as the registry's
+generic `timeout` and `prompt_too_long`, `upstream_unavailable` and
+`model_not_available` would become unreachable -- outcomes that stay safe and
+stop being informative, which is the failure nobody notices.
+
+**120 > 90** extends that rule across the wire. The peer's deadline produces a
+*signed, verified* result that names which refusal it was; a client-side
+timeout is an exception on this side, and from here it is indistinguishable
+from a peer that refused. The 30s of headroom covers what the peer's deadline
+does not count: TLS, the three-message handshake and the response body. 120 is
+also the figure `antiochus_client.py` has used since `inference` was proven by
+hand, and the two paths deliberately wait the same length of time.
+
+**150 > 120** keeps OpenClaw's ceiling above the longest wait this file will
+ever choose, so a request cut off at that layer means something is genuinely
+wedged rather than merely slow. It was 90, which was correct while 60s was the
+longest wait below it.
+
+`EUREKA_CLIENT_TIMEOUT` stays 60 for `web-retrieval` and is unchanged. The two
+capabilities run under different deadlines on the responder -- 30s and 90s --
+so a single client-side number would be wrong at one end or the other.
+
+### What the prompt is not allowed to touch
+
+`web-retrieval`'s subject is a URL and is repeated back freely. A prompt is
+not, and the rule is the responder's own, inherited rather than invented here:
+WSL keeps prompts out of its audit log on purpose, and there is no reason for
+the caller to be the leak the daemon refused to be.
+
+So `eureka_inference` carries `prompt_chars` and never the prompt -- in the
+result, in every refusal, and on stderr. Three places it could have leaked and
+does not:
+
+- **The peer's audit log** records `capability`, the requesting peer and the
+  outcome. It reads only `task_name` out of the task payload, which is why the
+  task name is a constant and never carries any of the request.
+- **The tool result** returns the completion and the length of the prompt. A
+  caller that wants to quote what it asked already has it.
+- **The exception path.** `eureka_fetch` prints `{type}: {exc}` on an
+  unexpected error; `eureka_inference` prints the type and the character count
+  only. An `httpx` exception can carry the request that failed, and the request
+  holds the prompt.
+
+The length is not a grudging compromise -- it answers the only question the
+text was ever asked for here, which is whether an empty prompt was sent or a
+long one.
+
+**The length cap is not checked on this side.** `MAX_PROMPT_CHARS` belongs to
+the host that runs the model, and a copy of it in the MCP server is a second
+number that can drift from the first -- refusing prompts the peer would have
+accepted, or forwarding ones it will not. `prompt_too_long` is the peer's to
+say and this server's to make readable. The one thing checked locally is an
+empty prompt, which the peer would refuse as `invalid_payload` -- a vaguer
+answer to the same question, and one that costs a round trip and a nonce.
+
+### Reading a completion that was cut short
+
+`done_reason` and `truncated` both reach the model, and they are two different
+ways of being cut off: `truncated` is the peer's character cap, `done_reason:
+"length"` is its token budget, and a completion can hit either without hitting
+the other.
+
+The reason both are passed through rather than folded into one flag is that
+being cut short is *invisible in the text*. A four-character completion that
+ran out of tokens is character-for-character identical to a four-character
+completion that finished. Both were observed on 2026-09-03:
+
+    prompt "Reply with exactly the word: pong"
+      -> completion "pong", chars 4, done_reason "stop", eval_count 2,
+         cut_short null
+
+    prompt "Count from 1 to 400. Output only the numbers, one per line ..."
+      -> completion "1\n2\n3\n...", chars 512, truncated false,
+         done_reason "length", eval_count 512,
+         cut_short "This completion was cut short and is not the model's
+         finished answer: the token budget ended it (done_reason 'length')."
+
+`cut_short` is the derived field: null when nothing cut the answer, and a
+sentence when something did. The raw fields are the peer's facts and are
+returned as they came; `cut_short` is a reading of them, in the same spirit as
+`outcome` on a refusal, and exists because a consumer that sees a short string
+and no visible warning has no reason to doubt it. The second row above is what
+that costs when it is missing: a list of numbers that stops partway to 400
+with no punctuation, no apology and nothing in the text to say so.
 
 ### The task name, and why it got its own variable
 
@@ -2474,7 +2670,23 @@ and it reaches CT 101 two ways:
 | caller | task name |
 |---|---|
 | `integrations/antiochus_client.py`, hand-run | `antiochus-cli` |
-| MCP server, i.e. OpenClaw and Telegram | `antiochus-fetch` |
+| MCP server, `eureka_fetch` | `antiochus-fetch` |
+| MCP server, `eureka_inference` | `antiochus-inference` |
+
+The third row is `EUREKA_INFERENCE_TASK_NAME`, added 2026-09-03, and it is a
+second variable rather than a reuse of `EUREKA_TASK_NAME` because both deployed
+values of that one end in `-fetch`. An inference request filed under
+`antiochus-fetch` would be a log entry that says it was a fetch, on a host whose
+stated rule is that a log which misattributes work is worse than one that says
+nothing. The default has no legacy to protect the way `hermes-fetch` does --
+no host has ever sent an inference request through this file -- so it is simply
+accurate: `mcp-inference`, naming the entry point, with the host already named
+in every line by the key that signed the request.
+
+`antiochus_client.py` keeps one name for both capabilities. It is right there
+for the same reason it is wrong here: `antiochus-cli` names the entry point and
+says nothing about the capability, and the capability is its own field in the
+entry.
 
 Both wrote `antiochus-fetch` for about half an hour on 2026-09-01, and in that
 window the peer's audit log could not tell a hand-run script from a Telegram
@@ -2566,6 +2778,59 @@ reading the rest of this section: an agent turn is the right tool for iterating,
 because it needs no phone and delivers nothing to the channel, and it is a proxy
 until somebody sends a real message.
 
+### What was proven, 2026-09-03: the inference tool
+
+The MCP server was driven over **raw stdio JSON-RPC**, which is the transport
+OpenClaw uses, with stdin held open -- closing it makes the server exit
+mid-call and look like a server fault. Every line the server wrote to stdout
+parsed as JSON-RPC while a live inference ran, and `[NODE node_485428e3]
+Handshake established with node_ef0a1f59` went to stderr where
+`_protocol_safe_stdout()` puts it. This is the check worth repeating after any
+change to that file: the symptom of getting it wrong is not a noisy log, it is
+a server the client reports as dead.
+
+    tools/list          eureka_fetch, eureka_inference, eureka_peer_status
+    eureka_inference    "Reply with exactly the word: pong"
+                        -> ok, verified, model qwen3:8b, completion "pong",
+                           done_reason "stop", responder node_ef0a1f59
+    eureka_fetch        https://example.com
+                        -> ok, verified, 200, text/html, 559 bytes,
+                           responder node_a2ed8dc7
+
+Both peers in one process, each answering for the capability it serves, and the
+fetch identical to what it returned before the change.
+
+Refusals, each arriving as a successful tool call carrying `ok: false`:
+
+| asked | reason | stage |
+|---|---|---|
+| a 6000-character prompt | `prompt_too_long` | `work`, `verified: true` |
+| a whitespace-only prompt | `empty_prompt` | `request`, refused locally |
+| inference with `EUREKA_INFERENCE_PEER` unset | `inference_peer_not_configured` | `config`, nothing sent |
+| `eureka_peer_status("code-exec")` | `unknown_capability` | `request` |
+
+The first row is the one that matters most, because it is the row where the
+peer did the refusing: `verified: true` means WSL's `prompt_too_long` arrived
+inside a signed result whose signature was checked and whose nonce was the one
+we sent. A refusal is evidence on the same terms as an answer.
+
+**The prompt was verified absent from all three places it could have leaked.**
+The tool result carries `prompt_chars` and no prompt. The server's stderr was
+captured for the whole session and searched for the prompt string: not present.
+And WSL's own audit log, read back over the protocol with an authenticated
+`POST /v1/logs`, shows the entries and nothing of what was asked:
+
+    {"capability": "inference", "peer": "node_485428e3",
+     "task_summary": "antiochus-inference", "result": "completed",
+     "outcome": "completed"}
+    {"capability": "inference", "peer": "node_485428e3",
+     "task_summary": "antiochus-inference", "result": "failed",
+     "outcome": "prompt_too_long"}
+
+Which is also the third row of the task-name table, observed rather than
+asserted: the entry says an inference ran, and says so under a name that does
+not claim it was a fetch.
+
 ## Not yet done
 
 DHT discovery (addresses are still configured by hand), NAT traversal, WAN.
@@ -2580,16 +2845,20 @@ both been exercised over the wire, so nothing on this list is waiting on that
 any more. See "What the WSL peer proved".
 
 Antiochus is wired into OpenClaw as of 2026-09-01 and reachable from Telegram
--- see "Reaching Eureka from Telegram". `integrations/antiochus_client.py`
-remains the hand-driven path, and is still the right thing to reach for when
-the question is whether the *node* works, since it exercises the protocol
-without the agent, the model or the MCP transport in the way.
+-- see "Reaching Eureka from Telegram". Since 2026-09-03 it reaches **two**
+peers from there, one per capability: CT 101 for `web-retrieval` through
+`eureka_fetch`, WSL for `inference` through `eureka_inference`.
+`integrations/antiochus_client.py` remains the hand-driven path, and is still
+the right thing to reach for when the question is whether the *node* works,
+since it exercises the protocol without the agent, the model or the MCP
+transport in the way.
 
 Mutual TLS is evaluated and deliberately not planned; see the TLS section above
 for why.
 
-`inference` was added on 2026-09-02 and **granted on 2026-09-03, to
-`ct102-openclaw` and to nobody else** -- see "Granting inference to
+`inference` was added on 2026-09-02, **granted on 2026-09-03, to
+`ct102-openclaw` and to nobody else**, and reachable from a Telegram message on
+the same day -- see "Granting inference to
 ct102-openclaw". For one day it sat where `web-retrieval` had sat on this host
 on 2026-09-01: advertised, runnable, permitted to no one. `eureka-node` is
 still in WSL's trust file with `"capabilities": []`, so an `/v1/assign` naming

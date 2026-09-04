@@ -45,9 +45,20 @@ every grant is checked, and the answer comes back signed in its own domain. The
 agent asks its tool; the tool asks a stranger. Neither protocol is doing the
 other's job, and neither could.
 
+Two capabilities cross that seam now, and they do not cross it to the same
+place. `web-retrieval` is served by one peer and `inference` by another, for
+the ordinary reason that the host with a GPU is not the host with a route out
+to the web. So the MCP server holds one peer address per capability rather
+than one peer, and it will not fall back from one to the other. Asking a node
+for something it does not offer is refused `capability_not_granted` — the
+same sentence a missing grant produces, since the peer folds the two together
+on purpose — so a fallback would present a misconfiguration on the calling
+host as a permissions fault on a machine that is fine, and send whoever reads
+it to the wrong end of the mesh.
+
 ## What works today
 
-The suite is 616 tests, all passing. Each item below is implemented and
+The suite is 658 tests, all passing. Each item below is implemented and
 covered; where something is narrower than its name suggests, that is stated.
 
 ### Identity
@@ -520,6 +531,9 @@ src/eureka_daemon/
   handlers.py       the executor: registry, fetch policy, web-retrieval, inference
   signed_request.py the one gate every authenticated request passes through
   address_book.py   bounded address table with expiry
+integrations/
+  eureka_mcp_server.py   the MCP seam: eureka_fetch, eureka_inference, eureka_peer_status
+  antiochus_client.py    the same protocol path as a CLI, with no agent in the way
 tests/              658 tests
 demo.sh             trusted and untrusted handshake, side by side
 ```
