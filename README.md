@@ -90,7 +90,7 @@ the other; A is simply the one that gets a daemon.
 Requires Python 3.13 (developed against it; earlier 3.x is untested).
 
 ```bash
-git clone https://github.com/<you>/eureka_protocol.git eureka_protocol
+git clone https://github.com/python1/eureka_protocol.git eureka_protocol
 python3 -m venv venv
 ./venv/bin/pip install -r eureka_protocol/requirements.txt
 ```
