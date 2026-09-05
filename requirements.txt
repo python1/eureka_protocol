@@ -1,0 +1,20 @@
+# Runtime dependencies for the Eureka daemon.
+#
+# These are floors, not a claim that any later release works. The figures are
+# the versions the code has actually been run against: the 658-test suite was
+# last green on exactly these, on Python 3.13.5.
+#
+# No upper bound is asserted, because no upper bound has been tested either.
+
+cryptography>=50.0.0
+fastapi>=0.141.1
+uvicorn>=0.52.4
+httpx>=0.28.1
+
+# Running the test suite. No async plugin is needed -- the tests drive the
+# event loop themselves.
+pytest>=9.1.1
+
+# Only for integrations/eureka_mcp_server.py, which is not imported by the
+# daemon and not needed to stand a node up. Uncomment to use the MCP seam.
+# mcp>=2.1.1
