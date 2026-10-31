@@ -188,6 +188,8 @@ async def main() -> None:
     tls_port = arguments.tls_port
 
     print(f"Starting Eureka Daemon API as {node_engine.node_id}")
+    # Always printed: a browser peer (a Knights Circle room) pins this key, TLS or not.
+    print(f"  public key: {node_engine.public_key_hex}")
     for config in configs:
         scheme = "https" if config.ssl_certfile else "http"
         print(f"  listening on {scheme}://{config.host}:{config.port}")
