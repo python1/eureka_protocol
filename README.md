@@ -12,7 +12,7 @@ bootstrap server to ask. A node knows the peers its operator told it about,
 and nothing else.
 
 **Status: working prototype, not a released protocol.** It runs on a
-three-node LAN deployment and has 658 passing tests, but the wire format is
+three-node LAN deployment and has 683 passing tests, but the wire format is
 not frozen, there is no specification apart from the code, and every exchange
 so far has had this implementation on both ends. Read
 [What this is not](#what-this-is-not) before you plan anything around it.
@@ -336,7 +336,7 @@ any point.
 
 ## What it does
 
-The suite is 658 tests. Each item below is implemented and covered; where
+The suite is 683 tests. Each item below is implemented and covered; where
 something is narrower than its name suggests, that is said.
 
 ### Identity
@@ -436,7 +436,34 @@ unrecognised value stops the daemon rather than being read as either answer.
 A host without Ollama that registered the handler unconditionally would
 advertise a capability it cannot serve.
 
-### Pinned TLS
+### room-turn, and browser access
+
+`room-turn` lets a [Knights Circle](https://github.com/python1/knights-circle)
+room, a page in someone's browser, give this node a turn in its conversation.
+The browser is a Eureka node of its own: it holds a non-extractable Ed25519 key
+and runs the same three-message handshake. Because a page cannot listen, it is
+always the initiator. Each turn is a signed `/v1/assign` naming `room-turn`,
+and the reply comes back in the signed assign result.
+
+The shape is `inference`'s, widened from one prompt to a list of chat messages,
+and the same rule holds: the room chooses nothing but the text. Model
+(`EUREKA_ROOM_TURN_MODEL`), token budget, thinking and timeouts are this host's.
+It is opt-in through `EUREKA_ROOM_TURN=1`, and capped at 200 messages and
+48,000 characters per turn, inside the 64 KiB request body.
+
+A page can only read the replies if the daemon sends CORS headers for that
+page's exact origin. `--cors-origin` (repeatable, or `EUREKA_CORS_ORIGINS`)
+lists them: exact origins only, no wildcards, and plain `http` only for a page
+on loopback. CORS is not authentication and grants nothing. A listed page
+still has to complete the handshake, and its key still needs the `room-turn`
+grant in the trust file.
+
+`vectors/signatures-v1.json` holds 30 canonical-encoding and signature
+vectors, made with a published test key, that a second implementation must
+reproduce. They exist because Python's `json.dumps` escapes every non-ASCII
+character, and DEL, as `\uXXXX`, and a JavaScript encoder that doesn't will
+fail every signature over a transcript with a curly quote in it.
+
 
 TLS carries the identity the node already has instead of introducing a second
 one. The certificate is a self-signed wrapper around the node's ed25519 key,
@@ -631,6 +658,8 @@ src/eureka_daemon/
   discovery.py      signed caller-driven address gossip
   reads.py          authenticated reads of the peer table, log and manifest
   assign.py         the assign gate: authorization and single-use requests
+  room_turn.py      room-turn: a Knights Circle room turn, answered by local Ollama
+  cors.py           exact-origin browser access, off unless listed
   handlers.py       the executor: registry, fetch policy, web-retrieval, inference
   signed_request.py the one gate every authenticated request passes through
   address_book.py   bounded address table with expiry
@@ -638,7 +667,8 @@ integrations/
   eureka_mcp_server.py   the MCP seam: eureka_fetch, eureka_inference, eureka_peer_status
   antiochus_client.py    the same protocol path as a CLI, with no agent in the way
 deploy/             systemd units and the WSL preflight
-tests/              658 tests
+vectors/            shared signature vectors, and the script that makes them
+tests/              683 tests
 demo.sh             trusted and untrusted handshake, side by side
 requirements.txt    runtime and test dependencies
 DEPLOYMENT.md       the operator runbook
