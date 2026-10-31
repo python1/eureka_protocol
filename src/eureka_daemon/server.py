@@ -18,6 +18,12 @@ The certificate served is generated from the node's existing identity key, so
 peers pin the same key they already have in their trust file and nothing new
 has to be distributed. node_id is derived from that key and does not change
 when TLS is switched on.
+
+Every listener binds loopback unless --host says otherwise. A node reachable
+from the LAN is a decision the operator makes on the command line, not a
+default they inherit: a plaintext port on 0.0.0.0 hands every machine on the
+network an unencrypted line to the daemon, and the trust file would be the only
+thing standing in the way.
 """
 import argparse
 import asyncio
@@ -31,14 +37,19 @@ from .api import app, node_engine
 from .tls import ensure_server_materials
 
 
-def build_config(port: int, use_tls: bool, materials_dir=None) -> uvicorn.Config:
+# Where a listener binds unless the operator widens it with --host.
+DEFAULT_HOST = "127.0.0.1"
+
+
+def build_config(port: int, use_tls: bool, materials_dir=None,
+                 host: str = DEFAULT_HOST) -> uvicorn.Config:
     """
     The uvicorn config for one listener, with TLS wired to this node's identity.
 
     Kept separate from main() so the wiring can be tested without binding a
     socket -- in particular that TLS actually serves the node's own key.
     """
-    options = dict(app=app, host="0.0.0.0", port=port, log_level="info")
+    options = dict(app=app, host=host, port=port, log_level="info")
     if use_tls:
         cert_path, key_path = ensure_server_materials(
             node_engine.crypto, node_engine.node_id, materials_dir
@@ -59,7 +70,8 @@ def build_config(port: int, use_tls: bool, materials_dir=None) -> uvicorn.Config
 
 def build_configs(plain_port: Optional[int] = None,
                   tls_port: Optional[int] = None,
-                  materials_dir=None) -> List[uvicorn.Config]:
+                  materials_dir=None,
+                  host: str = DEFAULT_HOST) -> List[uvicorn.Config]:
     """
     Every listener this node should open. Either may be omitted, not both.
 
@@ -77,10 +89,10 @@ def build_configs(plain_port: Optional[int] = None,
 
     configs = []
     if plain_port is not None:
-        configs.append(build_config(plain_port, use_tls=False))
+        configs.append(build_config(plain_port, use_tls=False, host=host))
     if tls_port is not None:
         configs.append(build_config(tls_port, use_tls=True,
-                                    materials_dir=materials_dir))
+                                    materials_dir=materials_dir, host=host))
     return configs
 
 
@@ -113,7 +125,8 @@ async def serve(configs: List[uvicorn.Config]) -> None:
     await asyncio.gather(*(server.serve() for server in servers))
 
 
-async def main() -> None:
+def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """The command line, checked. Separate from main() so it can be tested."""
     parser = argparse.ArgumentParser(description="Eureka Protocol daemon")
     parser.add_argument("port", nargs="?", type=int, default=8000,
                         help="plaintext port (default 8000)")
@@ -128,7 +141,14 @@ async def main() -> None:
     parser.add_argument("--tls-dir", default=None,
                         help="where to write the certificate and key "
                              "(default: beside the identity file)")
-    arguments = parser.parse_args()
+    parser.add_argument("--host", default=DEFAULT_HOST,
+                        help="address every listener binds (default "
+                             f"{DEFAULT_HOST}, this machine only); pass "
+                             "0.0.0.0 or a LAN address to accept peers on "
+                             "the network")
+    arguments = parser.parse_args(argv)
+    if not arguments.host.strip():
+        parser.error("--host needs an address; leave it out for loopback")
 
     tls_port = arguments.tls_port
     serve_plain = not arguments.no_plain
@@ -139,12 +159,20 @@ async def main() -> None:
         tls_port, serve_plain = arguments.port, False
     if arguments.no_plain and tls_port is None:
         parser.error("--no-plain leaves nothing to serve; add --tls-port")
+    arguments.plain_port = arguments.port if serve_plain else None
+    arguments.tls_port = tls_port
+    return arguments
 
+
+async def main() -> None:
+    arguments = parse_arguments()
     configs = build_configs(
-        plain_port=arguments.port if serve_plain else None,
-        tls_port=tls_port,
+        plain_port=arguments.plain_port,
+        tls_port=arguments.tls_port,
         materials_dir=arguments.tls_dir,
+        host=arguments.host,
     )
+    tls_port = arguments.tls_port
 
     print(f"Starting Eureka Daemon API as {node_engine.node_id}")
     for config in configs:

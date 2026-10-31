@@ -337,4 +337,5 @@ app = create_app(node_engine)
 if __name__ == "__main__":
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # Loopback, as the daemon entry point defaults to; use server.py --host to widen.
+    uvicorn.run(app, host="127.0.0.1", port=port)

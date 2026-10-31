@@ -322,8 +322,13 @@ Grants carry across. The old key is revoked, so it cannot be re-added later.
 
 **CT 101 serves TLS on 8443 and nothing else. Plaintext is gone.**
 
+The daemon binds `127.0.0.1` unless `--host` widens it, so every command here
+that serves LAN peers passes `--host 0.0.0.0`. A unit or command line from
+before that default changed will start cleanly and accept no peers: add the
+flag before updating the checkout.
+
     /opt/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-        --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls
+        --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls --host 0.0.0.0
 
 The daemon can serve both at once -- pass a port number as the first argument
 and drop `--no-plain` -- and it did during the migration, because TLS cannot
@@ -518,7 +523,7 @@ the service first so the port is free:
       EUREKA_IDENTITY_PATH=/var/lib/eureka/identity.key \
       EUREKA_TRUST_PATH=/var/lib/eureka/trust.json \
       /opt/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-      --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls
+      --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls --host 0.0.0.0
 
 Add a port number as the first argument to get plaintext back alongside it,
 which is what debugging a peer that cannot do TLS looks like.

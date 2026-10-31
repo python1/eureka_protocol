@@ -629,6 +629,62 @@ def test_the_two_listeners_cannot_share_a_port(tmp_path):
         build_configs(plain_port=8443, tls_port=8443, materials_dir=tmp_path)
 
 
+def test_every_listener_binds_loopback_unless_told_otherwise(tmp_path):
+    """
+    A daemon reachable from the network is the operator's decision. Before
+    --host existed every listener bound 0.0.0.0, so a plaintext port handed
+    the whole LAN an unencrypted line to the daemon by default.
+    """
+    from eureka_protocol.src.eureka_daemon.server import build_configs
+
+    configs = build_configs(plain_port=8000, tls_port=8443,
+                            materials_dir=tmp_path)
+
+    assert [config.host for config in configs] == ["127.0.0.1", "127.0.0.1"]
+
+
+def test_host_widens_every_listener_together(tmp_path):
+    """One flag, both listeners: a node half on the LAN is not a state to offer."""
+    from eureka_protocol.src.eureka_daemon.server import build_configs
+
+    configs = build_configs(plain_port=8000, tls_port=8443,
+                            materials_dir=tmp_path, host="0.0.0.0")
+
+    assert [config.host for config in configs] == ["0.0.0.0", "0.0.0.0"]
+
+
+def test_the_command_line_defaults_to_loopback_and_accepts_host():
+    from eureka_protocol.src.eureka_daemon.server import parse_arguments
+
+    assert parse_arguments([]).host == "127.0.0.1"
+    widened = parse_arguments(["--tls-port", "8443", "--no-plain",
+                               "--host", "0.0.0.0"])
+    assert (widened.host, widened.plain_port, widened.tls_port) == (
+        "0.0.0.0", None, 8443)
+
+
+def test_an_empty_host_is_refused_rather_than_read_as_every_interface():
+    """uvicorn would bind all interfaces for host=""; that must not be a typo away."""
+    from eureka_protocol.src.eureka_daemon.server import parse_arguments
+
+    with pytest.raises(SystemExit):
+        parse_arguments(["--host", ""])
+
+
+def test_the_shipped_units_ask_for_the_lan_explicitly():
+    """
+    The deployed nodes serve LAN peers. Without --host they would start
+    cleanly on loopback and accept no one, so the units must say it.
+    """
+    from pathlib import Path
+
+    deploy = Path(__file__).resolve().parent.parent / "deploy"
+    for unit in ("eureka-daemon.service", "eureka-daemon-wsl.service"):
+        exec_start = (deploy / unit).read_text().split("ExecStart=", 1)[1]
+        command = exec_start.split("\n\n", 1)[0]
+        assert "--host 0.0.0.0" in command, unit
+
+
 def test_co_servers_do_not_fight_over_signal_handlers():
     """
     Whichever server installed its handler second would otherwise win, and a

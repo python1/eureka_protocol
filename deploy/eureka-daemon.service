@@ -44,13 +44,16 @@ WorkingDirectory=/opt/eureka
 # doing it the other way round strands the peer: an HTTPS socket answers a
 # plain request with a handshake failure, not a manifest.
 #
+# --host 0.0.0.0 is required: the daemon binds loopback unless told
+# otherwise, and this node serves peers on the LAN.
+#
 # --no-plain refuses to start without --tls-port, so a half-edit here cannot
 # produce a daemon that listens on nothing and looks healthy doing it.
 #
 # To put plaintext back for a new peer, add the port number as the first
 # argument and drop --no-plain.
 ExecStart=/opt/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-    --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls
+    --tls-port 8443 --no-plain --tls-dir /var/lib/eureka/tls --host 0.0.0.0
 
 # on-failure, not always: a clean exit 0 is somebody stopping the daemon on
 # purpose, and restarting it would fight them.
