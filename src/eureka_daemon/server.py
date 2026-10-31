@@ -33,6 +33,7 @@ from typing import List, Optional
 
 import uvicorn
 
+from . import cors
 from .api import app, node_engine
 from .tls import ensure_server_materials
 
@@ -146,7 +147,18 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              f"{DEFAULT_HOST}, this machine only); pass "
                              "0.0.0.0 or a LAN address to accept peers on "
                              "the network")
+    parser.add_argument("--cors-origin", action="append", default=[],
+                        metavar="ORIGIN",
+                        help="let a web page at this exact origin read replies "
+                             "(e.g. https://knights-circle.vercel.app); "
+                             "repeatable, also read from "
+                             f"{cors.ORIGINS_ENV}. Grants nothing: every "
+                             "request is still authenticated")
     arguments = parser.parse_args(argv)
+    try:
+        arguments.cors_origins = cors.origins_from(arguments.cors_origin)
+    except ValueError as exc:
+        parser.error(str(exc))
     if not arguments.host.strip():
         parser.error("--host needs an address; leave it out for loopback")
 
@@ -166,6 +178,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 async def main() -> None:
     arguments = parse_arguments()
+    cors.install(app, arguments.cors_origins)
     configs = build_configs(
         plain_port=arguments.plain_port,
         tls_port=arguments.tls_port,
@@ -180,6 +193,9 @@ async def main() -> None:
         print(f"  listening on {scheme}://{config.host}:{config.port}")
     if tls_port is not None:
         print(f"  peers should pin: {node_engine.public_key_hex}")
+    for origin in arguments.cors_origins:
+        print(f"  browser pages allowed to read replies: {origin}")
+    print(f"  offers: {', '.join(sorted(node_engine.handlers.names())) if node_engine.handlers else 'nothing'}")
 
     await serve(configs)
 

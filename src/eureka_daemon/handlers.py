@@ -960,6 +960,27 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off", ""})
 
 
+def _switch(name: str, environ: Optional[Dict[str, str]]) -> bool:
+    """One on/off environment variable, read the way INFERENCE_ENV is: unset is off, nonsense raises."""
+    source = os.environ if environ is None else environ
+    raw = source.get(name, "")
+    value = raw.strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    raise HandlerError(
+        f"{name}={raw!r} is neither on nor off; use one of "
+        f"{sorted(_TRUTHY)} or leave it unset"
+    )
+
+
+def room_turn_enabled(environ: Optional[Dict[str, str]] = None) -> bool:
+    """Whether this host answers Knights Circle room turns. Unset means no."""
+    from .room_turn import ENABLE_ENV
+    return _switch(ENABLE_ENV, environ)
+
+
 def inference_enabled(environ: Optional[Dict[str, str]] = None) -> bool:
     """
     Whether this host offers inference. Unset means no.
@@ -971,20 +992,11 @@ def inference_enabled(environ: Optional[Dict[str, str]] = None) -> bool:
     working node right up until a peer asks. Defaulting it to on is worse.
     So it is neither, and the daemon does not start.
     """
-    source = os.environ if environ is None else environ
-    raw = source.get(INFERENCE_ENV, "")
-    value = raw.strip().lower()
-    if value in _TRUTHY:
-        return True
-    if value in _FALSY:
-        return False
-    raise HandlerError(
-        f"{INFERENCE_ENV}={raw!r} is neither on nor off; use one of "
-        f"{sorted(_TRUTHY)} or leave it unset"
-    )
+    return _switch(INFERENCE_ENV, environ)
 
 
 def default_registry(*, inference: Optional[bool] = None,
+                     room_turn: Optional[bool] = None,
                      **kwargs) -> HandlerRegistry:
     """
     What a deployed daemon runs: web-retrieval always, inference where it can.
@@ -1023,4 +1035,13 @@ def default_registry(*, inference: Optional[bool] = None,
     if inference:
         registry.register("inference", OllamaInference(),
                           deadline_seconds=INFERENCE_DEADLINE_SECONDS)
+    # room-turn is opt-in for the same reason: it needs an Ollama, and its
+    # model is chosen per host (EUREKA_ROOM_TURN_MODEL), checked here at startup.
+    if room_turn is None:
+        room_turn = room_turn_enabled()
+    if room_turn:
+        from . import room_turn as rt
+        registry.register(rt.CAPABILITY,
+                          rt.OllamaRoomTurn(model=rt.model_from_environment()),
+                          deadline_seconds=rt.DEADLINE_SECONDS)
     return registry

@@ -1,0 +1,429 @@
+{
+ "format": "eureka-signature-vectors",
+ "version": 1,
+ "note": "Test key only; never trust it. Regenerate with vectors/make_signature_vectors.py.",
+ "public_key": "2bef4caebeb6d9f277cd46ac1a86718c03e63859d396aa2d67ad1c494ee8f9bc",
+ "node_id": "node_9f4fb67e",
+ "vectors": [
+  {
+   "domain": "handshake_offer",
+   "domain_tag": "eureka/handshake/offer/v1",
+   "payload": {
+    "protocol": "eureka/1.0",
+    "event": "handshake_challenge",
+    "nonce": "00ff",
+    "timestamp": "2026-10-30T12:00:00.123Z"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f6f666665722f7631007b226576656e74223a2268616e647368616b655f6368616c6c656e6765222c226e6f6e6365223a2230306666222c2270726f746f636f6c223a22657572656b612f312e30222c2274696d657374616d70223a22323032362d31302d33305431323a30303a30302e3132335a227d",
+   "signature": "+YUFk1hK+/BdMOvFrUctbX0C4DD8dLEfKLi+3M05qkk2Bil9Rh+V6pxars/moAP99AJf/fHIciX06Ip2IoXOCg=="
+  },
+  {
+   "domain": "handshake_offer",
+   "domain_tag": "eureka/handshake/offer/v1",
+   "payload": {
+    "text": "Rowan said \u201cstake the beds\u201d \u2014 na\u00efve caf\u00e9, \u65e5\u672c\u8a9e, emoji \ud83d\ude42\ud83c\udf31, tab\tnewline\nquote\" backslash\\ del\u007f nul\u0000 bell\u0007 slash/"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f6f666665722f7631007b2274657874223a22526f77616e2073616964205c75323031637374616b652074686520626564735c7532303164205c7532303134206e615c75303065667665206361665c75303065392c205c75363565355c75363732635c75386139652c20656d6f6a69205c75643833645c75646534325c75643833635c75646633312c207461625c746e65776c696e655c6e71756f74655c22206261636b736c6173685c5c2064656c5c7530303766206e756c5c75303030302062656c6c5c753030303720736c6173682f227d",
+   "signature": "3lcCiJGa0fgD4w24TTvdY4uvRVCwDd7j/XgsIuG1us/r7c4WeIUKW9mMYQBQ4C3Iqy4u8xdCFA4tEm2WUdOuDg=="
+  },
+  {
+   "domain": "handshake_offer",
+   "domain_tag": "eureka/handshake/offer/v1",
+   "payload": {
+    "z": 1,
+    "a": [
+     3,
+     -2,
+     0,
+     true,
+     false,
+     null
+    ],
+    "m": {
+     "b": {
+      "y": [],
+      "x": {}
+     },
+     "a": ""
+    },
+    "big": 9007199254740991
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f6f666665722f7631007b2261223a5b332c2d322c302c747275652c66616c73652c6e756c6c5d2c22626967223a393030373139393235343734303939312c226d223a7b2261223a22222c2262223a7b2278223a7b7d2c2279223a5b5d7d7d2c227a223a317d",
+   "signature": "LlbRQU6a964PNdLRvYGJcC0E0a6MvWKvXEd5fDL13abwA3bUYqIHkVfxpbaldtdPitp5rMIioi3PVoSweXurDA=="
+  },
+  {
+   "domain": "handshake_offer",
+   "domain_tag": "eureka/handshake/offer/v1",
+   "payload": {
+    "\u00e9": 1,
+    "e": 2,
+    "\ud83d\ude00": 3,
+    "\uff5e": 4,
+    "Z": 5,
+    "_": 6
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f6f666665722f7631007b225a223a352c225f223a362c2265223a322c225c7530306539223a312c225c7566663565223a342c225c75643833645c7564653030223a337d",
+   "signature": "isvh3nJpBYplswd7nSFAHYHNXYAzDSrUkxTora494VFeP7t34V9FY723CDu8sRJJGpMDipbJWrA8WXp8CDAJBA=="
+  },
+  {
+   "domain": "handshake_offer",
+   "domain_tag": "eureka/handshake/offer/v1",
+   "payload": {
+    "separators": "\u2028\u2029 line separators",
+    "ctrl": "\u001f\u001b"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f6f666665722f7631007b226374726c223a225c75303031665c7530303162222c22736570617261746f7273223a225c75323032385c7532303239206c696e6520736570617261746f7273227d",
+   "signature": "pdMcvlqQY1cABNQQHIFn1E42XDAKlRIgjesCPUAL/inTiNS/uVzjjh1/Do6VkiZGuXT+i/mdkiIBjlwEAw7lDQ=="
+  },
+  {
+   "domain": "handshake",
+   "domain_tag": "eureka/handshake/v1",
+   "payload": {
+    "protocol": "eureka/1.0",
+    "event": "handshake_challenge",
+    "nonce": "00ff",
+    "timestamp": "2026-10-30T12:00:00.123Z"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f7631007b226576656e74223a2268616e647368616b655f6368616c6c656e6765222c226e6f6e6365223a2230306666222c2270726f746f636f6c223a22657572656b612f312e30222c2274696d657374616d70223a22323032362d31302d33305431323a30303a30302e3132335a227d",
+   "signature": "9HEon7Y+zSzdE/ljmJEH9COalc05kxh/2nxNMynGi9BssdrUQev+mKMKHBQw9/Vl+6r9WRhsbGsdoDJ/dIyIBg=="
+  },
+  {
+   "domain": "handshake",
+   "domain_tag": "eureka/handshake/v1",
+   "payload": {
+    "text": "Rowan said \u201cstake the beds\u201d \u2014 na\u00efve caf\u00e9, \u65e5\u672c\u8a9e, emoji \ud83d\ude42\ud83c\udf31, tab\tnewline\nquote\" backslash\\ del\u007f nul\u0000 bell\u0007 slash/"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f7631007b2274657874223a22526f77616e2073616964205c75323031637374616b652074686520626564735c7532303164205c7532303134206e615c75303065667665206361665c75303065392c205c75363565355c75363732635c75386139652c20656d6f6a69205c75643833645c75646534325c75643833635c75646633312c207461625c746e65776c696e655c6e71756f74655c22206261636b736c6173685c5c2064656c5c7530303766206e756c5c75303030302062656c6c5c753030303720736c6173682f227d",
+   "signature": "MXYnRvhARYbEsQrP6L/O2cJXYuMAuy7JROXpVV5wmS5VumAuJ38t2hlaR3tp6tL18bTZIEl1YENUYTXnmJsmAw=="
+  },
+  {
+   "domain": "handshake",
+   "domain_tag": "eureka/handshake/v1",
+   "payload": {
+    "z": 1,
+    "a": [
+     3,
+     -2,
+     0,
+     true,
+     false,
+     null
+    ],
+    "m": {
+     "b": {
+      "y": [],
+      "x": {}
+     },
+     "a": ""
+    },
+    "big": 9007199254740991
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f7631007b2261223a5b332c2d322c302c747275652c66616c73652c6e756c6c5d2c22626967223a393030373139393235343734303939312c226d223a7b2261223a22222c2262223a7b2278223a7b7d2c2279223a5b5d7d7d2c227a223a317d",
+   "signature": "Ma691K1uEzfxUWsca5k7YDs1f0phiygwaWZ7To4CKJTQz5uKuYfcAAuGXSim38vGyR4CJCCdZDmpa5paLRVACQ=="
+  },
+  {
+   "domain": "handshake",
+   "domain_tag": "eureka/handshake/v1",
+   "payload": {
+    "\u00e9": 1,
+    "e": 2,
+    "\ud83d\ude00": 3,
+    "\uff5e": 4,
+    "Z": 5,
+    "_": 6
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f7631007b225a223a352c225f223a362c2265223a322c225c7530306539223a312c225c7566663565223a342c225c75643833645c7564653030223a337d",
+   "signature": "+k2nx3h8zt2rm3h9KkOyXGK6LHAsOeizQ8n6XAomtPI394LjzYgi+prWv7Hya+GqEeBkZecmFRdTicH9/aCUBg=="
+  },
+  {
+   "domain": "handshake",
+   "domain_tag": "eureka/handshake/v1",
+   "payload": {
+    "separators": "\u2028\u2029 line separators",
+    "ctrl": "\u001f\u001b"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f7631007b226374726c223a225c75303031665c7530303162222c22736570617261746f7273223a225c75323032385c7532303239206c696e6520736570617261746f7273227d",
+   "signature": "Ol3KcR93qajfBcdzNb573rAmo2hg59X7mNMPMkHeShkVXkDF02OW5Q/sOf0umlsYmmYnDmakUtH2y8CaLz8aCA=="
+  },
+  {
+   "domain": "handshake_confirm",
+   "domain_tag": "eureka/handshake/confirm/v1",
+   "payload": {
+    "protocol": "eureka/1.0",
+    "event": "handshake_challenge",
+    "nonce": "00ff",
+    "timestamp": "2026-10-30T12:00:00.123Z"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f636f6e6669726d2f7631007b226576656e74223a2268616e647368616b655f6368616c6c656e6765222c226e6f6e6365223a2230306666222c2270726f746f636f6c223a22657572656b612f312e30222c2274696d657374616d70223a22323032362d31302d33305431323a30303a30302e3132335a227d",
+   "signature": "bPA8IhQisxSvRr/3sbsyJJqW73ezCvwMePSMsnOAW6PywdXOI4n6yYw8uFVY2rqX2/OwnhaJHCLH6SMj3f2wBA=="
+  },
+  {
+   "domain": "handshake_confirm",
+   "domain_tag": "eureka/handshake/confirm/v1",
+   "payload": {
+    "text": "Rowan said \u201cstake the beds\u201d \u2014 na\u00efve caf\u00e9, \u65e5\u672c\u8a9e, emoji \ud83d\ude42\ud83c\udf31, tab\tnewline\nquote\" backslash\\ del\u007f nul\u0000 bell\u0007 slash/"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f636f6e6669726d2f7631007b2274657874223a22526f77616e2073616964205c75323031637374616b652074686520626564735c7532303164205c7532303134206e615c75303065667665206361665c75303065392c205c75363565355c75363732635c75386139652c20656d6f6a69205c75643833645c75646534325c75643833635c75646633312c207461625c746e65776c696e655c6e71756f74655c22206261636b736c6173685c5c2064656c5c7530303766206e756c5c75303030302062656c6c5c753030303720736c6173682f227d",
+   "signature": "eczPX8CnjbAnv406OQQrfD2nq/0bFkNuH+wq18qiOBX9uHckQ/sI2/7Q/YPlzYfgLYs+33duiP7jPpOi0aG3Cw=="
+  },
+  {
+   "domain": "handshake_confirm",
+   "domain_tag": "eureka/handshake/confirm/v1",
+   "payload": {
+    "z": 1,
+    "a": [
+     3,
+     -2,
+     0,
+     true,
+     false,
+     null
+    ],
+    "m": {
+     "b": {
+      "y": [],
+      "x": {}
+     },
+     "a": ""
+    },
+    "big": 9007199254740991
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f636f6e6669726d2f7631007b2261223a5b332c2d322c302c747275652c66616c73652c6e756c6c5d2c22626967223a393030373139393235343734303939312c226d223a7b2261223a22222c2262223a7b2278223a7b7d2c2279223a5b5d7d7d2c227a223a317d",
+   "signature": "RqFfozkgSQCgLfWLL3mDtw3sYjJdX+7wE8vZMspfHEXftjLESADTQoplgLo6HbKmH2mOZnV38+pCTj6FPrSFAw=="
+  },
+  {
+   "domain": "handshake_confirm",
+   "domain_tag": "eureka/handshake/confirm/v1",
+   "payload": {
+    "\u00e9": 1,
+    "e": 2,
+    "\ud83d\ude00": 3,
+    "\uff5e": 4,
+    "Z": 5,
+    "_": 6
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f636f6e6669726d2f7631007b225a223a352c225f223a362c2265223a322c225c7530306539223a312c225c7566663565223a342c225c75643833645c7564653030223a337d",
+   "signature": "Itns6YP/LTHMW3m03lVuoVfWSyc/hZAb9m637NWOyCe3RddStpyViwP8w0aGIUaeyHDkqPgE4Y+4/fAZnQjDCg=="
+  },
+  {
+   "domain": "handshake_confirm",
+   "domain_tag": "eureka/handshake/confirm/v1",
+   "payload": {
+    "separators": "\u2028\u2029 line separators",
+    "ctrl": "\u001f\u001b"
+   },
+   "signed_bytes_hex": "657572656b612f68616e647368616b652f636f6e6669726d2f7631007b226374726c223a225c75303031665c7530303162222c22736570617261746f7273223a225c75323032385c7532303239206c696e6520736570617261746f7273227d",
+   "signature": "4RcPCPRjuQ2GbvXGRNHYe1pey2APWzBBTvfEdiMFJsjbKTziTWprgWTw6SmbVb4L+GP/wB5nONieVdbB8r/0Bw=="
+  },
+  {
+   "domain": "read_query",
+   "domain_tag": "eureka/read/query/v1",
+   "payload": {
+    "protocol": "eureka/1.0",
+    "event": "handshake_challenge",
+    "nonce": "00ff",
+    "timestamp": "2026-10-30T12:00:00.123Z"
+   },
+   "signed_bytes_hex": "657572656b612f726561642f71756572792f7631007b226576656e74223a2268616e647368616b655f6368616c6c656e6765222c226e6f6e6365223a2230306666222c2270726f746f636f6c223a22657572656b612f312e30222c2274696d657374616d70223a22323032362d31302d33305431323a30303a30302e3132335a227d",
+   "signature": "Jew6Saop+PzRkfJiFHDvCIOhixfsx2QzrvgBRM2LJiprTRSKY9XD+OYurWqEdoJCtJA4/+Pwz4u8FuR3ch5hDQ=="
+  },
+  {
+   "domain": "read_query",
+   "domain_tag": "eureka/read/query/v1",
+   "payload": {
+    "text": "Rowan said \u201cstake the beds\u201d \u2014 na\u00efve caf\u00e9, \u65e5\u672c\u8a9e, emoji \ud83d\ude42\ud83c\udf31, tab\tnewline\nquote\" backslash\\ del\u007f nul\u0000 bell\u0007 slash/"
+   },
+   "signed_bytes_hex": "657572656b612f726561642f71756572792f7631007b2274657874223a22526f77616e2073616964205c75323031637374616b652074686520626564735c7532303164205c7532303134206e615c75303065667665206361665c75303065392c205c75363565355c75363732635c75386139652c20656d6f6a69205c75643833645c75646534325c75643833635c75646633312c207461625c746e65776c696e655c6e71756f74655c22206261636b736c6173685c5c2064656c5c7530303766206e756c5c75303030302062656c6c5c753030303720736c6173682f227d",
+   "signature": "uoFjCJ6R6lCVZ3TPJi/6s/IkAymXr6YI0B5cnJIKbeBMb8xlMPy4YCrdFE0iGGYkv43TzG/821p9W8MR9dOgAg=="
+  },
+  {
+   "domain": "read_query",
+   "domain_tag": "eureka/read/query/v1",
+   "payload": {
+    "z": 1,
+    "a": [
+     3,
+     -2,
+     0,
+     true,
+     false,
+     null
+    ],
+    "m": {
+     "b": {
+      "y": [],
+      "x": {}
+     },
+     "a": ""
+    },
+    "big": 9007199254740991
+   },
+   "signed_bytes_hex": "657572656b612f726561642f71756572792f7631007b2261223a5b332c2d322c302c747275652c66616c73652c6e756c6c5d2c22626967223a393030373139393235343734303939312c226d223a7b2261223a22222c2262223a7b2278223a7b7d2c2279223a5b5d7d7d2c227a223a317d",
+   "signature": "ML7eSyYCH0lakkMaG3G1guTGtpQ1mWG4MhCTQbPjc1xMV17MGMx1mqX1NOIenxgxlfUOCIJgKwA84sWp640yBA=="
+  },
+  {
+   "domain": "read_query",
+   "domain_tag": "eureka/read/query/v1",
+   "payload": {
+    "\u00e9": 1,
+    "e": 2,
+    "\ud83d\ude00": 3,
+    "\uff5e": 4,
+    "Z": 5,
+    "_": 6
+   },
+   "signed_bytes_hex": "657572656b612f726561642f71756572792f7631007b225a223a352c225f223a362c2265223a322c225c7530306539223a312c225c7566663565223a342c225c75643833645c7564653030223a337d",
+   "signature": "9tJMZEZ830WJbwW30L3qvyJGXoF00iJAcmjQb63XjJ8xiy1uP8GZDdk5TLs3A+DJe2b1Cxuf45uIStrthPDPDQ=="
+  },
+  {
+   "domain": "read_query",
+   "domain_tag": "eureka/read/query/v1",
+   "payload": {
+    "separators": "\u2028\u2029 line separators",
+    "ctrl": "\u001f\u001b"
+   },
+   "signed_bytes_hex": "657572656b612f726561642f71756572792f7631007b226374726c223a225c75303031665c7530303162222c22736570617261746f7273223a225c75323032385c7532303239206c696e6520736570617261746f7273227d",
+   "signature": "0ywnBqmlcpMT7Sx5xAluDZTbWz8ipQ2C7NrW1CsDKmwTWX/62DiiVcxcjYJ4LytkgWw4AAYsIImZrvBtvkYkBg=="
+  },
+  {
+   "domain": "assign_query",
+   "domain_tag": "eureka/assign/query/v1",
+   "payload": {
+    "protocol": "eureka/1.0",
+    "event": "handshake_challenge",
+    "nonce": "00ff",
+    "timestamp": "2026-10-30T12:00:00.123Z"
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f71756572792f7631007b226576656e74223a2268616e647368616b655f6368616c6c656e6765222c226e6f6e6365223a2230306666222c2270726f746f636f6c223a22657572656b612f312e30222c2274696d657374616d70223a22323032362d31302d33305431323a30303a30302e3132335a227d",
+   "signature": "VfHGVif0ps/jGG+C25JbaymSlo0ACIEo8XoBuaC48JBhgDDIts5JDG0+/DmNXZziQZKk2C0cLIcz1ROJprAnBw=="
+  },
+  {
+   "domain": "assign_query",
+   "domain_tag": "eureka/assign/query/v1",
+   "payload": {
+    "text": "Rowan said \u201cstake the beds\u201d \u2014 na\u00efve caf\u00e9, \u65e5\u672c\u8a9e, emoji \ud83d\ude42\ud83c\udf31, tab\tnewline\nquote\" backslash\\ del\u007f nul\u0000 bell\u0007 slash/"
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f71756572792f7631007b2274657874223a22526f77616e2073616964205c75323031637374616b652074686520626564735c7532303164205c7532303134206e615c75303065667665206361665c75303065392c205c75363565355c75363732635c75386139652c20656d6f6a69205c75643833645c75646534325c75643833635c75646633312c207461625c746e65776c696e655c6e71756f74655c22206261636b736c6173685c5c2064656c5c7530303766206e756c5c75303030302062656c6c5c753030303720736c6173682f227d",
+   "signature": "ZsmmmY22PRwYN/sA8hb4+0PAYDL9fhZzu+FikRNBg8TTuYH2ziAu2sJ6ywcIcgymH1NokvxRuylqQ55VEv4SBw=="
+  },
+  {
+   "domain": "assign_query",
+   "domain_tag": "eureka/assign/query/v1",
+   "payload": {
+    "z": 1,
+    "a": [
+     3,
+     -2,
+     0,
+     true,
+     false,
+     null
+    ],
+    "m": {
+     "b": {
+      "y": [],
+      "x": {}
+     },
+     "a": ""
+    },
+    "big": 9007199254740991
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f71756572792f7631007b2261223a5b332c2d322c302c747275652c66616c73652c6e756c6c5d2c22626967223a393030373139393235343734303939312c226d223a7b2261223a22222c2262223a7b2278223a7b7d2c2279223a5b5d7d7d2c227a223a317d",
+   "signature": "yjrZk4QY+fFK46u4yaeoXGcA7c4zeX96LQZepx31PlDAhbikgCvAWz2dvcLnO3lPIL3zl9hyRI4f9igxNWwfCw=="
+  },
+  {
+   "domain": "assign_query",
+   "domain_tag": "eureka/assign/query/v1",
+   "payload": {
+    "\u00e9": 1,
+    "e": 2,
+    "\ud83d\ude00": 3,
+    "\uff5e": 4,
+    "Z": 5,
+    "_": 6
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f71756572792f7631007b225a223a352c225f223a362c2265223a322c225c7530306539223a312c225c7566663565223a342c225c75643833645c7564653030223a337d",
+   "signature": "k3anvB6/pdJKIGFs8R0fMp7rXdtmj7Of+3G1zFFIiySARBSWvgI7a7Y237NVRVciA4JfVTa/Navq44EK2tcQCg=="
+  },
+  {
+   "domain": "assign_query",
+   "domain_tag": "eureka/assign/query/v1",
+   "payload": {
+    "separators": "\u2028\u2029 line separators",
+    "ctrl": "\u001f\u001b"
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f71756572792f7631007b226374726c223a225c75303031665c7530303162222c22736570617261746f7273223a225c75323032385c7532303239206c696e6520736570617261746f7273227d",
+   "signature": "R4ZISRVhaA8UpR+a5wGgzEZrzA1Hfli2UAPQJi9rYGDI/VTQfkFePGkDvg3uSXgH8ThGHEHb/mMAE9TNVCqaBg=="
+  },
+  {
+   "domain": "assign_result",
+   "domain_tag": "eureka/assign/result/v1",
+   "payload": {
+    "protocol": "eureka/1.0",
+    "event": "handshake_challenge",
+    "nonce": "00ff",
+    "timestamp": "2026-10-30T12:00:00.123Z"
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f726573756c742f7631007b226576656e74223a2268616e647368616b655f6368616c6c656e6765222c226e6f6e6365223a2230306666222c2270726f746f636f6c223a22657572656b612f312e30222c2274696d657374616d70223a22323032362d31302d33305431323a30303a30302e3132335a227d",
+   "signature": "gOPw/OEXT8GEatswOZ8p45+h/wrnj/KivuG8yl875n2Zb7WbG3p7rOKRju6p6TN6ZDPtk/Yhwllc0OSv8vaUDg=="
+  },
+  {
+   "domain": "assign_result",
+   "domain_tag": "eureka/assign/result/v1",
+   "payload": {
+    "text": "Rowan said \u201cstake the beds\u201d \u2014 na\u00efve caf\u00e9, \u65e5\u672c\u8a9e, emoji \ud83d\ude42\ud83c\udf31, tab\tnewline\nquote\" backslash\\ del\u007f nul\u0000 bell\u0007 slash/"
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f726573756c742f7631007b2274657874223a22526f77616e2073616964205c75323031637374616b652074686520626564735c7532303164205c7532303134206e615c75303065667665206361665c75303065392c205c75363565355c75363732635c75386139652c20656d6f6a69205c75643833645c75646534325c75643833635c75646633312c207461625c746e65776c696e655c6e71756f74655c22206261636b736c6173685c5c2064656c5c7530303766206e756c5c75303030302062656c6c5c753030303720736c6173682f227d",
+   "signature": "LlY+jR3ZwcegfykUssEHm5+g0rvcTajP4k2D9q1O/BzwKjgjLNyZk3sR+QHAZEMaeD5lbq1CWBp4aORet85fAw=="
+  },
+  {
+   "domain": "assign_result",
+   "domain_tag": "eureka/assign/result/v1",
+   "payload": {
+    "z": 1,
+    "a": [
+     3,
+     -2,
+     0,
+     true,
+     false,
+     null
+    ],
+    "m": {
+     "b": {
+      "y": [],
+      "x": {}
+     },
+     "a": ""
+    },
+    "big": 9007199254740991
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f726573756c742f7631007b2261223a5b332c2d322c302c747275652c66616c73652c6e756c6c5d2c22626967223a393030373139393235343734303939312c226d223a7b2261223a22222c2262223a7b2278223a7b7d2c2279223a5b5d7d7d2c227a223a317d",
+   "signature": "xu2yJb7emZMTi6KB0/vRlOjTjhy0Egq72cTgrmtYexeUOmI5ZxH4KVnrgzkVeczn6vmKbO1UfWpmk41GnRqpCQ=="
+  },
+  {
+   "domain": "assign_result",
+   "domain_tag": "eureka/assign/result/v1",
+   "payload": {
+    "\u00e9": 1,
+    "e": 2,
+    "\ud83d\ude00": 3,
+    "\uff5e": 4,
+    "Z": 5,
+    "_": 6
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f726573756c742f7631007b225a223a352c225f223a362c2265223a322c225c7530306539223a312c225c7566663565223a342c225c75643833645c7564653030223a337d",
+   "signature": "6yh/l9m5wfpXIqUd1Urf9NrbKiQK7GmthvPAdmi0QoYww6tB0Dt45igBJyRrdEhDizCfdfijsrX3rtp2/oDaAQ=="
+  },
+  {
+   "domain": "assign_result",
+   "domain_tag": "eureka/assign/result/v1",
+   "payload": {
+    "separators": "\u2028\u2029 line separators",
+    "ctrl": "\u001f\u001b"
+   },
+   "signed_bytes_hex": "657572656b612f61737369676e2f726573756c742f7631007b226374726c223a225c75303031665c7530303162222c22736570617261746f7273223a225c75323032385c7532303239206c696e6520736570617261746f7273227d",
+   "signature": "smTAZ8B7FsEJG0xry1Qh/2yqFSEyWrbSUip1ne7ZVOmRypEIVE6S4oASGnmOA4q8yd3piwrHLMHpDsKCIYgpBg=="
+  }
+ ]
+}
