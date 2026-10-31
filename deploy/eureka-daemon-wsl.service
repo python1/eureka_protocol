@@ -69,6 +69,9 @@ TimeoutStartSec=300
 # TLS only, exactly as CT 101 serves. --no-plain refuses to start without
 # --tls-port, so a half-edit cannot produce a daemon listening on nothing.
 #
+# --host 0.0.0.0 is required: the daemon binds loopback unless told
+# otherwise, and this node serves peers on the LAN.
+#
 # --tls-dir is explicit and is NOT the default. The default writes the
 # certificate and its key beside the identity file, which would put a second
 # copy of this node's private key inside ~/.eureka -- a directory this
@@ -76,7 +79,7 @@ TimeoutStartSec=300
 # ~/.eureka untouched, and the material there is derived from the identity and
 # regenerated whenever it stops matching, so it is safe to delete.
 ExecStart=/home/stunner/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-    --tls-port 8443 --no-plain --tls-dir /var/lib/eureka-wsl/tls
+    --tls-port 8443 --no-plain --tls-dir /var/lib/eureka-wsl/tls --host 0.0.0.0
 
 # on-failure, not always: a clean exit 0 is somebody stopping the daemon on
 # purpose, and restarting it would fight them.

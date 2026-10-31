@@ -208,7 +208,7 @@ export EUREKA_IDENTITY_PATH=$HOME/.eureka/identity.key
 export EUREKA_TRUST_PATH=$HOME/.eureka/trust.json
 
 ./venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
-    --tls-port 8443 --no-plain --tls-dir $HOME/.eureka/tls
+    --tls-port 8443 --no-plain --tls-dir $HOME/.eureka/tls --host 0.0.0.0
 ```
 
 ```
@@ -216,6 +216,11 @@ Starting Eureka Daemon API as node_a5ebe58a
   listening on https://0.0.0.0:8443
   peers should pin: 132474d6c700c58a93c0817a958c288c51b9495fd543419585acf05c412cd3cf
 ```
+
+`--host 0.0.0.0` is what lets B reach A. Without it every listener binds
+`127.0.0.1` and only this machine can connect: being reachable from the
+network is something you ask for, not a default. Pass a single LAN address
+instead to listen on one interface only.
 
 Those two environment variables are load-bearing. The identity loader
 *creates* a key when the file it is pointed at does not exist, so a typo does
