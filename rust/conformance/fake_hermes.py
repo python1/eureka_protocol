@@ -2,7 +2,11 @@
 """
 A stand-in for the `hermes` CLI (Hermes Agent v0.22.5), for testing the Hermes room-turn backend.
 
-Expects `-p <profile> chat --query-file - --format stream-json ...`, reads the query from stdin,
+`-p <profile> config get <key> --json` prints json.dumps of that key from the JSON file
+$FAKE_HERMES_CONFIG (dotted key -> value), or exits 1 with "Config key not set: <key>" on stderr,
+as hermes_cli/config.py does; $FAKE_HERMES_CONFIG_FAIL makes it exit 2.
+
+Otherwise expects `-p <profile> chat --query-file - --format stream-json ...`, reads the query from stdin,
 records argv and the query (as JSON, one line per call) to $FAKE_HERMES_LOG, then behaves as
 $FAKE_HERMES_MODE says. Events are written the way hermes_cli/stream_json.py writes them: one JSON
 object per stdout line, ending with a `result` event; `session_id:` goes to stderr.
@@ -24,8 +28,22 @@ import sys
 import time
 
 args = sys.argv[1:]
-query = sys.stdin.read() if "--query-file" in args and args[args.index("--query-file") + 1] == "-" else None
 log = os.environ.get("FAKE_HERMES_LOG")
+if args[2:4] == ["config", "get"]:
+    if log:
+        with open(log, "a") as f:
+            f.write(json.dumps({"config": args}) + "\n")
+    if os.environ.get("FAKE_HERMES_CONFIG_FAIL"):
+        print("Error: config.yaml could not be parsed", file=sys.stderr)
+        sys.exit(2)
+    path = os.environ.get("FAKE_HERMES_CONFIG")
+    settings = json.load(open(path)) if path else {}
+    if args[4] not in settings:
+        print(f"Config key not set: {args[4]}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(settings[args[4]], ensure_ascii=False))
+    sys.exit(0)
+query = sys.stdin.read() if "--query-file" in args and args[args.index("--query-file") + 1] == "-" else None
 if log:
     with open(log, "a") as f:
         f.write(json.dumps({"argv": args, "stdin": query, "pid": os.getpid(), "pgid": os.getpgid(0)}) + "\n")

@@ -286,6 +286,116 @@ fn check_hermes_profile(profile: &str) -> Result<(), String> {
     ))
 }
 
+/// Hermes toolsets that let the agent run commands or code, or touch files, directly or through
+/// something it starts: subagents (`delegation`), scheduled runs (`cronjob`), a browser that runs
+/// Python over CDP (`browser`), desktop control (`computer_use`), and skill files it writes (`skills`).
+/// A room profile must list all of them in `agent.disabled_toolsets`, which Hermes applies last, over
+/// every other tool selection (platform lists, composites, plugins, the coding posture).
+pub const HERMES_FORBIDDEN_TOOLSETS: [&str; 8] =
+    ["terminal", "file", "code_execution", "delegation", "cronjob", "browser", "computer_use", "skills"];
+
+/// Names from a Hermes list setting, read the way Hermes reads it (`parse_config_string_list`):
+/// a list, a JSON-array string (what `hermes config set` stores), or one bare name.
+fn hermes_string_list(value: &Value) -> Vec<String> {
+    let items = match value {
+        Value::Array(items) => items.clone(),
+        Value::Str(text) if text.trim().starts_with('[') => match pyjson::loads_str(&text.trim().replace('\'', "\"")) {
+            Ok(Value::Array(items)) => items,
+            _ => vec![value.clone()],
+        },
+        Value::Str(_) => vec![value.clone()],
+        _ => vec![],
+    };
+    items.iter().filter_map(Value::as_str).map(|name| name.trim().to_string()).filter(|n| !n.is_empty()).collect()
+}
+
+/// Why a profile's tool settings are not chat-only: forbidden toolsets missing from
+/// `agent.disabled_toolsets`, and MCP servers that are on (their tools can do anything).
+/// Each argument is what `hermes config get <key> --json` printed, or Null when the key is not set.
+pub fn hermes_tool_problems(disabled_toolsets: &Value, mcp_servers: &Value) -> Vec<String> {
+    let disabled = hermes_string_list(disabled_toolsets);
+    let mut problems = Vec::new();
+    let missing: Vec<&str> = HERMES_FORBIDDEN_TOOLSETS.iter().copied().filter(|t| !disabled.iter().any(|d| d == t)).collect();
+    if !missing.is_empty() {
+        problems.push(format!("agent.disabled_toolsets does not include {}", missing.join(", ")));
+    }
+    let off = |v: &Value| match v {
+        Value::Bool(b) => !b,
+        Value::Int(i) => i == "0",
+        Value::Str(t) => matches!(t.trim().to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0"),
+        _ => false,
+    };
+    let on: Vec<&str> = match mcp_servers {
+        Value::Object(servers) => servers
+            .iter()
+            .filter(|(_, server)| !server.as_object().and_then(|s| s.get("enabled")).is_some_and(off))
+            .map(|(name, _)| name.as_str())
+            .collect(),
+        _ => vec![],
+    };
+    if !on.is_empty() {
+        problems.push(format!("MCP servers are on ({})", on.join(", ")));
+    }
+    problems
+}
+
+/// `hermes -p <profile> config get <key> --json`: the value, or Null when the key is not set.
+fn hermes_config(program: &Path, profile: &str, key: &str) -> Result<Value, String> {
+    let child = std::process::Command::new(program)
+        .args(["-p", profile, "config", "get", key, "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("NO_COLOR", "1")
+        .env("FORCE_COLOR", "0")
+        .spawn()
+        .map_err(|e| format!("cannot run {} to read profile {profile:?}: {e}", program.display()))?;
+    let pid = child.id() as i32;
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(child.wait_with_output());
+    });
+    let output = match result.recv_timeout(Duration::from_secs(30)) {
+        Ok(output) => output.map_err(|e| format!("reading Hermes setting {key}: {e}"))?,
+        Err(_) => {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            return Err(format!("hermes -p {profile} config get {key} did not answer in 30s"));
+        }
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        if output.status.code() == Some(1) && stderr.contains("Config key not set") {
+            return Ok(Value::Null);
+        }
+        let first = stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no message");
+        return Err(format!("hermes -p {profile} config get {key} failed: {first}"));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("null");
+    pyjson::loads_str(line).map_err(|_| format!("hermes -p {profile} config get {key} --json did not print JSON"))
+}
+
+/// Room text includes other models' replies, so the room profile must be chat only: no tool
+/// that runs commands or code or touches files. Asked of Hermes itself (`config get`, its
+/// documented, machine-readable setting reader) at startup; anything else stops the daemon.
+fn check_hermes_tools(program: &Path, profile: &str) -> Result<(), String> {
+    let disabled = hermes_config(program, profile, "agent.disabled_toolsets")?;
+    let mcp = hermes_config(program, profile, "mcp_servers")?;
+    let problems = hermes_tool_problems(&disabled, &mcp);
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "WARNING: Hermes profile {profile:?} can run commands or touch files ({}). Room text includes \
+         other models' replies, so the room profile must be chat only. Run:\n  \
+         hermes -p {profile} config set agent.disabled_toolsets '[{}]'\n  \
+         hermes -p {profile} config set platform_toolsets.cli '[]'\n\
+         and remove or disable its MCP servers (hermes -p {profile} mcp list). See rust/README.md, The Hermes Agent backend.",
+        problems.join("; "),
+        HERMES_FORBIDDEN_TOOLSETS.map(|t| format!("\"{t}\"")).join(", "),
+    ))
+}
+
 /// `default_registry()`, read from the environment at startup. An unusable setting stops the daemon.
 pub fn registry_from_environment() -> Result<Registry, String> {
     let base = std::env::var(OLLAMA_URL_ENV).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| OLLAMA_BASE.into());
@@ -330,6 +440,7 @@ pub fn registry_from_environment() -> Result<Registry, String> {
                     return Err(format!("{HERMES_PROFILE_ENV}={profile:?}: use lowercase letters, digits, _ and - (up to 64)"));
                 }
                 check_hermes_profile(&profile)?;
+                check_hermes_tools(&program, &profile)?;
                 let session = match std::env::var(HERMES_SESSION_ENV) {
                     Ok(v) if !v.trim().is_empty() => {
                         let v = v.trim().to_string();
@@ -893,6 +1004,22 @@ mod tests {
         assert_eq!(&pinned[pinned.len() - 3..], ["-c", "room-thread", "--create-if-missing"]);
         assert!(valid_hermes_profile("knights-circle") && valid_hermes_profile("kc_2"));
         assert!(!valid_hermes_profile("-p") && !valid_hermes_profile("Knights") && !valid_hermes_profile("a/b") && !valid_hermes_profile(""));
+    }
+
+    #[test]
+    fn a_room_profile_must_disable_every_tool_that_runs_commands_or_touches_files() {
+        let all = Value::Array(HERMES_FORBIDDEN_TOOLSETS.iter().map(|t| Value::str(*t)).collect());
+        assert!(hermes_tool_problems(&all, &Value::Null).is_empty());
+        // `hermes config set` stores a list as a JSON (or Python-literal) string; Hermes reads both.
+        let as_set = Value::str(format!("[{}]", HERMES_FORBIDDEN_TOOLSETS.map(|t| format!("'{t}'")).join(", ")));
+        assert!(hermes_tool_problems(&as_set, &pyjson::loads_str("{}").unwrap()).is_empty());
+        let problems = hermes_tool_problems(&Value::Null, &Value::Null);
+        assert_eq!(problems, ["agent.disabled_toolsets does not include terminal, file, code_execution, delegation, cronjob, browser, computer_use, skills"]);
+        let some = pyjson::loads_str(r#"["memory", "terminal", "file"]"#).unwrap();
+        assert_eq!(hermes_tool_problems(&some, &Value::Null)[0], "agent.disabled_toolsets does not include code_execution, delegation, cronjob, browser, computer_use, skills");
+        assert!(!hermes_tool_problems(&Value::str("terminal"), &Value::Null).is_empty());
+        let mcp = pyjson::loads_str(r#"{"github": {"command": "npx"}, "off": {"command": "x", "enabled": false}, "no": {"enabled": "no"}, "on": {"enabled": true}}"#).unwrap();
+        assert_eq!(hermes_tool_problems(&all, &mcp), ["MCP servers are on (github, on)"]);
     }
 
     #[test]

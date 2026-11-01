@@ -12,6 +12,9 @@ from conftest import HERE, client_node, grant
 from test_conformance import handshake, room, run_assign, trusting
 
 FAKE = str(HERE / "fake_hermes.py")
+CHAT_ONLY = {"agent.disabled_toolsets": ["terminal", "file", "code_execution", "delegation", "cronjob", "browser",
+                                         "computer_use", "skills"],
+             "platform_toolsets.cli": []}
 
 
 @pytest.fixture
@@ -28,6 +31,12 @@ def hermes_home(tmp_path):
     return home
 
 
+def settings(tmp_path, values):
+    path = tmp_path / f"config-{len(list(tmp_path.glob('config-*')))}.json"
+    path.write_text(json.dumps(values))
+    return str(path)
+
+
 @pytest.fixture
 def hermes(start, tmp_path, hermes_home):
     def _hermes(mode="ok", **env):
@@ -35,15 +44,20 @@ def hermes(start, tmp_path, hermes_home):
         node = client_node("room")
         daemon = start(peers=grant(node, "room-turn"), env={
             "EUREKA_ROOM_TURN_BACKEND": "hermes", "EUREKA_HERMES_BIN": FAKE, "HERMES_HOME": str(hermes_home),
-            "FAKE_HERMES_MODE": mode, "FAKE_HERMES_LOG": str(log), **env})
+            "FAKE_HERMES_CONFIG": settings(tmp_path, CHAT_ONLY), "FAKE_HERMES_MODE": mode, "FAKE_HERMES_LOG": str(log), **env})
         trusting(node, daemon)
         assert handshake(node, daemon)["authenticated"] is True
         return node, daemon, log
     return _hermes
 
 
-def calls(log: Path):
+def logged(log: Path):
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def calls(log: Path):
+    """The chat runs (and grandchildren); the startup `config get` reads are left out."""
+    return [entry for entry in logged(log) if "config" not in entry]
 
 
 def alive(pid):
@@ -68,6 +82,10 @@ def test_a_turn_runs_hermes_in_its_profile_with_the_room_on_stdin(hermes, ollama
     assert call["stdin"].startswith("You are an external agent taking one turn in a Knights Circle room")
     assert "[system]\nYou are the Critic.\n\n[user]\nPlan the beds\n\n[user]\nAnd the path; rm -rf / $(whoami) `id`" in call["stdin"]
     assert call["pgid"] == call["pid"]
+    # The profile's tool settings were read from Hermes itself, once, at startup.
+    assert [e["config"] for e in logged(log) if "config" in e] == [
+        ["-p", "knights-circle", "config", "get", "agent.disabled_toolsets", "--json"],
+        ["-p", "knights-circle", "config", "get", "mcp_servers", "--json"]]
     assert ollama.requests == []
     assert "room-turn via Hermes Agent" in daemon.output() and "a new session each turn" in daemon.output()
 
@@ -140,6 +158,36 @@ def test_payload_checks_apply_before_hermes_runs(hermes):
     ({"EUREKA_HERMES_SESSION": "--help"}, "EUREKA_HERMES_SESSION"),
     ({"EUREKA_HERMES_TIMEOUT": "0"}, "EUREKA_HERMES_TIMEOUT"),
 ])
-def test_bad_settings_stop_the_daemon_at_startup(start, hermes_home, env, words):
+def test_bad_settings_stop_the_daemon_at_startup(start, tmp_path, hermes_home, env, words):
     with pytest.raises(RuntimeError, match=words):
-        start(env={"EUREKA_ROOM_TURN_BACKEND": "hermes", "EUREKA_HERMES_BIN": FAKE, "HERMES_HOME": str(hermes_home), **env})
+        start(env={"EUREKA_ROOM_TURN_BACKEND": "hermes", "EUREKA_HERMES_BIN": FAKE, "HERMES_HOME": str(hermes_home),
+                   "FAKE_HERMES_CONFIG": settings(tmp_path, CHAT_ONLY), **env})
+
+
+@pytest.mark.parametrize("values,words", [
+    ({}, "does not include terminal, file, code_execution, delegation, cronjob, browser, computer_use, skills"),
+    ({**CHAT_ONLY, "agent.disabled_toolsets": ["terminal", "file"]}, "does not include code_execution, delegation"),
+    ({**CHAT_ONLY, "agent.disabled_toolsets": "terminal"}, "does not include file, code_execution"),
+    ({**CHAT_ONLY, "mcp_servers": {"github": {"command": "npx"}}}, r"MCP servers are on \(github\)"),
+])
+def test_a_profile_that_can_run_commands_or_touch_files_is_refused(start, tmp_path, hermes_home, values, words):
+    with pytest.raises(RuntimeError, match=words) as refused:
+        start(env={"EUREKA_ROOM_TURN_BACKEND": "hermes", "EUREKA_HERMES_BIN": FAKE, "HERMES_HOME": str(hermes_home),
+                   "FAKE_HERMES_CONFIG": settings(tmp_path, values)})
+    message = str(refused.value)
+    assert "WARNING: Hermes profile \"knights-circle\" can run commands or touch files" in message
+    assert "hermes -p knights-circle config set agent.disabled_toolsets" in message
+
+
+def test_the_set_command_form_and_disabled_mcp_servers_are_accepted(hermes, tmp_path):
+    # `hermes config set` stores the list as a JSON string; Hermes reads it as a list, and so does the daemon.
+    values = {**CHAT_ONLY, "agent.disabled_toolsets": json.dumps(CHAT_ONLY["agent.disabled_toolsets"]),
+              "mcp_servers": {"github": {"command": "npx", "enabled": False}}}
+    node, daemon, _ = hermes(FAKE_HERMES_CONFIG=settings(tmp_path, values))
+    assert run_assign(node, daemon)[1]["result"]["status"] == "completed"
+
+
+def test_unreadable_hermes_settings_stop_the_daemon(start, tmp_path, hermes_home):
+    with pytest.raises(RuntimeError, match="config get agent.disabled_toolsets failed: Error: config.yaml could not be parsed"):
+        start(env={"EUREKA_ROOM_TURN_BACKEND": "hermes", "EUREKA_HERMES_BIN": FAKE, "HERMES_HOME": str(hermes_home),
+                   "FAKE_HERMES_CONFIG_FAIL": "1"})

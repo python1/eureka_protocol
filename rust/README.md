@@ -136,6 +136,12 @@ a real `--json` result from it, trimmed to the reply and its basic run fields.
 
 ### The Hermes Agent backend
 
+> **Untested against a real Hermes.** This backend has been tested only against
+> `conformance/fake_hermes.py`, a stand-in written from Hermes Agent v0.22.5's
+> source. It has not run against a real Hermes install, and won't have until
+> it is tried on WSL2 (the example at the end of this file). Until then, treat
+> the command line, the reply parsing and the startup check as unconfirmed.
+
 With `EUREKA_ROOM_TURN_BACKEND=hermes`, each room turn runs
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) headless:
 
@@ -183,11 +189,74 @@ The safeguards are the OpenClaw ones:
   program that cannot start is `upstream_unavailable`. Passing the time limit
   is `timeout`.
 
-**Tools are the agent's own.** A profile is not a sandbox. With Hermes' default
-`local` terminal backend the agent has your user's file access. Room text
-includes other models' replies, so treat it as untrusted input to an agent that
-can use tools. Give the room profile only the tools and access you are happy
-for a room to drive.
+#### Chat only: no commands, code or files
+
+Room text includes other models' replies, so a room must never be able to make
+the agent run commands or touch files. A profile is not a sandbox: with Hermes'
+default `local` terminal backend its tools have your user's access. So the
+room profile is set to chat only, using Hermes' own config. Run:
+
+    hermes -p knights-circle config set agent.disabled_toolsets '["terminal", "file", "code_execution", "delegation", "cronjob", "browser", "computer_use", "skills"]'
+    hermes -p knights-circle config set platform_toolsets.cli '[]'
+    hermes -p knights-circle mcp list            # remove any server: hermes -p knights-circle mcp remove <name>
+    hermes -p knights-circle tools --summary     # should show no toolsets enabled
+
+In the profile's `config.yaml` (`hermes -p knights-circle config path`) that
+reads:
+
+```yaml
+agent:
+  disabled_toolsets: [terminal, file, code_execution, delegation, cronjob, browser, computer_use, skills]
+platform_toolsets:
+  cli: []        # an explicitly empty list: no toolsets for chat / one-shot runs
+```
+
+- **`agent.disabled_toolsets` is the guarantee.** Hermes applies it last, over
+  every other selection: platform lists, composites like `coding` and
+  `debugging`, the `coding_context: focus` posture, and `HERMES_TUI_TOOLSETS`.
+  It strips the named toolsets' tools wherever they come from. `--source tool`
+  runs use the CLI's selection.
+- **The set covers indirect routes too.** `terminal`, `file` and
+  `code_execution` are the direct ones. The rest reach the same powers another
+  way:
+  - `delegation`: subagents;
+  - `cronjob`: scheduled runs;
+  - `browser`: `browser_exec` runs Python over CDP;
+  - `computer_use`: desktop control;
+  - `skills`: `skill_manage` writes files.
+- **`platform_toolsets.cli: []`** turns off the rest (web, memory, vision and
+  so on), so the profile only chats.
+- **MCP servers** are removed because their tools can do anything.
+
+**The daemon checks this at startup and refuses to run otherwise.** With
+`EUREKA_ROOM_TURN_BACKEND=hermes` it asks Hermes for the profile's settings:
+
+    hermes -p <profile> config get agent.disabled_toolsets --json
+    hermes -p <profile> config get mcp_servers --json
+
+`config get` is Hermes' documented, machine-readable reader, so the values come
+from Hermes' own config loading rather than the daemon parsing YAML. The daemon
+stops with a `WARNING:` naming each problem and printing the commands above in
+either case:
+- any of the eight toolsets is missing from `agent.disabled_toolsets`;
+- an MCP server is not `enabled: false`.
+
+It also stops if the settings can't be read.
+
+What the check does **not** cover:
+
+- **Later edits.** It runs once, at startup. A setting changed while the daemon
+  runs is not seen until the next start, so restart it after editing the
+  profile.
+- **Plugin and hook code.** Plugin tools (each in a toolset of its own) and
+  shell `hooks` in the config are code you installed, not anything the agent
+  chose. The eight-toolset list does not cover them, and even with
+  `platform_toolsets.cli: []` Hermes turns on an enabled plugin's toolset
+  unless it was unchecked in `hermes tools`. Keep the room profile free of
+  both: `hermes -p knights-circle plugins list` should show no enabled
+  plugins, and its `config.yaml` should have no `hooks:`.
+- **Tools from a future Hermes release.** A later release could add a new
+  toolset that runs commands. Re-check `tools --summary` after upgrading.
 
 Built against Hermes Agent v0.22.5 (`hermes_cli/stream_json.py`).
 `tests/fixtures/hermes-stream-json.jsonl` is written field for field as that
@@ -306,7 +375,14 @@ reaches it at `http://127.0.0.1:8765`.
        echo "Say hello in five words." | hermes -p knights-circle chat --query-file - --format stream-json --source tool
 
    The last line of output should be a `"type": "result"` event with
-   `"exit_code": 0`.
+   `"exit_code": 0`. Then make the profile chat only, as described in
+   [Chat only](#chat-only-no-commands-code-or-files):
+
+       hermes -p knights-circle config set agent.disabled_toolsets '["terminal", "file", "code_execution", "delegation", "cronjob", "browser", "computer_use", "skills"]'
+       hermes -p knights-circle config set platform_toolsets.cli '[]'
+       hermes -p knights-circle tools --summary
+
+   The daemon refuses to start until this is done.
 
    A fresh profile is used on purpose. `--clone` would also copy your
    `MEMORY.md`, `USER.md` and API keys into a profile whose replies are shared
