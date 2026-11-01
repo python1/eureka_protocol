@@ -101,9 +101,12 @@ It refuses a revoked key.
 
 With `EUREKA_ROOM_TURN_BACKEND=openclaw`, each room turn runs
 
-    openclaw agent --session-id <EUREKA_OPENCLAW_SESSION> --message <text>
+    openclaw agent --session-id <EUREKA_OPENCLAW_SESSION> --json --message <text>
 
-and returns its standard output as the reply. The safeguards:
+and returns only the agent's reply. `--json` makes OpenClaw print a structured
+result, and the reply is its `result.payloads[].text`. Run metadata, the
+version banner and tagline OpenClaw shows on a terminal, and anything else
+printed before the result are never passed to the room. The safeguards:
 
 - **Session.** The session is fixed by the operator (default
   `knights-circle`), so a room never writes into the agent's main
@@ -113,15 +116,19 @@ and returns its standard output as the reply. The safeguards:
 - **Message format.** The message is Knights Circle's room preamble followed by
   the room's messages as `[role]` blocks. Payload checks (roles, 200 messages,
   48,000 characters) run before anything is started.
-- **Limits.** stdin is closed. stdout is read up to 1 MiB, colour codes are
-  removed, and the reply is capped at 12,000 characters. stderr goes to the
-  log only.
+- **Limits.** stdin is closed. stdout is read up to 8 MiB (a one-line reply
+  is about 23 KB of JSON). Colour codes are removed from the reply, and the
+  reply is capped at 12,000 characters. stderr goes to the log only.
 - **Process cleanup.** The process runs in its own process group. The whole
   group is killed on timeout, on oversized output, or if the turn is
   abandoned.
-- **Failure reasons.** A non-zero exit or empty output is `upstream_error`. A
-  program that cannot start is `upstream_unavailable`. Passing the time limit
-  is `timeout`.
+- **Failure reasons.** These are `upstream_error`: a non-zero exit, output over
+  the limit, no JSON result, a result whose `status` is not `"ok"`, an aborted
+  run, or a reply with no text. A program that cannot start is
+  `upstream_unavailable`. Passing the time limit is `timeout`.
+
+Tested against OpenClaw 2026.6.5. `tests/fixtures/openclaw-agent-json.json` is
+a real `--json` result from it, trimmed to the reply and its basic run fields.
 
 ## Tests
 
@@ -164,7 +171,7 @@ Nothing is exposed on the LAN, and the browser still talks to
 2. **Check OpenClaw answers on its own (container).**
 
        command -v openclaw
-       openclaw agent --session-id knights-circle --message "Say hello in five words."
+       openclaw agent --session-id knights-circle --json --message "Say hello in five words." </dev/null | head -20
 
 3. **Get the room key (Mac, Chrome, https://knights-circle.vercel.app).**
    Open *Advanced: bring your own bot*, then *Show room key*. Note the key and

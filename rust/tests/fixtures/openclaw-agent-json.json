@@ -1,0 +1,34 @@
+{
+  "runId": "11fe5b05-2a8b-4111-ac47-dd905a732f3f",
+  "status": "ok",
+  "summary": "completed",
+  "result": {
+    "payloads": [
+      {
+        "text": "Hello there, how are you?",
+        "mediaUrl": null
+      }
+    ],
+    "meta": {
+      "durationMs": 1603,
+      "agentMeta": {
+        "sessionId": "knights-circle",
+        "provider": "ollama",
+        "model": "gemma4:26b",
+        "agentHarnessId": "openclaw",
+        "usage": {
+          "input": 25390,
+          "output": 8,
+          "total": 25398
+        }
+      },
+      "aborted": false,
+      "finalAssistantVisibleText": "Hello there, how are you?",
+      "stopReason": "stop",
+      "completion": {
+        "stopReason": "stop",
+        "finishReason": "stop"
+      }
+    }
+  }
+}

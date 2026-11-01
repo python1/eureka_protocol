@@ -65,8 +65,9 @@ const MAX_UPSTREAM_BYTES: usize = 8 * 1024 * 1024;
 
 const OPENCLAW_DEFAULT_SESSION: &str = "knights-circle";
 const OPENCLAW_DEFAULT_TIMEOUT_SECONDS: u64 = 120;
-/// OpenClaw's stdout is read up to this and no further; the process is killed past it.
-const OPENCLAW_MAX_STDOUT_BYTES: usize = 1024 * 1024;
+/// OpenClaw's `--json` stdout is read up to this and no further; the process is killed past it.
+/// A one-line reply is about 23 KB of JSON (most of it run metadata), so this leaves wide room.
+const OPENCLAW_MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
 const OPENCLAW_MAX_STDERR_BYTES: usize = 8 * 1024;
 
 pub const ENABLE_ENV: &str = "EUREKA_ROOM_TURN";
@@ -470,19 +471,76 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// One turn through `openclaw agent --session-id <id> --message <text>`.
+/// The agent's reply, taken from what `openclaw agent --json` prints.
+#[derive(Debug)]
+pub struct OpenClawReply {
+    pub text: String,
+    pub stop_reason: Option<String>,
+    pub output_tokens: Option<Value>,
+}
+
+/// Find the JSON result in OpenClaw's stdout. It is normally the whole of it,
+/// but anything printed first (the banner and tagline OpenClaw shows on a
+/// terminal, a plugin's log line) is skipped: the result is the first line
+/// starting with `{` from which the rest parses as one JSON object.
+fn openclaw_result(stdout: &str) -> Option<pyjson::Map> {
+    let mut starts = vec![0];
+    starts.extend(stdout.match_indices('\n').map(|(i, _)| i + 1));
+    starts.into_iter().filter(|&i| stdout[i..].trim_start().starts_with('{')).find_map(|i| match pyjson::loads(stdout[i..].as_bytes()) {
+        Ok(Value::Object(map)) => Some(map),
+        _ => None,
+    })
+}
+
+/// Only the agent's reply: `result.payloads[].text`, joined, or the run's final
+/// visible text if it sent no payloads. A run that is not `status: "ok"`, or was
+/// aborted, has no reply. The run metadata (prompt reports, traces, usage) is dropped.
+pub fn openclaw_reply(stdout: &str) -> Result<OpenClawReply, &'static str> {
+    let doc = openclaw_result(stdout).ok_or("no JSON result in its output")?;
+    if !doc.get("status").is_some_and(|s| s.is_str("ok")) {
+        return Err("its result status is not ok");
+    }
+    let result = doc.get("result").and_then(Value::as_object).ok_or("its result has no 'result'")?;
+    let meta = result.get("meta").and_then(Value::as_object);
+    if meta.and_then(|m| m.get("aborted")).is_some_and(|a| matches!(a, Value::Bool(true))) {
+        return Err("the run was aborted");
+    }
+    let payloads: Vec<String> = result
+        .get("payloads")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(|p| p.as_object()?.get("text")?.as_str()).map(|t| strip_ansi(t).trim().to_string()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_default();
+    let text = if payloads.is_empty() {
+        meta.and_then(|m| m.get("finalAssistantVisibleText")).and_then(Value::as_str).map(|t| strip_ansi(t).trim().to_string()).unwrap_or_default()
+    } else {
+        payloads.join("\n\n")
+    };
+    if text.is_empty() {
+        return Err("its result has no reply text");
+    }
+    let stop_reason = meta.and_then(|m| m.get("stopReason")).and_then(Value::as_str).map(str::to_string);
+    let output_tokens = meta
+        .and_then(|m| m.get("agentMeta")?.as_object()?.get("usage")?.as_object()?.get("output"))
+        .filter(|v| v.is_python_int())
+        .cloned();
+    Ok(OpenClawReply { text, stop_reason, output_tokens })
+}
+
+/// One turn through `openclaw agent --session-id <id> --json --message <text>`.
 ///
 /// Arguments go straight to the program, never through a shell. The session id
 /// is the operator's (default "knights-circle"), so the agent's main
-/// conversation is never the one a room writes into. stdout is read up to a
-/// limit, the whole run is under a timeout, and the process group is killed if
-/// either is passed or the turn is abandoned.
+/// conversation is never the one a room writes into. `--json` makes the result
+/// structured, so only the reply is returned, never banners or run metadata.
+/// stdout is read up to a limit, the whole run is under a timeout, and the
+/// process group is killed if either is passed or the turn is abandoned.
 async fn openclaw(program: &Path, session: &str, timeout: Duration, message: &str) -> HandlerResult {
     let mut command = tokio::process::Command::new(program);
     command
         .arg("agent")
         .arg("--session-id")
         .arg(session)
+        .arg("--json")
         .arg("--message")
         .arg(message)
         .stdin(Stdio::null())
@@ -554,26 +612,31 @@ async fn openclaw(program: &Path, session: &str, timeout: Duration, message: &st
         Ok(Ok(status)) => Some(status),
         _ => None,
     };
-    if !overflowed && !status.is_some_and(|s| s.success()) {
+    if overflowed {
+        println!("[HANDLER] room-turn: openclaw printed over {OPENCLAW_MAX_STDOUT_BYTES} bytes; stopped");
+        return failed(REASON_UPSTREAM_ERROR);
+    }
+    if !status.is_some_and(|s| s.success()) {
         let first = String::from_utf8_lossy(&err).lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(200).collect::<String>();
         println!("[HANDLER] room-turn: openclaw exited with {status:?}: {first}");
         return failed(REASON_UPSTREAM_ERROR);
     }
-    let text = strip_ansi(&String::from_utf8_lossy(&out));
-    let text = text.trim();
-    if text.is_empty() {
-        println!("[HANDLER] room-turn: openclaw printed nothing");
-        return failed(REASON_UPSTREAM_ERROR);
-    }
-    let truncated = overflowed || py_len(text) > ROOM_MAX_COMPLETION_CHARS;
-    let text = py_prefix(text, ROOM_MAX_COMPLETION_CHARS);
+    let reply = match openclaw_reply(&String::from_utf8_lossy(&out)) {
+        Ok(reply) => reply,
+        Err(why) => {
+            println!("[HANDLER] room-turn: openclaw gave no usable reply: {why}");
+            return failed(REASON_UPSTREAM_ERROR);
+        }
+    };
+    let truncated = py_len(&reply.text) > ROOM_MAX_COMPLETION_CHARS;
+    let text = py_prefix(&reply.text, ROOM_MAX_COMPLETION_CHARS);
     completed(object([
         ("model", Value::str("openclaw")),
         ("text", Value::str(text)),
         ("chars", Value::int(py_len(text) as i64)),
         ("truncated", Value::Bool(truncated)),
-        ("done_reason", Value::Null),
-        ("eval_count", Value::Null),
+        ("done_reason", reply.stop_reason.map(Value::str).unwrap_or(Value::Null)),
+        ("eval_count", reply.output_tokens.unwrap_or(Value::Null)),
     ]))
 }
 
@@ -603,6 +666,42 @@ mod tests {
         assert_eq!(room_messages(&ok).unwrap().len(), 2);
         for bad in [r#"{"messages":[]}"#, r#"{"messages":[{"role":"system","content":"only"}]}"#, r#"{"messages":[{"role":"tool","content":"x"}]}"#, r#"{"messages":[{"role":"user","content":"   "}]}"#, r#"[]"#] {
             assert!(room_messages(&pyjson::loads(bad.as_bytes()).unwrap()).is_none(), "{bad}");
+        }
+    }
+
+    const REAL_JSON: &str = include_str!("../tests/fixtures/openclaw-agent-json.json");
+
+    #[test]
+    fn the_reply_is_taken_from_real_openclaw_json_output() {
+        let reply = openclaw_reply(REAL_JSON).unwrap();
+        assert_eq!(reply.text, "Hello there, how are you?");
+        assert_eq!(reply.stop_reason.as_deref(), Some("stop"));
+        assert_eq!(reply.output_tokens.map(|v| pyjson::canonical(&v)).as_deref(), Some("8"));
+    }
+
+    #[test]
+    fn a_terminal_banner_before_the_json_is_skipped() {
+        // What OpenClaw 2026.6.5 shows before the result when it believes it is on a terminal.
+        let banner = "\u{1b}[2m│\u{1b}[0m\n◇  OpenClaw 2026.6.5 (5181e4f)\n│\n│  Why did the lobster refuse to share? It was a little shellfish.\n│\n◇\n";
+        let reply = openclaw_reply(&format!("{banner}{REAL_JSON}")).unwrap();
+        assert_eq!(reply.text, "Hello there, how are you?");
+        assert!(!reply.text.contains("OpenClaw 2026.6.5") && !reply.text.contains('│'));
+    }
+
+    #[test]
+    fn payloads_are_joined_and_failures_have_no_reply() {
+        let two = r#"{"status":"ok","result":{"payloads":[{"text":"First."},{"text":"  "},{"mediaUrl":"x"},{"text":"Second."}],"meta":{}}}"#;
+        assert_eq!(openclaw_reply(two).unwrap().text, "First.\n\nSecond.");
+        let fallback = r#"{"status":"ok","result":{"payloads":[],"meta":{"finalAssistantVisibleText":"From meta."}}}"#;
+        assert_eq!(openclaw_reply(fallback).unwrap().text, "From meta.");
+        for bad in [
+            "Hello there, how are you?",
+            r#"{"status":"error","summary":"gateway unreachable","result":{"payloads":[{"text":"x"}]}}"#,
+            r#"{"status":"ok","result":{"payloads":[{"text":"partial"}],"meta":{"aborted":true}}}"#,
+            r#"{"status":"ok","result":{"payloads":[],"meta":{}}}"#,
+            r#"{"status":"ok","result":{"payloads":[{"text":"cut off"#,
+        ] {
+            assert!(openclaw_reply(bad).is_err(), "{bad}");
         }
     }
 

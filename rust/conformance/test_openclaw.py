@@ -52,14 +52,15 @@ def test_a_turn_runs_openclaw_agent_with_the_room_session_and_returns_stdout(cla
     answer = run_assign(node, daemon, payload=room("Plan the beds", "And the path; rm -rf / $(whoami) `id`"))[1]
     output = answer["result"]["output"]
     assert answer["result"]["status"] == "completed"
+    # Only the reply: none of the run metadata OpenClaw prints around it.
     assert output == {"model": "openclaw", "text": "Antiochus here (session knights-circle). You said: And the path; rm -rf / $(whoami) `id`",
-                      "chars": len(output["text"]), "truncated": False, "done_reason": None, "eval_count": None}
+                      "chars": len(output["text"]), "truncated": False, "done_reason": "stop", "eval_count": 8}
     (call,) = calls(log)
     argv = call["argv"]
     # Exactly these arguments, the message as one argv entry, no shell anywhere.
-    assert argv[:4] == ["agent", "--session-id", "knights-circle", "--message"] and len(argv) == 5
-    assert argv[4].startswith("You are an external agent taking one turn in a Knights Circle room")
-    assert "[system]\nYou are the Critic.\n\n[user]\nPlan the beds\n\n[user]\nAnd the path; rm -rf / $(whoami) `id`" in argv[4]
+    assert argv[:5] == ["agent", "--session-id", "knights-circle", "--json", "--message"] and len(argv) == 6
+    assert argv[5].startswith("You are an external agent taking one turn in a Knights Circle room")
+    assert "[system]\nYou are the Critic.\n\n[user]\nPlan the beds\n\n[user]\nAnd the path; rm -rf / $(whoami) `id`" in argv[5]
     assert call["pgid"] == call["pid"]  # its own process group
     assert ollama.requests == []
     assert "via OpenClaw" in daemon.output()
@@ -71,12 +72,18 @@ def test_the_session_id_is_configurable(claw):
     assert calls(log)[0]["argv"][2] == "kc-test"
 
 
+def test_a_banner_printed_before_the_result_is_not_part_of_the_reply(claw):
+    node, daemon, _ = claw("banner")
+    text = run_assign(node, daemon)[1]["result"]["output"]["text"]
+    assert text.startswith("Antiochus here") and "OpenClaw 2026.6.5" not in text and "shellfish" not in text and "\u2502" not in text
+
+
 def test_colour_codes_are_removed(claw):
     node, daemon, _ = claw("ansi")
     assert "\x1b" not in run_assign(node, daemon)[1]["result"]["output"]["text"]
 
 
-@pytest.mark.parametrize("mode", ["fail", "empty"])
+@pytest.mark.parametrize("mode", ["fail", "empty", "error", "aborted"])
 def test_a_failing_or_silent_agent_is_upstream_error(claw, mode):
     node, daemon, _ = claw(mode)
     result = run_assign(node, daemon)[1]["result"]
@@ -100,13 +107,19 @@ def test_the_whole_process_group_dies_with_the_turn(claw):
     assert not alive(grandchild)
 
 
-def test_huge_output_is_capped_and_the_agent_stopped(claw):
+def test_huge_output_is_refused_and_the_agent_stopped(claw):
     node, daemon, log = claw("huge")
     began = time.time()
-    output = run_assign(node, daemon)[1]["result"]["output"]
-    assert output["truncated"] is True and output["chars"] == 12_000 and time.time() - began < 10
+    result = run_assign(node, daemon)[1]["result"]
+    assert (result["status"], result["reason"]) == ("failed", "upstream_error") and time.time() - began < 15
     time.sleep(0.5)
     assert not alive(calls(log)[0]["pid"])
+
+
+def test_a_long_reply_is_capped_in_characters_and_says_so(claw):
+    node, daemon, _ = claw("long")
+    output = run_assign(node, daemon)[1]["result"]["output"]
+    assert output["truncated"] is True and output["chars"] == 12_000 and output["text"] == "\U0001F331" * 12_000
 
 
 def test_payload_checks_still_apply_before_openclaw_runs(claw):
