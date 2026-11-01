@@ -1,7 +1,7 @@
 //! What this node can be asked to do, and the code that does it.
 //!
 //! `room-turn` answers one turn of a Knights Circle room, through the local
-//! Ollama (as room_turn.py does) or through OpenClaw. `inference` is
+//! Ollama (as room_turn.py does), through OpenClaw, or through Hermes Agent. `inference` is
 //! handlers.py's OllamaInference. Both are opt-in by environment exactly as in
 //! Python. `web-retrieval` is not in this build; see trust.rs for how a grant
 //! for it is treated.
@@ -65,10 +65,13 @@ const MAX_UPSTREAM_BYTES: usize = 8 * 1024 * 1024;
 
 const OPENCLAW_DEFAULT_SESSION: &str = "knights-circle";
 const OPENCLAW_DEFAULT_TIMEOUT_SECONDS: u64 = 120;
-/// OpenClaw's `--json` stdout is read up to this and no further; the process is killed past it.
-/// A one-line reply is about 23 KB of JSON (most of it run metadata), so this leaves wide room.
-const OPENCLAW_MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
-const OPENCLAW_MAX_STDERR_BYTES: usize = 8 * 1024;
+/// An agent CLI's structured stdout is read up to this and no further; the process is killed past it.
+/// A one-line OpenClaw reply is about 23 KB of JSON (most of it run metadata), so this leaves wide room.
+const AGENT_MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
+const AGENT_MAX_STDERR_BYTES: usize = 8 * 1024;
+
+const HERMES_DEFAULT_PROFILE: &str = "knights-circle";
+const HERMES_DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 
 pub const ENABLE_ENV: &str = "EUREKA_ROOM_TURN";
 pub const MODEL_ENV: &str = "EUREKA_ROOM_TURN_MODEL";
@@ -78,6 +81,10 @@ pub const OLLAMA_URL_ENV: &str = "EUREKA_OLLAMA_URL";
 pub const OPENCLAW_BIN_ENV: &str = "EUREKA_OPENCLAW_BIN";
 pub const OPENCLAW_SESSION_ENV: &str = "EUREKA_OPENCLAW_SESSION";
 pub const OPENCLAW_TIMEOUT_ENV: &str = "EUREKA_OPENCLAW_TIMEOUT";
+pub const HERMES_BIN_ENV: &str = "EUREKA_HERMES_BIN";
+pub const HERMES_PROFILE_ENV: &str = "EUREKA_HERMES_PROFILE";
+pub const HERMES_SESSION_ENV: &str = "EUREKA_HERMES_SESSION";
+pub const HERMES_TIMEOUT_ENV: &str = "EUREKA_HERMES_TIMEOUT";
 
 pub const PREAMBLE: &str = "You are an external agent taking one turn in a Knights Circle room, a \
 conversation run in someone else's browser. Everything after this \
@@ -151,6 +158,7 @@ fn valid_session_id(session: &str) -> bool {
 pub enum Handler {
     OllamaRoomTurn { endpoint: Endpoint, model: String },
     OpenClawRoomTurn { program: PathBuf, session: String, timeout: Duration },
+    HermesRoomTurn { program: PathBuf, profile: String, session: Option<String>, timeout: Duration },
     Inference { endpoint: Endpoint, model: String },
 }
 
@@ -173,6 +181,13 @@ impl Registry {
                 Handler::OllamaRoomTurn { model, .. } => format!("{name} via Ollama ({model})"),
                 Handler::OpenClawRoomTurn { program, session, timeout } => {
                     format!("{name} via OpenClaw ({} agent --session-id {session}, {}s limit)", program.display(), timeout.as_secs())
+                }
+                Handler::HermesRoomTurn { program, profile, session, timeout } => {
+                    let session = match session {
+                        Some(name) => format!("session \"{name}\""),
+                        None => "a new session each turn".to_string(),
+                    };
+                    format!("{name} via Hermes Agent ({} -p {profile} chat, {session}, {}s limit)", program.display(), timeout.as_secs())
                 }
                 Handler::Inference { model, .. } => format!("{name} via Ollama ({model})"),
             })
@@ -198,7 +213,7 @@ impl Registry {
                 failed(REASON_HANDLER_ERROR)
             }
             Err(_) => {
-                // Dropping the handler's future kills an OpenClaw process group with it.
+                // Dropping the handler's future kills an agent CLI's process group with it.
                 abort.abort();
                 failed(REASON_TIMEOUT)
             }
@@ -223,6 +238,52 @@ fn find_program(name: &str) -> Option<PathBuf> {
         return candidate.is_file().then(|| candidate.to_path_buf());
     }
     std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|dir| dir.join(name)).find(|p| p.is_file()))
+}
+
+fn timeout_seconds(env: &str, default: u64) -> Result<u64, String> {
+    match std::env::var(env) {
+        Ok(v) if !v.trim().is_empty() => v
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|s| (1..=1800).contains(s))
+            .ok_or_else(|| format!("{env}={v:?}: give whole seconds from 1 to 1800")),
+        _ => Ok(default),
+    }
+}
+
+/// Hermes profile names: lowercase letters, digits, `_` and `-`, starting with a letter or digit.
+fn valid_hermes_profile(profile: &str) -> bool {
+    let mut chars = profile.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && profile.len() <= 64
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Hermes exits on `-p <name>` for a profile that does not exist, so check at startup and say how
+/// to make it. Profiles live in `<hermes root>/profiles/<name>`; the root is `$HERMES_HOME` unless
+/// that already points at a profile, else `~/.hermes`. `default` is the root itself.
+fn check_hermes_profile(profile: &str) -> Result<(), String> {
+    let root = match std::env::var_os("HERMES_HOME").map(PathBuf::from) {
+        Some(home) if home.parent().and_then(Path::file_name).is_some_and(|n| n == "profiles") => {
+            home.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or(home)
+        }
+        Some(home) if !home.as_os_str().is_empty() => home,
+        _ => crate::crypto::expand_user("~/.hermes"),
+    };
+    if profile == "default" {
+        println!("  note: {HERMES_PROFILE_ENV}=default runs room turns in your main Hermes profile, with its memory and sessions");
+        return Ok(());
+    }
+    let home = root.join("profiles").join(profile);
+    if home.is_dir() {
+        return Ok(());
+    }
+    Err(format!(
+        "{HERMES_PROFILE_ENV}: there is no Hermes profile {profile:?} at {}. Create a separate one for rooms, \
+         so they never touch your own sessions or memory: hermes profile create {profile} --clone",
+        home.display()
+    ))
 }
 
 /// `default_registry()`, read from the environment at startup. An unusable setting stops the daemon.
@@ -255,19 +316,34 @@ pub fn registry_from_environment() -> Result<Registry, String> {
                 if !valid_session_id(&session) {
                     return Err(format!("{OPENCLAW_SESSION_ENV}={session:?}: use letters, digits and . _ : - (up to 128)"));
                 }
-                let timeout = match std::env::var(OPENCLAW_TIMEOUT_ENV) {
-                    Ok(v) if !v.trim().is_empty() => v
-                        .trim()
-                        .parse::<u64>()
-                        .ok()
-                        .filter(|s| (1..=1800).contains(s))
-                        .ok_or_else(|| format!("{OPENCLAW_TIMEOUT_ENV}={v:?}: give whole seconds from 1 to 1800"))?,
-                    _ => OPENCLAW_DEFAULT_TIMEOUT_SECONDS,
-                };
+                let timeout = timeout_seconds(OPENCLAW_TIMEOUT_ENV, OPENCLAW_DEFAULT_TIMEOUT_SECONDS)?;
                 // The registry's deadline sits above the process timeout, so the handler loses first and says why.
                 (Handler::OpenClawRoomTurn { program, session, timeout: Duration::from_secs(timeout) }, timeout as f64 + 30.0)
             }
-            other => return Err(format!("{BACKEND_ENV}={other:?}: use ollama or openclaw")),
+            "hermes" => {
+                let name = std::env::var(HERMES_BIN_ENV).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "hermes".into());
+                let program = find_program(name.trim())
+                    .ok_or_else(|| format!("{HERMES_BIN_ENV}: cannot find {:?} (set it to the hermes executable's path)", name.trim()))?;
+                let profile = std::env::var(HERMES_PROFILE_ENV).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| HERMES_DEFAULT_PROFILE.into());
+                let profile = profile.trim().to_string();
+                if !valid_hermes_profile(&profile) {
+                    return Err(format!("{HERMES_PROFILE_ENV}={profile:?}: use lowercase letters, digits, _ and - (up to 64)"));
+                }
+                check_hermes_profile(&profile)?;
+                let session = match std::env::var(HERMES_SESSION_ENV) {
+                    Ok(v) if !v.trim().is_empty() => {
+                        let v = v.trim().to_string();
+                        if !valid_session_id(&v) {
+                            return Err(format!("{HERMES_SESSION_ENV}={v:?}: use letters, digits and . _ : - (up to 128)"));
+                        }
+                        Some(v)
+                    }
+                    _ => None,
+                };
+                let timeout = timeout_seconds(HERMES_TIMEOUT_ENV, HERMES_DEFAULT_TIMEOUT_SECONDS)?;
+                (Handler::HermesRoomTurn { program, profile, session, timeout: Duration::from_secs(timeout) }, timeout as f64 + 30.0)
+            }
+            other => return Err(format!("{BACKEND_ENV}={other:?}: use ollama, openclaw or hermes")),
         };
         handlers.push((ROOM_TURN.to_string(), Arc::new(handler), deadline));
     }
@@ -294,8 +370,8 @@ pub fn room_messages(payload: &Value) -> Option<Vec<(String, String)>> {
     out.iter().any(|(role, content)| role != "system" && !py_strip(content).is_empty()).then_some(out)
 }
 
-/// What OpenClaw is sent as its one message: the preamble, then the room's messages labelled by role.
-pub fn openclaw_message(messages: &[(String, String)]) -> String {
+/// What an agent CLI (OpenClaw, Hermes) is sent as its one message: the preamble, then the room's messages labelled by role.
+pub fn agent_message(messages: &[(String, String)]) -> String {
     let mut text = String::from(PREAMBLE);
     for (role, content) in messages {
         text.push_str(&format!("\n\n[{role}]\n{content}"));
@@ -352,7 +428,15 @@ impl Handler {
                 if messages.iter().map(|(_, c)| py_len(c)).sum::<usize>() > MAX_TOTAL_CHARS {
                     return failed(REASON_TOO_LONG);
                 }
-                openclaw(program, session, *timeout, &openclaw_message(&messages)).await
+                let args = ["agent", "--session-id", session, "--json", "--message", &agent_message(&messages)].map(String::from);
+                run_agent_cli("openclaw", program, &args, None, *timeout, openclaw_reply).await
+            }
+            Handler::HermesRoomTurn { program, profile, session, timeout } => {
+                let Some(messages) = room_messages(&payload) else { return failed(REASON_INVALID_PAYLOAD) };
+                if messages.iter().map(|(_, c)| py_len(c)).sum::<usize>() > MAX_TOTAL_CHARS {
+                    return failed(REASON_TOO_LONG);
+                }
+                run_agent_cli("hermes", program, &hermes_args(profile, session.as_deref(), *timeout), Some(agent_message(&messages)), *timeout, hermes_reply).await
             }
         }
     }
@@ -434,7 +518,7 @@ async fn ollama(endpoint: &Endpoint, body: &Value, timeout: f64, read: impl Fn(&
     }
 }
 
-/// Kills the OpenClaw process group when the turn ends for any reason, timeout and deadline included.
+/// Kills an agent CLI's process group when the turn ends for any reason, timeout and deadline included.
 struct GroupKill(Option<i32>);
 
 impl Drop for GroupKill {
@@ -471,9 +555,9 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// The agent's reply, taken from what `openclaw agent --json` prints.
+/// An agent CLI's reply, taken from its structured output: the text and, when given, why it stopped and its output tokens.
 #[derive(Debug)]
-pub struct OpenClawReply {
+pub struct AgentReply {
     pub text: String,
     pub stop_reason: Option<String>,
     pub output_tokens: Option<Value>,
@@ -495,7 +579,7 @@ fn openclaw_result(stdout: &str) -> Option<pyjson::Map> {
 /// Only the agent's reply: `result.payloads[].text`, joined, or the run's final
 /// visible text if it sent no payloads. A run that is not `status: "ok"`, or was
 /// aborted, has no reply. The run metadata (prompt reports, traces, usage) is dropped.
-pub fn openclaw_reply(stdout: &str) -> Result<OpenClawReply, &'static str> {
+pub fn openclaw_reply(stdout: &str) -> Result<AgentReply, &'static str> {
     let doc = openclaw_result(stdout).ok_or("no JSON result in its output")?;
     if !doc.get("status").is_some_and(|s| s.is_str("ok")) {
         return Err("its result status is not ok");
@@ -523,27 +607,80 @@ pub fn openclaw_reply(stdout: &str) -> Result<OpenClawReply, &'static str> {
         .and_then(|m| m.get("agentMeta")?.as_object()?.get("usage")?.as_object()?.get("output"))
         .filter(|v| v.is_python_int())
         .cloned();
-    Ok(OpenClawReply { text, stop_reason, output_tokens })
+    Ok(AgentReply { text, stop_reason, output_tokens })
 }
 
-/// One turn through `openclaw agent --session-id <id> --json --message <text>`.
+/// `hermes -p <profile> chat --query-file - --format stream-json --source tool --run-budget <s> [-c <session> --create-if-missing]`.
 ///
-/// Arguments go straight to the program, never through a shell. The session id
-/// is the operator's (default "knights-circle"), so the agent's main
-/// conversation is never the one a room writes into. `--json` makes the result
-/// structured, so only the reply is returned, never banners or run metadata.
-/// stdout is read up to a limit, the whole run is under a timeout, and the
-/// process group is killed if either is passed or the turn is abandoned.
-async fn openclaw(program: &Path, session: &str, timeout: Duration, message: &str) -> HandlerResult {
+/// The room's message goes on stdin (`--query-file -`), never in argv, so the
+/// room's text does not show in `ps` and can never be read as a flag. The
+/// profile is a Hermes home of its own (sessions, memory, config), so rooms
+/// never touch the user's own sessions or memory. Without a session name each
+/// turn is a fresh session, since every turn already carries the whole room;
+/// `--source tool` keeps those out of Hermes' session pickers. `--run-budget`
+/// gives Hermes the same time limit, so the agent wraps up before it is stopped.
+pub fn hermes_args(profile: &str, session: Option<&str>, timeout: Duration) -> Vec<String> {
+    let mut args = ["-p", profile, "chat", "--query-file", "-", "--format", "stream-json", "--source", "tool", "--run-budget"]
+        .map(String::from)
+        .to_vec();
+    args.push(timeout.as_secs().to_string());
+    if let Some(name) = session {
+        args.extend(["-c", name, "--create-if-missing"].map(String::from));
+    }
+    args
+}
+
+/// Only the agent's reply from `hermes chat --format stream-json`: the `text` of
+/// the terminal `{"type":"result"}` event, which is the whole reply (the `text`
+/// deltas before it can stop early on a replay gap). Tool calls, tool output and
+/// anything not JSON (a stray log line) are ignored. A result whose `exit_code`
+/// is not 0, or with no text, has no reply.
+pub fn hermes_reply(stdout: &str) -> Result<AgentReply, &'static str> {
+    let result = stdout
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .filter_map(|line| match pyjson::loads(line.as_bytes()) {
+            Ok(Value::Object(event)) if event.get("type").is_some_and(|t| t.is_str("result")) => Some(event),
+            _ => None,
+        })
+        .next_back()
+        .ok_or("no result event in its output")?;
+    if !result.get("exit_code").is_some_and(|c| pyjson::canonical(c) == "0") {
+        return Err("its result exit_code is not 0");
+    }
+    let text = result.get("text").and_then(Value::as_str).map(|t| strip_ansi(t).trim().to_string()).unwrap_or_default();
+    if text.is_empty() {
+        return Err("its result has no reply text");
+    }
+    let output_tokens = result
+        .get("tokens")
+        .and_then(Value::as_object)
+        .and_then(|t| t.get("output"))
+        .filter(|v| v.is_python_int())
+        .cloned();
+    Ok(AgentReply { text, stop_reason: None, output_tokens })
+}
+
+/// One room turn through an agent's CLI (OpenClaw, Hermes).
+///
+/// Arguments go straight to the program, never through a shell; `stdin` is the
+/// message when the CLI reads it there, else stdin is closed. Each CLI is run in
+/// its structured-output mode, and `parse` takes only the reply from it, never
+/// banners or run metadata. stdout is read up to a limit, the whole run is under
+/// a timeout, and the process group is killed if either is passed or the turn is
+/// abandoned.
+async fn run_agent_cli(
+    label: &'static str,
+    program: &Path,
+    args: &[String],
+    stdin: Option<String>,
+    timeout: Duration,
+    parse: fn(&str) -> Result<AgentReply, &'static str>,
+) -> HandlerResult {
     let mut command = tokio::process::Command::new(program);
     command
-        .arg("agent")
-        .arg("--session-id")
-        .arg(session)
-        .arg("--json")
-        .arg("--message")
-        .arg(message)
-        .stdin(Stdio::null())
+        .args(args)
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("NO_COLOR", "1")
@@ -559,6 +696,12 @@ async fn openclaw(program: &Path, session: &str, timeout: Duration, message: &st
     };
     let pid = child.id().map(|pid| pid as i32);
     let _group = GroupKill(pid);
+    // Written while stdout is read, so a long message never waits on a full pipe; closed when done.
+    let feed = stdin.zip(child.stdin.take()).map(|(text, mut pipe)| async move {
+        use tokio::io::AsyncWriteExt;
+        let _ = pipe.write_all(text.as_bytes()).await;
+        let _ = pipe.shutdown().await;
+    });
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
 
@@ -572,8 +715,8 @@ async fn openclaw(program: &Path, session: &str, timeout: Duration, message: &st
                     return (buf, false);
                 }
                 buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > OPENCLAW_MAX_STDOUT_BYTES {
-                    buf.truncate(OPENCLAW_MAX_STDOUT_BYTES);
+                if buf.len() > AGENT_MAX_STDOUT_BYTES {
+                    buf.truncate(AGENT_MAX_STDOUT_BYTES);
                     // Stop the agent now, so its stderr closes and nobody waits for an answer nobody will read.
                     if let Some(pid) = pid {
                         // SAFETY: as in GroupKill.
@@ -593,18 +736,23 @@ async fn openclaw(program: &Path, session: &str, timeout: Duration, message: &st
                 if n == 0 {
                     return buf;
                 }
-                if buf.len() < OPENCLAW_MAX_STDERR_BYTES {
-                    buf.extend_from_slice(&chunk[..n.min(OPENCLAW_MAX_STDERR_BYTES - buf.len())]);
+                if buf.len() < AGENT_MAX_STDERR_BYTES {
+                    buf.extend_from_slice(&chunk[..n.min(AGENT_MAX_STDERR_BYTES - buf.len())]);
                 }
             }
         };
-        let ((out, overflowed), err) = tokio::join!(read_out, read_err);
+        let write_in = async {
+            if let Some(feed) = feed {
+                feed.await;
+            }
+        };
+        let ((out, overflowed), err, ()) = tokio::join!(read_out, read_err, write_in);
         (out, overflowed, err)
     };
     let (out, overflowed, err) = match tokio::time::timeout(timeout, run).await {
         Ok(read) => read,
         Err(_) => {
-            println!("[HANDLER] room-turn: openclaw passed its {}s limit; stopped", timeout.as_secs());
+            println!("[HANDLER] room-turn: {label} passed its {}s limit; stopped", timeout.as_secs());
             return failed(REASON_TIMEOUT);
         }
     };
@@ -613,25 +761,25 @@ async fn openclaw(program: &Path, session: &str, timeout: Duration, message: &st
         _ => None,
     };
     if overflowed {
-        println!("[HANDLER] room-turn: openclaw printed over {OPENCLAW_MAX_STDOUT_BYTES} bytes; stopped");
+        println!("[HANDLER] room-turn: {label} printed over {AGENT_MAX_STDOUT_BYTES} bytes; stopped");
         return failed(REASON_UPSTREAM_ERROR);
     }
     if !status.is_some_and(|s| s.success()) {
         let first = String::from_utf8_lossy(&err).lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(200).collect::<String>();
-        println!("[HANDLER] room-turn: openclaw exited with {status:?}: {first}");
+        println!("[HANDLER] room-turn: {label} exited with {status:?}: {first}");
         return failed(REASON_UPSTREAM_ERROR);
     }
-    let reply = match openclaw_reply(&String::from_utf8_lossy(&out)) {
+    let reply = match parse(&String::from_utf8_lossy(&out)) {
         Ok(reply) => reply,
         Err(why) => {
-            println!("[HANDLER] room-turn: openclaw gave no usable reply: {why}");
+            println!("[HANDLER] room-turn: {label} gave no usable reply: {why}");
             return failed(REASON_UPSTREAM_ERROR);
         }
     };
     let truncated = py_len(&reply.text) > ROOM_MAX_COMPLETION_CHARS;
     let text = py_prefix(&reply.text, ROOM_MAX_COMPLETION_CHARS);
     completed(object([
-        ("model", Value::str("openclaw")),
+        ("model", Value::str(label)),
         ("text", Value::str(text)),
         ("chars", Value::int(py_len(text) as i64)),
         ("truncated", Value::Bool(truncated)),
@@ -703,6 +851,48 @@ mod tests {
         ] {
             assert!(openclaw_reply(bad).is_err(), "{bad}");
         }
+    }
+
+    // Written field for field as Hermes v0.22.5's StreamJsonEmitter writes them (hermes_cli/stream_json.py).
+    const HERMES_STREAM: &str = include_str!("../tests/fixtures/hermes-stream-json.jsonl");
+
+    #[test]
+    fn hermes_reply_is_the_result_events_text_only() {
+        let reply = hermes_reply(HERMES_STREAM).unwrap();
+        assert_eq!(reply.text, "Start with Python, then build one small project.");
+        assert_eq!(reply.output_tokens.map(|v| pyjson::canonical(&v)).as_deref(), Some("14"));
+        assert!(reply.stop_reason.is_none());
+        // Tool output, even one shaped like a result, is never the reply; nor are stray non-JSON lines.
+        let noisy = format!("Hermes Agent v0.22.5\nwarning: something\n{HERMES_STREAM}");
+        assert_eq!(hermes_reply(&noisy).unwrap().text, reply.text);
+    }
+
+    #[test]
+    fn hermes_failures_have_no_reply() {
+        for bad in [
+            "",
+            "Start with Python.",
+            r#"{"type": "system", "subtype": "init", "model": "m", "session_id": ""}"#,
+            r#"{"type": "result", "session_id": "", "exit_code": 1, "text": "", "error": "No inference provider configured"}"#,
+            r#"{"type": "result", "session_id": "s", "exit_code": 130, "text": "partial"}"#,
+            r#"{"type": "result", "session_id": "s", "exit_code": 0, "text": "   "}"#,
+            r#"{"type": "result", "session_id": "s", "exit_code": 0, "text": "cut off"#,
+        ] {
+            assert!(hermes_reply(bad).is_err(), "{bad}");
+        }
+        // A replay gap: the deltas stopped early, the result carries the whole reply.
+        let gap = "{\"type\": \"text\", \"text\": \"Sta\"}\n{\"type\": \"result\", \"exit_code\": 0, \"text\": \"Start here.\", \"replay_gap\": true}\n";
+        assert_eq!(hermes_reply(gap).unwrap().text, "Start here.");
+    }
+
+    #[test]
+    fn hermes_is_run_in_its_own_profile_with_the_message_on_stdin() {
+        let args = hermes_args("knights-circle", None, Duration::from_secs(120));
+        assert_eq!(args, ["-p", "knights-circle", "chat", "--query-file", "-", "--format", "stream-json", "--source", "tool", "--run-budget", "120"]);
+        let pinned = hermes_args("kc", Some("room-thread"), Duration::from_secs(60));
+        assert_eq!(&pinned[pinned.len() - 3..], ["-c", "room-thread", "--create-if-missing"]);
+        assert!(valid_hermes_profile("knights-circle") && valid_hermes_profile("kc_2"));
+        assert!(!valid_hermes_profile("-p") && !valid_hermes_profile("Knights") && !valid_hermes_profile("a/b") && !valid_hermes_profile(""));
     }
 
     #[test]
