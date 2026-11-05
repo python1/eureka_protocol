@@ -162,10 +162,19 @@ a real `--json` result from it, trimmed to the reply and its basic run fields.
 
 ### The Hermes Agent backend
 
-> **Tested on Hermes Agent v0.22.7 under WSL2, by hand.** The command below,
-> run on a chat-only profile (0 of 27 tools, no MCP), gave `exit_code` 0 and a
-> reply in about 20 s. Timeouts, failures and named sessions have run only
-> against `conformance/fake_hermes.py`, a stand-in written from v0.22.7's source.
+**What has been tested on a real Hermes.** Hermes Agent v0.22.7 under WSL2
+(Ubuntu 24.04), with a chat-only profile (0 of 27 tools, no MCP,
+`agent.run_budget_seconds` 120), `qwen3:8b` through a local Ollama, and Knights
+Circle in Windows Chrome:
+
+- The daemon started with no warnings.
+- The room's *Check* proved the daemon's pinned key.
+- Two room turns completed, each reply signed by that key, with the expected
+  grants (the objective alone, then the objective and one message).
+
+Timeouts, failures, named sessions and the refusal of an unsafe profile have run
+only against `conformance/fake_hermes.py`, a stand-in written from v0.22.7's
+source. Other Hermes versions have not been tried.
 
 With `EUREKA_ROOM_TURN_BACKEND=hermes`, each room turn runs
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) headless:
@@ -448,7 +457,10 @@ reaches it at `http://127.0.0.1:8765`.
    Open *Advanced: bring your own bot*, then *Show room key*. Note the key and
    the `node_…` id.
 
-4. **Trust the room and start the daemon (Ubuntu).**
+4. **Trust the room and start the daemon (Ubuntu).** If `~/.eureka/trust.json`
+   already has peers from other setups, export `EUREKA_TRUST_PATH=<new file>`
+   first: a grant this daemon does not serve, such as `inference`, stops it at
+   startup.
 
        eureka-daemon trust add knights-circle-node_xxxxxxxx <room key> room-turn
        EUREKA_ROOM_TURN=1 EUREKA_ROOM_TURN_BACKEND=hermes \
