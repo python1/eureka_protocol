@@ -276,6 +276,12 @@ impl Identity {
             .map_err(|e| IdentityError(format!("cannot write identity file {}: {e}", target.display())))
     }
 
+    /// The forms of the private key a reply must never contain.
+    pub fn secret_forms(&self) -> Vec<String> {
+        let seed = self.key.to_bytes();
+        vec![to_hex(&seed), b64encode(&seed)]
+    }
+
     pub fn sign(&self, domain: &[u8], payload: &Value) -> String {
         b64encode(&self.key.sign(&domain_separated_bytes(domain, payload)).to_bytes())
     }
@@ -296,12 +302,12 @@ pub fn private_file_problem(target: &Path) -> std::io::Result<Option<String>> {
 
 /// A new directory for secrets, closed to other users: 0700, or a private access list on Windows.
 #[cfg(unix)]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
 #[cfg(windows)]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
     crate::winsec::make_dir_private(dir)
 }

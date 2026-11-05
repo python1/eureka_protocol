@@ -11,9 +11,16 @@ publish = false
 name = "eureka-daemon"
 path = "src/main.rs"
 
+[features]
+# HTTPS for webhook wake-ups, inside the binary. `ring` compiles some C, so a default build needs a
+# C compiler. `--no-default-features` is pure Rust: no C compiler, and no HTTPS webhooks.
+default = ["tls"]
+tls = ["dep:tokio-rustls", "dep:webpki-roots"]
+
+# Every dependency but the optional two is pure Rust.
 [dependencies]
-# Every dependency is pure Rust, so the Linux build links statically against musl
-# with no C toolchain.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "signal", "io-util"] }
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

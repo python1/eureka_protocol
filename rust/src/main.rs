@@ -11,6 +11,8 @@ mod isotime;
 mod node;
 mod pyjson;
 mod trust;
+mod turns;
+mod webhook;
 #[cfg(windows)]
 mod winsec;
 #[cfg(test)]
@@ -52,16 +54,21 @@ options:
 environment:
   EUREKA_IDENTITY_PATH, EUREKA_TRUST_PATH, EUREKA_CORS_ORIGINS,
   EUREKA_ROOM_TURN, EUREKA_ROOM_TURN_MODEL, EUREKA_INFERENCE,
-  EUREKA_ROOM_TURN_BACKEND (ollama | openclaw | hermes), EUREKA_OPENCLAW_BIN,
+  EUREKA_ROOM_TURN_BACKEND (ollama | openclaw | hermes | webhook | queue), EUREKA_OPENCLAW_BIN,
   EUREKA_OPENCLAW_SESSION, EUREKA_OPENCLAW_TIMEOUT, EUREKA_OPENCLAW_AGENT,
   EUREKA_OPENCLAW_REQUIRE_CHAT_ONLY, EUREKA_HERMES_BIN,
   EUREKA_HERMES_PROFILE, EUREKA_HERMES_SESSION, EUREKA_HERMES_TIMEOUT,
-  EUREKA_OLLAMA_URL
+  EUREKA_OLLAMA_URL, EUREKA_WEBHOOK_CONFIG, EUREKA_TURN_DIR, EUREKA_TURN_WAIT,
+  EUREKA_WEBHOOK_MAX_PER_HOUR
 
 trust file:
   eureka-daemon trust add NAME PUBLIC_KEY [CAPABILITY ...]
   eureka-daemon trust revoke NAME_OR_KEY [--reason TEXT]
-  eureka-daemon trust list";
+  eureka-daemon trust list
+
+room turns, for an agent answering through the queue:
+  eureka-daemon turn show [--wait SECONDS] [--json]
+  eureka-daemon turn answer ID [--text-file PATH]";
 
 /// `eureka-daemon 0.1.0 (macos aarch64)`, plus the commit when the build was given one, as CI's are.
 fn version_line() -> String {
@@ -343,6 +350,9 @@ async fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().is_some_and(|a| a == "trust") {
         return trust_command(&raw[1..]);
+    }
+    if raw.first().is_some_and(|a| a == "turn") {
+        return turns::command(&raw[1..]);
     }
     let arguments = parse_arguments();
 
