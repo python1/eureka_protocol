@@ -51,7 +51,7 @@ const ROOM_MAX_COMPLETION_TOKENS: i64 = 1024;
 const ROOM_MAX_COMPLETION_CHARS: usize = 12_000;
 const ROOM_TIMEOUT_SECONDS: f64 = 120.0;
 const ROOM_DEADLINE_SECONDS: f64 = 150.0;
-const DEFAULT_ROOM_MODEL: &str = "qwen3:8b";
+pub const DEFAULT_ROOM_MODEL: &str = "qwen3:8b";
 
 const INFERENCE: &str = "inference";
 const INFERENCE_MODEL: &str = "qwen3:8b";
@@ -136,6 +136,18 @@ pub struct Endpoint {
     addr: std::net::SocketAddr,
     host_header: String,
     path: String,
+}
+
+impl Endpoint {
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+}
+
+/// Where this daemon reaches Ollama.
+pub fn ollama_base() -> String {
+    let base = std::env::var(OLLAMA_URL_ENV).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| OLLAMA_BASE.into());
+    base.trim().trim_end_matches('/').to_string()
 }
 
 /// `_require_loopback`: a literal loopback address, never a name, plain http.
@@ -281,7 +293,7 @@ fn switch(name: &str) -> Result<bool, String> {
 /// process groups, which clean up after a turn, do not exist there. The Linux build under WSL has none of these limits.
 pub const NATIVE_WINDOWS_CLI_BACKENDS: [&str; 2] = ["openclaw", "hermes"];
 
-fn refuse_on_native_windows(backend: &str) -> Result<(), String> {
+pub fn refuse_on_native_windows(backend: &str) -> Result<(), String> {
     if cfg!(windows) && NATIVE_WINDOWS_CLI_BACKENDS.contains(&backend) {
         return Err(format!(
             "{BACKEND_ENV}={backend:?} is not available in the native Windows build. Run the Linux build of \
@@ -291,7 +303,7 @@ fn refuse_on_native_windows(backend: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn find_program(name: &str) -> Option<PathBuf> {
+pub fn find_program(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
     if name.contains('/') {
         return candidate.is_file().then(|| candidate.to_path_buf());
@@ -463,6 +475,22 @@ pub fn hermes_run_budget_problem(value: &Value, timeout: u64) -> Option<String> 
     }
 }
 
+/// What a seat needs of its Hermes profile: it exists, and it is chat only.
+pub fn check_hermes_seat(program: &Path, profile: &str) -> Result<(), String> {
+    if !valid_hermes_profile(profile) {
+        return Err(format!("{profile:?} is not a Hermes profile name: use lowercase letters, digits, _ and - (up to 64)"));
+    }
+    check_hermes_profile(profile)?;
+    check_hermes_tools(program, profile)
+}
+
+/// The startup warning about Hermes' own time limit, for `doctor`.
+pub fn warn_about_hermes_budget_for_seat(program: &Path, profile: &str) {
+    if let Ok(timeout) = timeout_seconds(HERMES_TIMEOUT_ENV, HERMES_DEFAULT_TIMEOUT_SECONDS) {
+        warn_about_hermes_run_budget(program, profile, timeout);
+    }
+}
+
 /// `hermes chat` is a client of the profile's gateway, so stopping it ends the daemon's wait, not the
 /// turn, and it refuses `--run-budget`. Hermes' own budget is set in its config, so warn when it is off
 /// or longer than the daemon waits. It is advice: it never stops the daemon.
@@ -578,6 +606,16 @@ fn openclaw_agent_tools(program: &Path, agent: &str) -> Result<Value, String> {
 /// same finding stops the daemon, as does a policy that cannot be read.
 fn check_openclaw_tools(program: &Path, agent: Option<&str>) -> Result<(), String> {
     let require = switch(OPENCLAW_REQUIRE_CHAT_ONLY_ENV)?;
+    let Some(message) = openclaw_lockdown_problem(program, agent) else { return Ok(()) };
+    if require {
+        return Err(message);
+    }
+    println!("  {message}");
+    Ok(())
+}
+
+/// Why this agent is not chat only, with the commands that fix it. None when it is.
+pub fn openclaw_lockdown_problem(program: &Path, agent: Option<&str>) -> Option<String> {
     let id = agent.unwrap_or("knights-circle");
     let problem = match agent {
         None => Some(format!("{OPENCLAW_AGENT_ENV} is not set, so room turns reach OpenClaw's default agent with whatever tools it has")),
@@ -589,20 +627,15 @@ fn check_openclaw_tools(program: &Path, agent: Option<&str>) -> Result<(), Strin
             Err(e) => Some(format!("agent {id:?} could not be checked: {e}")),
         },
     };
-    let Some(problem) = problem else { return Ok(()) };
-    let message = format!(
+    let problem = problem?;
+    Some(format!(
         "WARNING: {problem}. Room text includes other models' replies, so a room agent should not be able to run commands or touch files. To set one up:\n  \
          openclaw agents add {id} --workspace ~/.openclaw/workspace-{id} --non-interactive\n  \
          openclaw config set agents.entries.{id}.tools.profile minimal\n  \
          openclaw config set agents.entries.{id}.tools.deny '[{}]' --strict-json\n\
          then start the daemon with {OPENCLAW_AGENT_ENV}={id}. See rust/README.md, The OpenClaw backend.",
         OPENCLAW_FORBIDDEN_GROUPS.map(|g| format!("\"{g}\"")).join(",")
-    );
-    if require {
-        return Err(message);
-    }
-    println!("  {message}");
-    Ok(())
+    ))
 }
 
 /// `openclaw agent ...` for one turn. The room's text is one argument, never parsed by a shell.
@@ -619,9 +652,9 @@ pub fn openclaw_args(agent: Option<&str>, session: &str, message: &str) -> Vec<S
 const GROK_BOT_GUIDANCE: &str = "  For automatic replies, set Execution on this computer to Always allow in the Grok Bot app.
   With Always allow, other models' room text reaches a bot that can run commands on that computer; a separate
   user account or machine adds safety. With Ask every time, someone approves each command, and a late approval
-  means retrying the turn. The desktop app must stay open.";
+  means retrying the turn. The desktop app must stay open. Each room turn wakes the bot and uses your Grok Bot usage.";
 
-fn turn_wait_seconds() -> Result<u64, String> {
+pub fn turn_wait_seconds() -> Result<u64, String> {
     let Ok(raw) = std::env::var(TURN_WAIT_ENV) else { return Ok(TURN_DEFAULT_WAIT_SECONDS) };
     if raw.trim().is_empty() {
         return Ok(TURN_DEFAULT_WAIT_SECONDS);
@@ -646,8 +679,7 @@ fn wakes_per_hour() -> Result<usize, String> {
 
 /// `default_registry()`, read from the environment at startup. An unusable setting stops the daemon.
 pub fn registry_from_environment() -> Result<Registry, String> {
-    let base = std::env::var(OLLAMA_URL_ENV).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| OLLAMA_BASE.into());
-    let base = base.trim().trim_end_matches('/').to_string();
+    let base = ollama_base();
     let mut handlers = Vec::new();
     if switch(INFERENCE_ENV)? {
         let endpoint = loopback_endpoint(&format!("{base}/api/generate"))?;
@@ -1107,12 +1139,12 @@ pub fn hermes_reply(stdout: &str) -> Result<AgentReply, &'static str> {
 pub fn stall_reason(agent: Option<AgentKind>, read: bool, seconds: u64) -> String {
     match (agent, read) {
         (Some(AgentKind::GrokBot), false) => format!(
-            "not_read: your Grok Bot was woken but did not read this turn in {seconds} seconds. It is probably waiting for your approval, or its desktop app is closed. \
-             Approve it in the Grok Bot app, or set Execution on this computer to Always allow, then retry the turn."
+            "not_read: your Grok Bot was woken but hasn't answered: it did not read this turn in {seconds} seconds. It is probably waiting for your approval, or its desktop app is closed. \
+             Approve it in the Grok Bot app, or set Execution on this computer to Always allow, then retry the turn. To check the setup, run eureka-daemon doctor."
         ),
         (Some(AgentKind::GrokBot), true) => format!(
-            "no_answer: your Grok Bot read this turn but did not answer in {seconds} seconds. It may be waiting for your approval to send its reply. \
-             Approve it in the Grok Bot app, or set Execution on this computer to Always allow, then retry the turn."
+            "no_answer: your Grok Bot was woken and read this turn but hasn't answered in {seconds} seconds. It may be waiting for your approval to send its reply. \
+             Approve it in the Grok Bot app, or set Execution on this computer to Always allow, then retry the turn. To check the setup, run eureka-daemon doctor."
         ),
         (Some(AgentKind::Generic), false) => format!(
             "not_read: your agent was woken but did not read this turn in {seconds} seconds. It may be waiting for approval or not running. Check it, then retry the turn."

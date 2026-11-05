@@ -10,6 +10,7 @@ mod http;
 mod isotime;
 mod node;
 mod pyjson;
+mod seat;
 mod trust;
 mod turns;
 mod webhook;
@@ -59,7 +60,13 @@ environment:
   EUREKA_OPENCLAW_REQUIRE_CHAT_ONLY, EUREKA_HERMES_BIN,
   EUREKA_HERMES_PROFILE, EUREKA_HERMES_SESSION, EUREKA_HERMES_TIMEOUT,
   EUREKA_OLLAMA_URL, EUREKA_WEBHOOK_CONFIG, EUREKA_TURN_DIR, EUREKA_TURN_WAIT,
-  EUREKA_WEBHOOK_MAX_PER_HOUR
+  EUREKA_WEBHOOK_MAX_PER_HOUR, EUREKA_SEAT_DIR, EUREKA_PID_FILE
+
+a seat, the guided way to run this (folder: --dir, default ~/.eureka/seat):
+  eureka-daemon setup [--dir DIR]
+  eureka-daemon start [--dir DIR]
+  eureka-daemon stop [--dir DIR]
+  eureka-daemon doctor [--dir DIR] [--wake]
 
 trust file:
   eureka-daemon trust add NAME PUBLIC_KEY [CAPABILITY ...]
@@ -67,8 +74,8 @@ trust file:
   eureka-daemon trust list
 
 room turns, for an agent answering through the queue:
-  eureka-daemon turn show [--wait SECONDS] [--json]
-  eureka-daemon turn answer ID [--text-file PATH]";
+  eureka-daemon turn show [--wait SECONDS] [--json] [--queue DIR]
+  eureka-daemon turn answer ID [--text-file PATH] [--queue DIR]";
 
 /// `eureka-daemon 0.1.0 (macos aarch64)`, plus the commit when the build was given one, as CI's are.
 fn version_line() -> String {
@@ -354,6 +361,9 @@ async fn main() -> ExitCode {
     if raw.first().is_some_and(|a| a == "turn") {
         return turns::command(&raw[1..]);
     }
+    if let Some(verb) = raw.first().filter(|a| ["setup", "start", "stop", "doctor"].contains(&a.as_str())) {
+        return seat::command(verb, &raw[1..]).await;
+    }
     let arguments = parse_arguments();
 
     let registry = match handlers::registry_from_environment() {
@@ -394,6 +404,14 @@ async fn main() -> ExitCode {
         }
     };
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(arguments.port);
+    // `start` tracks this file. Written here, after the bind, so it always names the process listening.
+    let pid_file = std::env::var_os(seat::PID_FILE_ENV).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+    if let Some(path) = &pid_file {
+        if let Err(e) = seat::write_pid_file(path, bound_port) {
+            eprintln!("eureka-daemon: cannot write {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    }
 
     let node = node::Node::new(identity, capabilities.clone(), trust);
     println!("Starting Eureka Daemon API as {}", node.node_id);
@@ -426,6 +444,9 @@ async fn main() -> ExitCode {
         }
     }
     println!("Shutting down");
+    if let Some(path) = &pid_file {
+        let _ = std::fs::remove_file(path);
+    }
     ExitCode::SUCCESS
 }
 
