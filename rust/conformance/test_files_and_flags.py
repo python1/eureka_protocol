@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -99,6 +100,78 @@ def run_binary(*args, env=None):
 def test_bad_flags_and_settings_stop_with_a_reason(args, env, words):
     result = run_binary(str(free_port()), *args, env=env) if args[:1] != ["abc"] else run_binary(*args, env=env)
     assert result.returncode != 0 and words in result.stderr
+
+
+def test_trust_revoke_writes_what_the_python_revoke_writes_and_is_permanent(tmp_path):
+    seed = {"version": 3, "algorithm": "ed25519",
+            "peers": {"room": {"public_key": "ab" * 32, "capabilities": ["room-turn"]}},
+            "revoked": [{"public_key": "cd" * 32, "reason": "lost"}]}
+    for name in ("py.json", "rust.json"):
+        (tmp_path / name).write_text(json.dumps(seed))
+    subprocess.run([sys.executable, "-c", f"""
+import json, os, sys
+sys.path.insert(0, {str(HERE.parents[2])!r})
+from pathlib import Path
+from eureka_protocol.src.eureka_daemon.trust import TrustList
+p = Path(os.environ['EUREKA_TRUST_PATH'])
+t = TrustList.load(p)
+t.revoke('{"ab" * 32}', reason=' browser data cleared ')
+t.revoke('{"EF" * 32}')
+p.write_text(json.dumps(t.to_document(), indent=2) + '\\n')
+"""], env={**os.environ, "EUREKA_TRUST_PATH": str(tmp_path / "py.json")}, check=True)
+    env = {**os.environ, "EUREKA_TRUST_PATH": str(tmp_path / "rust.json")}
+    def trust(*args):
+        return subprocess.run([str(rust_binary()), "trust", *args], env=env, capture_output=True, text=True)
+    named = trust("revoke", "room", "--reason", " browser data cleared ")
+    assert named.returncode == 0 and "revoked room" in named.stdout and "Restart the daemon" in named.stdout
+    assert trust("revoke", "EF" * 32).returncode == 0
+    def shape(name):
+        document = json.loads((tmp_path / name).read_text())
+        for entry in document["revoked"]:
+            when = entry.pop("revoked_at", None)
+            assert when is None or datetime.fromisoformat(when).utcoffset() == timedelta(0)
+        return document
+    assert shape("rust.json") == shape("py.json")
+    assert list(json.loads((tmp_path / "rust.json").read_text())["revoked"][1]) == list(json.loads((tmp_path / "py.json").read_text())["revoked"][1])
+    assert (tmp_path / "rust.json").stat().st_mode & 0o077 == 0
+    # Permanent: it cannot come back, a daemon started now refuses it, and the listing shows it.
+    back = trust("add", "room", "ab" * 32, "room-turn")
+    assert back.returncode == 1 and "revoked" in back.stderr
+    assert "0 trusted, 3 revoked" in trust("list").stdout
+
+
+def test_trust_revoke_refuses_what_it_cannot_identify_and_keeps_the_file(tmp_path):
+    path = tmp_path / "trust.json"
+    original = json.dumps({"version": 3, "algorithm": "ed25519", "peers": {"room": {"public_key": "ab" * 32, "capabilities": []}}, "revoked": []})
+    path.write_text(original)
+    env = {**os.environ, "EUREKA_TRUST_PATH": str(path)}
+    def trust(*args):
+        return subprocess.run([str(rust_binary()), "trust", *args], env=env, capture_output=True, text=True)
+    unknown = trust("revoke", "no-such-room")
+    assert unknown.returncode == 1 and "no peer named" in unknown.stderr
+    assert trust("revoke").returncode == 2
+    assert trust("revoke", "room", "--reason").returncode == 2
+    assert trust("revoke", "room", "--bogus", "x").returncode == 2
+    assert path.read_text() == original
+
+
+def test_a_revoked_room_is_refused_by_the_daemon(start, tmp_path):
+    node = client_node("room")
+    daemon = start(peers=grant(node, "room-turn"))
+    trusting(node, daemon)
+    assert handshake(node, daemon)["authenticated"] is True
+    path = daemon.trust
+    daemon.stop()
+    named = next(iter(json.loads(path.read_text())["peers"]))
+    out = subprocess.run([str(rust_binary()), "trust", "revoke", named], env={**os.environ, "EUREKA_TRUST_PATH": str(path)}, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    document = json.loads(path.read_text())
+    assert document["peers"] == {} and document["revoked"][0]["public_key"] == node.public_key_hex
+    # A daemon started on what the command wrote refuses this room.
+    again = start(revoked=document["revoked"])
+    trusting(node, again)
+    answer = handshake(node, again)
+    assert answer["authenticated"] is False and answer["reason"] == "revoked_key"
 
 
 def test_version_names_the_package_version_and_platform():

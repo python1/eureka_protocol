@@ -53,12 +53,14 @@ environment:
   EUREKA_IDENTITY_PATH, EUREKA_TRUST_PATH, EUREKA_CORS_ORIGINS,
   EUREKA_ROOM_TURN, EUREKA_ROOM_TURN_MODEL, EUREKA_INFERENCE,
   EUREKA_ROOM_TURN_BACKEND (ollama | openclaw | hermes), EUREKA_OPENCLAW_BIN,
-  EUREKA_OPENCLAW_SESSION, EUREKA_OPENCLAW_TIMEOUT, EUREKA_HERMES_BIN,
+  EUREKA_OPENCLAW_SESSION, EUREKA_OPENCLAW_TIMEOUT, EUREKA_OPENCLAW_AGENT,
+  EUREKA_OPENCLAW_REQUIRE_CHAT_ONLY, EUREKA_HERMES_BIN,
   EUREKA_HERMES_PROFILE, EUREKA_HERMES_SESSION, EUREKA_HERMES_TIMEOUT,
   EUREKA_OLLAMA_URL
 
 trust file:
   eureka-daemon trust add NAME PUBLIC_KEY [CAPABILITY ...]
+  eureka-daemon trust revoke NAME_OR_KEY [--reason TEXT]
   eureka-daemon trust list";
 
 /// `eureka-daemon 0.1.0 (macos aarch64)`, plus the commit when the build was given one, as CI's are.
@@ -234,12 +236,16 @@ fn parse_arguments() -> Arguments {
 }
 
 const TRUST_USAGE: &str = "usage: eureka-daemon trust add NAME PUBLIC_KEY [CAPABILITY ...]
+       eureka-daemon trust revoke NAME_OR_KEY [--reason TEXT]
        eureka-daemon trust list
 
 Edits the trust file (EUREKA_TRUST_PATH, default ~/.eureka/trust.json) the way
 the Python TrustList.add + to_document does. For a Knights Circle room key:
 
   eureka-daemon trust add knights-circle-node_xxxxxxxx <room key> room-turn
+
+Revoking is permanent: the key stays refused for as long as the revocation is in
+the file, and `trust add` will not bring it back.
 
 Restart the daemon afterwards: it reads the file at startup.";
 
@@ -270,6 +276,28 @@ fn trust_command(args: &[String]) -> ExitCode {
             }
             let granted = if caps.is_empty() { "nothing".to_string() } else { caps.join(", ") };
             println!("trusted {name} with {granted} in {}", path.display());
+            ExitCode::SUCCESS
+        }
+        [verb, target, rest @ ..] if verb == "revoke" => {
+            let reason = match rest {
+                [] => None,
+                [flag, text] if flag == "--reason" => Some(text.as_str()),
+                _ => {
+                    eprintln!("{TRUST_USAGE}");
+                    return ExitCode::from(2);
+                }
+            };
+            // A name, or else a key: a key that was never trusted can be refused in advance.
+            let key = list.key_named(target).unwrap_or_else(|| target.clone());
+            let held = match list.revoke(&key, reason) {
+                Ok(held) => held,
+                Err(_) => return fail(&format!("no peer named {target:?}, and it is not a public key; see `eureka-daemon trust list`")),
+            };
+            if let Err(e) = list.save(&path) {
+                return fail(&format!("cannot write {}: {e}", path.display()));
+            }
+            println!("revoked {} in {}", held.unwrap_or_else(|| "a key that was not trusted".to_string()), path.display());
+            println!("It stays refused and `trust add` will not bring it back. Restart the daemon: a running one still trusts it.");
             ExitCode::SUCCESS
         }
         [verb] if verb == "list" => {

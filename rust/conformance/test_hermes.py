@@ -80,7 +80,11 @@ def test_a_turn_runs_hermes_in_its_profile_with_the_room_on_stdin(hermes, ollama
     assert call["argv"] == ["-p", "knights-circle", "chat", "--query-file", "-", "--format", "stream-json",
                             "--source", "tool"]
     assert call["stdin"].startswith("You are an external agent taking one turn in a Knights Circle room")
-    assert "[system]\nYou are the Critic.\n\n[user]\nPlan the beds\n\n[user]\nAnd the path; rm -rf / $(whoami) `id`" in call["stdin"]
+    assert "untrusted data" in call["stdin"]
+    assert [json.loads(line) for line in call["stdin"].splitlines() if line.startswith('{"role"')] == [
+        {"role": "room_instructions", "content": "You are the Critic."},
+        {"role": "user", "content": "Plan the beds"},
+        {"role": "user", "content": "And the path; rm -rf / $(whoami) `id`"}]
     assert call["pgid"] == call["pid"]
     # The profile's tool settings were read from Hermes itself, once, at startup.
     assert [e["config"] for e in logged(log) if "config" in e] == [
@@ -218,13 +222,15 @@ def test_the_set_command_form_and_disabled_mcp_servers_are_accepted(hermes, tmp_
 
 
 def test_an_old_grant_stops_the_daemon_and_the_error_says_how_to_fix_it(start, tmp_path, hermes_home):
+    old = client_node("old")
     with pytest.raises(RuntimeError, match="does not advertise") as refused:
-        start(peers=grant(client_node("old"), "inference"),
+        start(peers=grant(old, "inference"),
               env={"EUREKA_INFERENCE": "0", "EUREKA_ROOM_TURN_BACKEND": "hermes", "EUREKA_HERMES_BIN": FAKE, "HERMES_HOME": str(hermes_home),
                    "FAKE_HERMES_CONFIG": settings(tmp_path, CHAT_ONLY)})
     message = str(refused.value)
     assert "granted capability 'inference'" in message
     assert "EUREKA_TRUST_PATH=" in message and "EUREKA_INFERENCE=1" in message
+    assert f"eureka-daemon trust revoke '{old.node_id}'" in message
 
 
 def test_unreadable_hermes_settings_stop_the_daemon(start, tmp_path, hermes_home):
