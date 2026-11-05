@@ -62,6 +62,12 @@ jobs:
         working-directory: rust
         run: cargo build --release --locked --target "${{ matrix.target }}"
 
+      # The linker adds an ad-hoc signature on arm64, where one is required, but not on x64.
+      - name: Ad-hoc sign the macOS x64 binary
+        if: matrix.target == 'x86_64-apple-darwin'
+        working-directory: rust/target/${{ matrix.target }}/release
+        run: codesign --force --sign - eureka-daemon
+
       - name: Smoke test
         run: rust/ci/smoke.sh "rust/target/${{ matrix.target }}/release/eureka-daemon${{ runner.os == 'Windows' && '.exe' || '' }}"
 
