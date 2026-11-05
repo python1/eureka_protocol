@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Runs a built eureka-daemon the way a stranger would, on the machine that built it:
+#   rust/ci/smoke.sh path/to/eureka-daemon
+# Everything lives in a temporary home and on a port the system picks.
+set -euo pipefail
+
+binary=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+expected=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$(dirname "$0")/../Cargo.toml" | head -1)
+home=$(mktemp -d)
+log="$home/daemon.log"
+daemon=
+cleanup() {
+  if [ -n "$daemon" ]; then kill "$daemon" 2>/dev/null || true; fi
+  rm -rf "$home"
+}
+trap cleanup EXIT
+fail() { echo "smoke: $*" >&2; [ -f "$log" ] && cat "$log" >&2; exit 1; }
+
+windows=
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) windows=1 ;; esac
+if [ -n "$windows" ]; then export USERPROFILE="$(cygpath -w "$home")"; else export HOME="$home"; fi
+unset EUREKA_IDENTITY_PATH EUREKA_TRUST_PATH EUREKA_ROOM_TURN EUREKA_ROOM_TURN_BACKEND
+
+echo "== version"
+version=$("$binary" --version | tr -d '\r')
+echo "$version"
+case "$version" in "eureka-daemon $expected ("*) ;; *) fail "expected version $expected, got: $version" ;; esac
+[ "$("$binary" -V | tr -d '\r')" = "$version" ] || fail "-V and --version differ"
+
+echo "== trust file"
+room_key=$(printf '11%.0s' $(seq 1 32))
+"$binary" trust add smoke-room "$room_key" room-turn
+"$binary" trust list | tr -d '\r' | grep -q "smoke-room  $room_key  room-turn" || fail "trust list did not show the room"
+[ -f "$home/.eureka/trust.json" ] || fail "trust file is not in the home directory"
+
+start() {
+  : >"$log"
+  EUREKA_ROOM_TURN=1 "$binary" 0 --cors-origin https://example.test >"$log" 2>&1 &
+  daemon=$!
+  url=
+  for _ in $(seq 1 100); do
+    url=$(tr -d '\r' <"$log" | sed -n 's/^  listening on \(http:.*\)$/\1/p')
+    [ -n "$url" ] && break
+    kill -0 "$daemon" 2>/dev/null || fail "the daemon stopped at startup"
+    sleep 0.1
+  done
+  [ -n "$url" ] || fail "the daemon did not start listening"
+  node=$(tr -d '\r' <"$log" | sed -n 's/^Starting Eureka Daemon API as \(node_.*\)$/\1/p')
+  case "$url" in http://127.0.0.1:*) ;; *) fail "expected loopback by default, got $url" ;; esac
+}
+
+stop() {
+  kill "$daemon"
+  wait "$daemon" 2>/dev/null || true
+  daemon=
+}
+
+echo "== first start makes an identity"
+start
+first=$node
+[ -f "$home/.eureka/identity.key" ] || fail "identity file is not in the home directory"
+curl --silent --show-error --fail --max-time 10 "$url/v1/manifest" | tr -d '\r' | grep -q "\"node_id\":\"$first\"" || fail "manifest did not name $first"
+# Windows has no SIGTERM to send from here, so only Unix checks the clean exit.
+if [ -z "$windows" ]; then
+  kill -TERM "$daemon"
+  wait "$daemon" 2>/dev/null || true
+  daemon=
+  tr -d '\r' <"$log" | grep -q '^Shutting down$' || fail "SIGTERM did not shut down cleanly"
+else
+  stop
+fi
+
+echo "== second start loads the same identity"
+start
+[ "$node" = "$first" ] || fail "expected $first again, got $node"
+stop
+
+if [ -n "$windows" ]; then
+  echo "== native Windows refuses the agent CLI backends"
+  for backend in openclaw hermes; do
+    if out=$(EUREKA_ROOM_TURN=1 EUREKA_ROOM_TURN_BACKEND=$backend "$binary" 0 2>&1); then fail "$backend started"; fi
+    case "$out" in *WSL*) ;; *) fail "$backend refusal does not mention WSL: $out" ;; esac
+  done
+fi
+echo "smoke: ok"

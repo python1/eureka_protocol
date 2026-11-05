@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -175,17 +176,35 @@ pub struct Identity {
 
 /// `Path.expanduser()` for the two forms anyone writes: `~` and `~/...`.
 pub fn expand_user(raw: &str) -> PathBuf {
-    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    #[cfg(windows)]
+    let rest = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"));
+    #[cfg(not(windows))]
+    let rest = raw.strip_prefix("~/");
     if raw == "~" {
-        if let Some(h) = home() {
+        if let Some(h) = home_dir() {
             return h;
         }
-    } else if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(h) = home() {
+    } else if let Some(rest) = rest {
+        if let Some(h) = home_dir() {
             return h.join(rest);
         }
     }
     PathBuf::from(raw)
+}
+
+#[cfg(not(windows))]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// As Python's `expanduser` on Windows: `%USERPROFILE%`, then `%HOMEDRIVE%%HOMEPATH%`.
+#[cfg(windows)]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| {
+        let mut home = std::env::var_os("HOMEDRIVE")?;
+        home.push(std::env::var_os("HOMEPATH")?);
+        Some(PathBuf::from(home))
+    })
 }
 
 pub fn default_eureka_dir() -> PathBuf {
@@ -223,11 +242,8 @@ impl Identity {
             std::io::ErrorKind::NotFound => IdentityError(format!("no identity file at {shown}")),
             _ => IdentityError(format!("cannot read identity file {shown}: {e}")),
         })?;
-        let mode = fs::metadata(target).map_err(|e| IdentityError(e.to_string()))?.permissions().mode() & 0o7777;
-        if mode & 0o077 != 0 {
-            return Err(IdentityError(format!(
-                "identity file {shown} is group/world accessible (mode {mode:04o}); expected 0600"
-            )));
+        if let Some(problem) = private_file_problem(target).map_err(|e| IdentityError(e.to_string()))? {
+            return Err(IdentityError(format!("identity file {shown} {problem}")));
         }
         let document = pyjson::loads_str(&raw).map_err(|_| IdentityError(format!("identity file {shown} is not valid JSON")))?;
         let doc = document.as_object().ok_or_else(|| IdentityError(format!("identity file {shown} is not valid JSON")))?;
@@ -265,17 +281,58 @@ impl Identity {
     }
 }
 
-/// Write secret bytes atomically at mode 0600, creating the directory 0700.
+/// Why a secret file is not private to this user, if it is not: read by the caller at load, so a
+/// key other accounts can read is refused rather than used.
+#[cfg(unix)]
+pub fn private_file_problem(target: &Path) -> std::io::Result<Option<String>> {
+    let mode = fs::metadata(target)?.permissions().mode() & 0o7777;
+    Ok((mode & 0o077 != 0).then(|| format!("is group/world accessible (mode {mode:04o}); expected 0600")))
+}
+
+#[cfg(windows)]
+pub fn private_file_problem(target: &Path) -> std::io::Result<Option<String>> {
+    crate::winsec::private_file_problem(target)
+}
+
+/// A new directory for secrets, closed to other users: 0700, or a private access list on Windows.
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+}
+
+#[cfg(windows)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    crate::winsec::make_dir_private(dir)
+}
+
+/// A new, empty file for secrets, closed to other users before anything is written to it.
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+
+#[cfg(windows)]
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    crate::winsec::make_file_private(path)?;
+    Ok(file)
+}
+
+/// Write secret bytes atomically in a file only this user can read (0600, or a private access
+/// list on Windows), creating the directory the same way.
 pub fn write_private_file(target: &Path, data: &[u8]) -> std::io::Result<()> {
     let dir = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     if !dir.exists() {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        create_private_dir(dir)?;
     }
     let temp = dir.join(format!(".identity-{}.tmp", token_hex16()));
     let result = (|| {
-        let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
+        let mut file = create_private_file(&temp)?;
         file.write_all(data)?;
         file.sync_all()?;
+        // Windows cannot be relied on to rename a file that is still open.
+        drop(file);
         fs::rename(&temp, target)
     })();
     if result.is_err() {
@@ -288,6 +345,58 @@ pub fn write_private_file(target: &Path, data: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("eureka-crypto-{}", token_hex16()))
+    }
+
+    #[test]
+    fn a_saved_identity_is_private_and_loads_as_the_same_node() {
+        let dir = temp_dir();
+        let path = dir.join("nested").join("identity.key");
+        let made = Identity::load_or_create(&path).unwrap();
+        assert_eq!(private_file_problem(&path).unwrap(), None);
+        assert_eq!(Identity::load(&path).unwrap().node_id, made.node_id);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_identity_other_accounts_can_read_is_refused() {
+        let dir = temp_dir();
+        let path = dir.join("identity.key");
+        Identity::load_or_create(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let refused = Identity::load(&path).err().unwrap().to_string();
+        assert!(refused.contains("group/world accessible (mode 0644); expected 0600"), "{refused}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_identity_other_accounts_can_read_is_refused() {
+        let dir = temp_dir();
+        let path = dir.join("identity.key");
+        Identity::load_or_create(&path).unwrap();
+        // S-1-1-0 is Everyone.
+        let granted = std::process::Command::new("icacls").arg(&path).args(["/grant", "*S-1-1-0:R"]).output().unwrap();
+        assert!(granted.status.success(), "{granted:?}");
+        let refused = Identity::load(&path).err().unwrap().to_string();
+        assert!(refused.contains("S-1-1-0"), "{refused}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_secret_directory_is_private_too() {
+        let dir = temp_dir();
+        let path = dir.join("identity.key");
+        Identity::load_or_create(&path).unwrap();
+        let shown = std::process::Command::new("icacls").arg(&dir).output().unwrap();
+        let shown = String::from_utf8_lossy(&shown.stdout).to_string();
+        assert!(!shown.contains("BUILTIN\\Users"), "{shown}");
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn base64_matches_python_strict_decoding() {

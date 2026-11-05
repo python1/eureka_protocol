@@ -4,6 +4,7 @@ both directions, and the flags behave as server.py's do.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -98,6 +99,13 @@ def run_binary(*args, env=None):
 def test_bad_flags_and_settings_stop_with_a_reason(args, env, words):
     result = run_binary(str(free_port()), *args, env=env) if args[:1] != ["abc"] else run_binary(*args, env=env)
     assert result.returncode != 0 and words in result.stderr
+
+
+def test_version_names_the_package_version_and_platform():
+    for flag in ("--version", "-V", "--ver"):
+        out = run_binary(flag)
+        assert out.returncode == 0
+        assert re.fullmatch(r"eureka-daemon \d+\.\d+\.\d+ \(\w+ \w+(, [0-9a-f]{1,12})?\)\n", out.stdout), out.stdout
 
 
 def test_help_names_every_flag():

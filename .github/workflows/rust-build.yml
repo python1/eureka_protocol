@@ -1,0 +1,89 @@
+# Builds and tests eureka-daemon on each platform it ships for. It publishes nothing: no release,
+# no uploaded binaries, and no secrets. Standard runners are free on public repositories.
+name: rust-build
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/rust-build.yml"
+      - ".gitattributes"
+      - "rust/**"
+      - "vectors/**"
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/rust-build.yml"
+      - ".gitattributes"
+      - "rust/**"
+      - "vectors/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-15 }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm }
+          - { target: x86_64-pc-windows-msvc, runner: windows-2025, rustflags: "-C target-feature=+crt-static" }
+    env:
+      RUSTFLAGS: "-D warnings ${{ matrix.rustflags }}"
+      EUREKA_BUILD_COMMIT: ${{ github.sha }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 commit # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "${{ matrix.target }}"
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Test
+        working-directory: rust
+        run: cargo test --locked --target "${{ matrix.target }}"
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Smoke test
+        run: rust/ci/smoke.sh "rust/target/${{ matrix.target }}/release/eureka-daemon${{ runner.os == 'Windows' && '.exe' || '' }}"
+
+      - name: Check the binary is self-contained
+        working-directory: rust/target/${{ matrix.target }}/release
+        run: |
+          case "${{ runner.os }}" in
+            macOS)
+              codesign --verify --verbose eureka-daemon
+              otool -L eureka-daemon ;;
+            Linux)
+              file eureka-daemon
+              file eureka-daemon | grep -q 'static' ;;
+            Windows)
+              ls -l eureka-daemon.exe ;;
+          esac
+
+      - name: Record the checksum
+        working-directory: rust/target/${{ matrix.target }}/release
+        run: |
+          for file in eureka-daemon eureka-daemon.exe; do
+            if [ -f "$file" ]; then
+              if command -v sha256sum >/dev/null; then sha256sum "$file"; else shasum -a 256 "$file"; fi
+            fi
+          done

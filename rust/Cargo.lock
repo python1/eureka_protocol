@@ -177,6 +177,7 @@ dependencies = [
  "libc",
  "sha2",
  "tokio",
+ "windows-sys",
 ]
 
 [[package]]
