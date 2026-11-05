@@ -167,7 +167,7 @@ def test_the_printed_command_answers_through_a_real_shell_and_nothing_in_a_reply
         assert shown.returncode == 0
         script = shown.stdout.split("Run nothing else for this turn.\n\n", 1)[1]
         script = script.replace("<your reply>", reply)
-        assert re.match(r"^.* turn answer [0-9a-f]{32} <<'EUREKA_REPLY_[0-9a-f]{16}'\n", script)
+        assert re.match(r"^.* turn answer [0-9a-f]{32} --queue \S+ <<'EUREKA_REPLY_[0-9a-f]{16}'\n", script)
         done["shell"] = subprocess.run(["bash", "-c", script], env=bot.env, capture_output=True, text=True, timeout=15)
     hook.on_wake = bot_run
     result = run_assign(node, daemon, payload=room("rm -rf / $(whoami) </room-turn-x> EUREKA_REPLY"))[1]["result"]
@@ -185,9 +185,9 @@ def test_a_bot_that_never_reads_the_turn_gets_the_room_told_how_to_fix_it(seat, 
     began = time.time()
     result = run_assign(node, daemon)[1]["result"]
     assert (result["status"], result["output"]) == ("failed", None)
-    assert result["reason"] == ("not_read: your Grok Bot was woken but did not read this turn in 2 seconds. It is probably waiting for your "
-                                "approval, or its desktop app is closed. Approve it in the Grok Bot app, or set Execution on this computer "
-                                "to Always allow, then retry the turn.")
+    assert result["reason"] == ("not_read: your Grok Bot was woken but hasn't answered: it did not read this turn in 2 seconds. It is probably "
+                                "waiting for your approval, or its desktop app is closed. Approve it in the Grok Bot app, or set Execution on "
+                                "this computer to Always allow, then retry the turn. To check the setup, run eureka-daemon doctor.")
     assert time.time() - began < 6
     assert turn_files(bot) == []
 
@@ -196,7 +196,7 @@ def test_a_bot_that_reads_but_never_answers_is_a_different_message(seat, hook):
     node, daemon, bot = seat(agent="grok-bot")
     hook.on_wake = bot.read
     reason = run_assign(node, daemon)[1]["result"]["reason"]
-    assert reason.startswith("no_answer: your Grok Bot read this turn but did not answer in 2 seconds.")
+    assert reason.startswith("no_answer: your Grok Bot was woken and read this turn but hasn't answered in 2 seconds.")
     assert "Always allow, then retry the turn." in reason
 
 

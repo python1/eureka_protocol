@@ -25,13 +25,13 @@ const POLL: Duration = Duration::from_millis(200);
 /// How long `turn answer` waits for the daemon to take the reply.
 const PICKUP_WAIT: Duration = Duration::from_secs(5);
 
-const USAGE: &str = "usage: eureka-daemon turn show [--wait SECONDS] [--json]
-       eureka-daemon turn answer ID [--text-file PATH]
+const USAGE: &str = "usage: eureka-daemon turn show [--wait SECONDS] [--json] [--queue DIR]
+       eureka-daemon turn answer ID [--text-file PATH] [--queue DIR]
 
 For an agent answering room turns (EUREKA_ROOM_TURN_BACKEND=webhook or queue).
   show    prints the waiting turn and the exact command to answer it
   answer  takes the reply on stdin, or from --text-file
-The queue is EUREKA_TURN_DIR (default ~/.eureka/turns).";
+The queue is --queue, or EUREKA_TURN_DIR (default ~/.eureka/turns).";
 
 pub fn resolve_turn_dir() -> PathBuf {
     match std::env::var(TURN_DIR_ENV) {
@@ -59,7 +59,7 @@ fn now_seconds() -> f64 {
 }
 
 /// Why this directory cannot be trusted to hold turns: another account could plant one.
-fn dir_problem(dir: &Path) -> Option<String> {
+pub fn dir_problem(dir: &Path) -> Option<String> {
     match crypto::private_file_problem(dir) {
         Ok(None) => None,
         Ok(Some(_)) => Some(format!("turn directory {} can be reached by other accounts; make it private to this user", dir.display())),
@@ -113,6 +113,15 @@ impl Queue {
             }
         }
         Ok(Queue { dir })
+    }
+
+    /// The directory without clearing it, for a test turn beside a daemon that may be using it.
+    pub fn existing(dir: PathBuf) -> Result<Queue, String> {
+        crypto::create_private_dir(&dir).map_err(|e| format!("cannot create turn directory {}: {e}", dir.display()))?;
+        match dir_problem(&dir) {
+            Some(problem) => Err(problem),
+            None => Ok(Queue { dir }),
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -182,6 +191,10 @@ fn waiting_turn(dir: &Path) -> Option<WaitingTurn> {
     found
 }
 
+pub fn turn_waiting(dir: &Path) -> bool {
+    waiting_turn(dir).is_some()
+}
+
 fn read_turn(path: &Path, id: &str) -> Option<WaitingTurn> {
     let document = pyjson::loads(&std::fs::read(path).ok()?).ok()?;
     let fields = document.as_object()?;
@@ -199,18 +212,23 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
+/// A word as it goes in a command printed for someone to run on this computer.
+pub fn quote_for_command(word: &str) -> String {
+    if cfg!(windows) {
+        format!("\"{word}\"")
+    } else {
+        shell_quote(word)
+    }
+}
+
 /// The command that answers this turn, naming this program by its path and the queue if it was set.
 fn answer_command(id: &str) -> String {
     let program = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "eureka-daemon".to_string());
-    let dir = match std::env::var(TURN_DIR_ENV) {
-        Ok(p) if !p.trim().is_empty() && !cfg!(windows) => format!("{TURN_DIR_ENV}={} ", shell_quote(p.trim())),
+    let queue = match std::env::var(TURN_DIR_ENV) {
+        Ok(p) if !p.trim().is_empty() => format!(" --queue {}", quote_for_command(p.trim())),
         _ => String::new(),
     };
-    if cfg!(windows) {
-        format!("\"{program}\" turn answer {id}")
-    } else {
-        format!("{dir}{} turn answer {id}", shell_quote(&program))
-    }
+    format!("{} turn answer {id}{queue}", quote_for_command(&program))
 }
 
 fn print_turn(turn: &WaitingTurn, json: bool) {
@@ -357,7 +375,14 @@ fn usage_error(why: &str) -> ExitCode {
 }
 
 pub fn command(args: &[String]) -> ExitCode {
-    match args {
+    let mut args = args.to_vec();
+    if let Some(at) = args.iter().position(|a| a == "--queue") {
+        let Some(dir) = args.get(at + 1).cloned() else { return usage_error("--queue takes a folder") };
+        // Nothing else is running yet: this command has started no threads of its own.
+        std::env::set_var(TURN_DIR_ENV, dir);
+        args.drain(at..=at + 1);
+    }
+    match args.as_slice() {
         [verb, rest @ ..] if verb == "show" => show(rest),
         [verb, rest @ ..] if verb == "answer" => answer(rest),
         _ => {

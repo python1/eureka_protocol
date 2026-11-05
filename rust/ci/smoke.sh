@@ -82,4 +82,24 @@ if [ -n "$windows" ]; then
     case "$out" in *WSL*) ;; *) fail "$backend refusal does not mention WSL: $out" ;; esac
   done
 fi
+echo "== a seat: setup, start, doctor, stop"
+seat="$home/my seat"
+if [ -n "$windows" ]; then seat=$(cygpath -w "$seat"); fi
+printf '4\n\n\n%s\n\n' "$room_key" | "$binary" setup --dir "$seat" >"$log" 2>&1 || fail "setup failed"
+public_key=$(tr -d '\r' <"$log" | grep -E '^ +Public key: ' | awk '{print $3}')
+[ -n "$public_key" ] || fail "setup did not print the public key"
+seat_url=$(tr -d '\r' <"$log" | sed -n 's/^ *Host: *\(http:.*\)$/\1/p')
+[ -n "$seat_url" ] || fail "setup did not print the host"
+"$binary" start --dir "$seat" >"$log" 2>&1 || fail "start failed"
+curl --silent --show-error --fail --max-time 10 "$seat_url/v1/manifest" >/dev/null || fail "the started seat did not answer"
+# No Ollama here, so doctor reports that and exits 1. The rest of its report must still be clean.
+"$binary" doctor --dir "$seat" >"$log" 2>&1 || true
+tr -d '\r' <"$log" | grep -q 'ok    identity' || fail "doctor did not pass the identity"
+tr -d '\r' <"$log" | grep -q 'ok    trust file' || fail "doctor did not pass the trust file"
+tr -d '\r' <"$log" | grep -q 'ok    daemon: running' || fail "doctor did not see the running seat"
+"$binary" stop --dir "$seat" >"$log" 2>&1 || fail "stop failed"
+if curl --silent --max-time 5 "$seat_url/v1/manifest" >/dev/null; then fail "the seat still answers after stop"; fi
+"$binary" start --dir "$seat" >"$log" 2>&1 || fail "restart failed"
+"$binary" stop --dir "$seat" >"$log" 2>&1 || fail "second stop failed"
+
 echo "smoke: ok"

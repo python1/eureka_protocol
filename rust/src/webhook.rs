@@ -121,7 +121,12 @@ fn authorization_value(raw: &str) -> Result<String, String> {
     Ok(if value.contains(' ') { value.to_string() } else { format!("Bearer {value}") })
 }
 
-fn parse_config(text: &[u8]) -> Result<Webhook, String> {
+/// Whether this URL could be used. The message never quotes it, since a URL may hold a token.
+pub fn check_url(url: &str) -> Result<(), String> {
+    parse_url(url.trim()).map(|_| ()).map_err(|why| format!("That was not saved: {why}."))
+}
+
+pub fn parse_config(text: &[u8]) -> Result<Webhook, String> {
     let document = pyjson::loads(text).map_err(|_| "it is not valid JSON".to_string())?;
     let fields = document.as_object().ok_or("it is not a JSON object")?;
     if let Some(unknown) = fields.keys().find(|k| !["url", "authorization", "event", "agent"].contains(&k.as_str())) {
@@ -181,6 +186,19 @@ impl Webhook {
         forms
     }
 
+    /// Whether a connection can be made, and verified if it is HTTPS. Nothing is sent, so no run starts.
+    pub async fn reachable(&self) -> bool {
+        let check = async {
+            let stream = tokio::net::TcpStream::connect((self.target.host.as_str(), self.target.port)).await.map_err(|_| ())?;
+            if self.target.tls {
+                self.connect_tls(stream).await.map(|_| ())
+            } else {
+                Ok(())
+            }
+        };
+        matches!(tokio::time::timeout(ATTEMPT_TIMEOUT, check).await, Ok(Ok(())))
+    }
+
     /// POST `{event, id, ts}`, retrying only what might work a moment later.
     pub async fn wake(&self, id: &str) -> Result<(), WakeFailure> {
         let body = object([("event", Value::str(self.event.clone())), ("id", Value::str(id)), ("ts", Value::str(crate::isotime::now_iso()))]);
@@ -211,6 +229,12 @@ impl Webhook {
 
     #[cfg(feature = "tls")]
     async fn over_tls(&self, stream: tokio::net::TcpStream, body: String) -> Result<u16, ()> {
+        let stream = self.connect_tls(stream).await?;
+        self.exchange(stream, body).await
+    }
+
+    #[cfg(feature = "tls")]
+    async fn connect_tls(&self, stream: tokio::net::TcpStream) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, ()> {
         use tokio_rustls::rustls;
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -220,12 +244,16 @@ impl Webhook {
             .with_root_certificates(roots)
             .with_no_client_auth();
         let name = rustls::pki_types::ServerName::try_from(self.target.host.clone()).map_err(|_| ())?;
-        let stream = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)).connect(name, stream).await.map_err(|_| ())?;
-        self.exchange(stream, body).await
+        tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)).connect(name, stream).await.map_err(|_| ())
     }
 
     #[cfg(not(feature = "tls"))]
     async fn over_tls(&self, _stream: tokio::net::TcpStream, _body: String) -> Result<u16, ()> {
+        Err(())
+    }
+
+    #[cfg(not(feature = "tls"))]
+    async fn connect_tls(&self, _stream: tokio::net::TcpStream) -> Result<(), ()> {
         Err(())
     }
 
