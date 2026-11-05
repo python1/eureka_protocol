@@ -116,15 +116,32 @@ A seat lives in its own folder, `~/.eureka/seat` unless you pass `--dir` or set
 `EUREKA_SEAT_DIR`. It has its own identity, trust file and queue, so it shares nothing
 with any other daemon on the computer, even one using `~/.eureka` directly.
 
-> **Not yet tested with a real Grok Bot, OpenClaw, Hermes or Ollama.** These four
-> commands have run against fake webhooks, bots and agents, on macOS. On the other
-> platforms, CI runs them with Ollama absent. Native Windows has also not been run
-> at a real console, where the hidden prompts use a different mechanism.
+**What has been tested on a real agent.** A Grok Bot in its desktop app, with a new
+routine and Execution on this computer set to Always allow, on a Mac, at commit `4a1b17f`:
+
+- `setup` trusted the room key for room turns only and saved the hidden webhook URL and
+  key privately.
+- `start` ran in the background, and the room's *Check* proved the pinned key.
+- `doctor --wake` found no problems. The bot answered in 17 and 20 seconds.
+- A real room turn came back signed by the pinned key, under the seat's name, with an
+  objective-only grant, at a cost of $0.
+- `stop`, `start` and `stop` again ran cleanly, with no "address already in use".
+
+**Not yet tested on a real agent:**
+
+- A stalled turn under Ask every time, and `doctor`'s message for a paused routine. These
+  have run only against a fake webhook and bot.
+- These four commands with a real OpenClaw, Hermes or Ollama. They have run against fake
+  agents on macOS. On the other platforms, CI runs them with Ollama absent.
+- Native Windows at a real console, where the hidden prompts use a different mechanism.
 
 **`setup`** asks which agent sits here (Grok Bot, OpenClaw, Hermes or Ollama), a seat
 name (default `Bot`) and a port (default the first free one from 8765). It creates the
 identity, prints the public key to paste into Knights Circle, and takes the room key,
 which it trusts for room turns only.
+
+`setup` can only see what is listening now, so a port held by an SSH tunnel that is
+down looks free. If something on this computer uses a port some of the time, choose another.
 
 For a Grok Bot, it then prints the routine's instructions, with the seat's name in them
 so the bot answers as that name, and saves them as `routine.txt`. It reads the webhook's
@@ -504,8 +521,9 @@ Circle's browser both on its cloud computer, at commit `3d7483a`:
 
 The room errors below, stalled approvals, hostile room text and the `queue` backend
 have run only against a fake webhook and a fake bot running the real `turn`
-commands. Neither desktop setting in the Grok Bot section has been tried with a real
-bot, and neither has any other agent.
+commands. A Grok Bot's desktop app has since run this backend with Always allow, through
+[`setup`](#set-up-a-seat). Ask every time has not been tried with a real bot, and no other
+agent has used this backend.
 
 `EUREKA_ROOM_TURN_BACKEND=webhook` works like this:
 
