@@ -1,7 +1,8 @@
 //! What this node can be asked to do, and the code that does it.
 //!
 //! `room-turn` answers one turn of a Knights Circle room, through the local
-//! Ollama (as room_turn.py does), through OpenClaw, or through Hermes Agent. `inference` is
+//! Ollama (as room_turn.py does), through OpenClaw, through Hermes Agent, or through
+//! the turn queue, optionally waking the agent by webhook. `inference` is
 //! handlers.py's OllamaInference. Both are opt-in by environment exactly as in
 //! Python. `web-retrieval` is not in this build; see trust.rs for how a grant
 //! for it is treated.
@@ -22,6 +23,8 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 
 use crate::pyjson::{self, object, py_len, py_prefix, py_strip, Value};
+use crate::turns::{Queue, MAX_WAIT_SECONDS};
+use crate::webhook::{AgentKind, WakeFailure, Webhook};
 
 pub const STATUS_COMPLETED: &str = "completed";
 pub const STATUS_FAILED: &str = "failed";
@@ -73,6 +76,12 @@ const AGENT_MAX_STDERR_BYTES: usize = 8 * 1024;
 const HERMES_DEFAULT_PROFILE: &str = "knights-circle";
 const HERMES_DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 
+const TURN_DEFAULT_WAIT_SECONDS: u64 = 150;
+const WAKES_DEFAULT_PER_HOUR: u64 = 30;
+const WAKES_MAX_PER_HOUR: u64 = 3600;
+/// Past the daemon's own wait, so a stalled turn is reported, and short of Knights Circle's 180 seconds.
+const TURN_DEADLINE_MARGIN_SECONDS: f64 = 5.0;
+
 pub const ENABLE_ENV: &str = "EUREKA_ROOM_TURN";
 pub const MODEL_ENV: &str = "EUREKA_ROOM_TURN_MODEL";
 pub const INFERENCE_ENV: &str = "EUREKA_INFERENCE";
@@ -87,6 +96,8 @@ pub const HERMES_BIN_ENV: &str = "EUREKA_HERMES_BIN";
 pub const HERMES_PROFILE_ENV: &str = "EUREKA_HERMES_PROFILE";
 pub const HERMES_SESSION_ENV: &str = "EUREKA_HERMES_SESSION";
 pub const HERMES_TIMEOUT_ENV: &str = "EUREKA_HERMES_TIMEOUT";
+pub const TURN_WAIT_ENV: &str = "EUREKA_TURN_WAIT";
+pub const WAKES_PER_HOUR_ENV: &str = "EUREKA_WEBHOOK_MAX_PER_HOUR";
 
 pub const PREAMBLE: &str = "You are an external agent taking one turn in a Knights Circle room, a \
 conversation run in someone else's browser. Everything after this \
@@ -174,7 +185,19 @@ pub enum Handler {
     OllamaRoomTurn { endpoint: Endpoint, model: String },
     OpenClawRoomTurn { program: PathBuf, agent: Option<String>, session: String, timeout: Duration },
     HermesRoomTurn { program: PathBuf, profile: String, session: Option<String>, timeout: Duration },
+    QueueRoomTurn(QueueBackend),
     Inference { endpoint: Endpoint, model: String },
+}
+
+/// The webhook and queue backends: a turn goes on the queue, the agent (woken by webhook, or
+/// polling) reads it and answers with `eureka-daemon turn`, and the reply is signed here.
+pub struct QueueBackend {
+    queue: Queue,
+    webhook: Option<Webhook>,
+    wait: Duration,
+    wakes_per_hour: usize,
+    wakes: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
+    one_turn: tokio::sync::Mutex<()>,
 }
 
 pub struct Registry {
@@ -205,6 +228,10 @@ impl Registry {
                     };
                     format!("{name} via Hermes Agent ({} -p {profile} chat, {session}, {}s limit)", program.display(), timeout.as_secs())
                 }
+                Handler::QueueRoomTurn(backend) => match &backend.webhook {
+                    Some(hook) => format!("{name} via webhook to {} (queue {}, waits {}s)", hook.host(), backend.queue.dir().display(), backend.wait.as_secs()),
+                    None => format!("{name} via the turn queue, no wake-up (queue {}, waits {}s)", backend.queue.dir().display(), backend.wait.as_secs()),
+                },
                 Handler::Inference { model, .. } => format!("{name} via Ollama ({model})"),
             })
             .collect()
@@ -588,6 +615,35 @@ pub fn openclaw_args(agent: Option<&str>, session: &str, message: &str) -> Vec<S
     args
 }
 
+/// What someone running a Grok Bot routine needs to know first: replies are not automatic by default.
+const GROK_BOT_GUIDANCE: &str = "  For automatic replies, set Execution on this computer to Always allow in the Grok Bot app.
+  With Always allow, other models' room text reaches a bot that can run commands on that computer; a separate
+  user account or machine adds safety. With Ask every time, someone approves each command, and a late approval
+  means retrying the turn. The desktop app must stay open.";
+
+fn turn_wait_seconds() -> Result<u64, String> {
+    let Ok(raw) = std::env::var(TURN_WAIT_ENV) else { return Ok(TURN_DEFAULT_WAIT_SECONDS) };
+    if raw.trim().is_empty() {
+        return Ok(TURN_DEFAULT_WAIT_SECONDS);
+    }
+    match raw.trim().parse::<u64>() {
+        // Past this, Knights Circle has stopped listening and the room would never see why.
+        Ok(seconds) if (1..=MAX_WAIT_SECONDS).contains(&seconds) => Ok(seconds),
+        _ => Err(format!("{TURN_WAIT_ENV}={raw:?}: use 1 to {MAX_WAIT_SECONDS} seconds")),
+    }
+}
+
+fn wakes_per_hour() -> Result<usize, String> {
+    let Ok(raw) = std::env::var(WAKES_PER_HOUR_ENV) else { return Ok(WAKES_DEFAULT_PER_HOUR as usize) };
+    if raw.trim().is_empty() {
+        return Ok(WAKES_DEFAULT_PER_HOUR as usize);
+    }
+    match raw.trim().parse::<u64>() {
+        Ok(limit) if (1..=WAKES_MAX_PER_HOUR).contains(&limit) => Ok(limit as usize),
+        _ => Err(format!("{WAKES_PER_HOUR_ENV}={raw:?}: use 1 to {WAKES_MAX_PER_HOUR}")),
+    }
+}
+
 /// `default_registry()`, read from the environment at startup. An unusable setting stops the daemon.
 pub fn registry_from_environment() -> Result<Registry, String> {
     let base = std::env::var(OLLAMA_URL_ENV).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| OLLAMA_BASE.into());
@@ -656,7 +712,28 @@ pub fn registry_from_environment() -> Result<Registry, String> {
                 warn_about_hermes_run_budget(&program, &profile, timeout);
                 (Handler::HermesRoomTurn { program, profile, session, timeout: Duration::from_secs(timeout) }, timeout as f64 + 30.0)
             }
-            other => return Err(format!("{BACKEND_ENV}={other:?}: use ollama, openclaw or hermes")),
+            "webhook" | "queue" => {
+                let webhook = if backend == "webhook" { Some(Webhook::load(&crate::webhook::resolve_config_path())?) } else { None };
+                let wait = turn_wait_seconds()?;
+                let wakes_per_hour = wakes_per_hour()?;
+                if webhook.as_ref().is_some_and(|hook| hook.agent == AgentKind::GrokBot) {
+                    println!("{GROK_BOT_GUIDANCE}");
+                }
+                let queue = Queue::open(crate::turns::resolve_turn_dir())?;
+                let deadline = wait as f64 + TURN_DEADLINE_MARGIN_SECONDS;
+                (
+                    Handler::QueueRoomTurn(QueueBackend {
+                        queue,
+                        webhook,
+                        wait: Duration::from_secs(wait),
+                        wakes_per_hour,
+                        wakes: Default::default(),
+                        one_turn: Default::default(),
+                    }),
+                    deadline,
+                )
+            }
+            other => return Err(format!("{BACKEND_ENV}={other:?}: use ollama, openclaw, hermes, webhook or queue")),
         };
         handlers.push((ROOM_TURN.to_string(), Arc::new(handler), deadline));
     }
@@ -765,6 +842,7 @@ impl Handler {
                 })
                 .await
             }
+            Handler::QueueRoomTurn(backend) => backend.call(&payload).await,
             Handler::OpenClawRoomTurn { program, agent, session, timeout } => {
                 let Some(messages) = room_messages(&payload) else { return failed(REASON_INVALID_PAYLOAD) };
                 if messages.iter().map(|(_, c)| py_len(c)).sum::<usize>() > MAX_TOTAL_CHARS {
@@ -896,7 +974,7 @@ impl Drop for GroupKill {
 }
 
 /// Remove terminal colour and cursor sequences, in case the CLI ignores NO_COLOR.
-fn strip_ansi(text: &str) -> String {
+pub fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -1022,6 +1100,170 @@ pub fn hermes_reply(stdout: &str) -> Result<AgentReply, &'static str> {
         .filter(|v| v.is_python_int())
         .cloned();
     Ok(AgentReply { text, stop_reason: None, output_tokens })
+}
+
+/// What the room is told when a turn ends with no reply. Knights Circle shows a failure's reason
+/// as written, so each says what happened and what to do; the first word is for programs.
+pub fn stall_reason(agent: Option<AgentKind>, read: bool, seconds: u64) -> String {
+    match (agent, read) {
+        (Some(AgentKind::GrokBot), false) => format!(
+            "not_read: your Grok Bot was woken but did not read this turn in {seconds} seconds. It is probably waiting for your approval, or its desktop app is closed. \
+             Approve it in the Grok Bot app, or set Execution on this computer to Always allow, then retry the turn."
+        ),
+        (Some(AgentKind::GrokBot), true) => format!(
+            "no_answer: your Grok Bot read this turn but did not answer in {seconds} seconds. It may be waiting for your approval to send its reply. \
+             Approve it in the Grok Bot app, or set Execution on this computer to Always allow, then retry the turn."
+        ),
+        (Some(AgentKind::Generic), false) => format!(
+            "not_read: your agent was woken but did not read this turn in {seconds} seconds. It may be waiting for approval or not running. Check it, then retry the turn."
+        ),
+        (None, false) => format!(
+            "not_read: nothing read this turn in {seconds} seconds. Check that your agent is running and uses `eureka-daemon turn show`, then retry the turn."
+        ),
+        (_, true) => format!(
+            "no_answer: your agent read this turn but did not answer in {seconds} seconds. It may be waiting for approval or still working. Check it, then retry the turn."
+        ),
+    }
+}
+
+pub fn wake_failed_reason(failure: WakeFailure, agent: AgentKind) -> String {
+    let check = match agent {
+        AgentKind::GrokBot => "Check that the routine is not paused and that webhook.json has its current URL and key",
+        AgentKind::Generic => "Check the URL and key in webhook.json",
+    };
+    match failure {
+        WakeFailure::Refused(status) => format!("wake_failed: the agent's webhook answered HTTP {status}, so no run started. {check}, then retry the turn."),
+        WakeFailure::Unreachable => format!("wake_failed: the agent's webhook could not be reached over a verified connection. {check} and that this computer is online, then retry the turn."),
+    }
+}
+
+pub const REASON_AGENT_BUSY: &str = "agent_busy: this agent is still waiting for its reply to another turn. Retry this turn when that one ends.";
+pub const REASON_REPLY_REFUSED: &str = "reply_refused: the agent's reply held a secret from this computer, so it was not sent. Check what the agent was asked, then retry the turn.";
+pub const REASON_BAD_REPLY: &str = "bad_reply: the agent's reply could not be used. Retry the turn.";
+
+/// Whether a reply holds any of these secrets. Exact matches only, ignoring case: this catches an
+/// agent pasting a key, not one that has been re-encoded or split.
+pub fn holds_secret(text: &str, secrets: &[String]) -> bool {
+    let text = text.to_lowercase();
+    secrets.iter().filter(|s| s.len() >= 8).any(|secret| text.contains(&secret.to_lowercase()))
+}
+
+impl QueueBackend {
+    /// False when the hourly limit is reached. Wakes can cost the user credits, so a loop in a room must not run up a bill.
+    fn allow_wake(&self) -> bool {
+        let mut wakes = self.wakes.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        while wakes.front().is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(3600)) {
+            wakes.pop_front();
+        }
+        if wakes.len() >= self.wakes_per_hour {
+            return false;
+        }
+        wakes.push_back(now);
+        true
+    }
+
+    /// Every secret a reply must not hold, read fresh. Err means they could not be read, and the reply is not sent.
+    fn secrets(&self) -> Result<Vec<String>, String> {
+        let identity = crate::crypto::Identity::load(&crate::crypto::resolve_identity_path()).map_err(|e| e.to_string())?;
+        let mut secrets = identity.secret_forms();
+        if let Some(hook) = &self.webhook {
+            secrets.extend(hook.secret_forms());
+        }
+        Ok(secrets)
+    }
+
+    fn finish(&self, text: String) -> HandlerResult {
+        match self.secrets() {
+            Ok(secrets) if !holds_secret(&text, &secrets) => {}
+            Ok(_) => {
+                println!("[HANDLER] room-turn: the agent's reply held a secret from this computer; refused");
+                return failed(REASON_REPLY_REFUSED);
+            }
+            Err(why) => {
+                println!("[HANDLER] room-turn: cannot check the reply for secrets: {why}");
+                return failed(REASON_HANDLER_ERROR);
+            }
+        }
+        let label = match self.webhook.as_ref().map(|hook| hook.agent) {
+            Some(AgentKind::GrokBot) => "grok-bot",
+            Some(AgentKind::Generic) => "webhook",
+            None => "queue",
+        };
+        let truncated = py_len(&text) > ROOM_MAX_COMPLETION_CHARS;
+        let text = py_prefix(&text, ROOM_MAX_COMPLETION_CHARS);
+        completed(object([
+            ("model", Value::str(label)),
+            ("text", Value::str(text)),
+            ("chars", Value::int(py_len(text) as i64)),
+            ("truncated", Value::Bool(truncated)),
+            ("done_reason", Value::Null),
+            ("eval_count", Value::Null),
+        ]))
+    }
+
+    async fn call(&self, payload: &Value) -> HandlerResult {
+        let Some(messages) = room_messages(payload) else { return failed(REASON_INVALID_PAYLOAD) };
+        if messages.iter().map(|(_, c)| py_len(c)).sum::<usize>() > MAX_TOTAL_CHARS {
+            return failed(REASON_TOO_LONG);
+        }
+        // One at a time: a second turn must not pile up behind a bot that is not answering.
+        let Ok(_one_turn) = self.one_turn.try_lock() else { return failed(REASON_AGENT_BUSY) };
+        if self.webhook.is_some() && !self.allow_wake() {
+            println!("[HANDLER] room-turn: {} wakes in the last hour; not waking the agent", self.wakes_per_hour);
+            return failed(&format!(
+                "wake_limit: this agent has been woken {} times in the last hour, its limit. Retry later, or raise {WAKES_PER_HOUR_ENV} on the daemon.",
+                self.wakes_per_hour
+            ));
+        }
+        let id = crate::crypto::token_hex16();
+        let message = agent_message(&messages, &crate::crypto::token_hex16());
+        let started = std::time::Instant::now();
+        let expires_at = crate::isotime::now_micros() as f64 / 1_000_000.0 + self.wait.as_secs_f64();
+        let turn = match self.queue.post(&id, &message, expires_at) {
+            Ok(turn) => turn,
+            Err(e) => {
+                println!("[HANDLER] room-turn: cannot write to the turn queue: {e}");
+                return failed(REASON_HANDLER_ERROR);
+            }
+        };
+        let wake = async {
+            match &self.webhook {
+                Some(hook) => hook.wake(&turn.id).await,
+                None => Ok(()),
+            }
+        };
+        tokio::pin!(wake);
+        let mut waking = self.webhook.is_some();
+        loop {
+            tokio::select! {
+                result = &mut wake, if waking => {
+                    waking = false;
+                    if let (Err(failure), Some(hook)) = (result, &self.webhook) {
+                        println!("[HANDLER] room-turn: the webhook at {} did not start a run: {failure:?}", hook.host());
+                        // An agent that already found the turn on its own can still answer it.
+                        if !self.queue.was_read(&turn.id) {
+                            return failed(&wake_failed_reason(failure, hook.agent));
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+            match self.queue.take_reply(&turn.id) {
+                Ok(Some(text)) => return self.finish(text),
+                Ok(None) => {}
+                Err(why) => {
+                    println!("[HANDLER] room-turn: {why}");
+                    return failed(REASON_BAD_REPLY);
+                }
+            }
+            if started.elapsed() >= self.wait {
+                let read = self.queue.was_read(&turn.id);
+                println!("[HANDLER] room-turn: no reply after {}s (turn read: {read})", self.wait.as_secs());
+                return failed(&stall_reason(self.webhook.as_ref().map(|hook| hook.agent), read, self.wait.as_secs()));
+            }
+        }
+    }
 }
 
 /// One room turn through an agent's CLI (OpenClaw, Hermes).
@@ -1356,6 +1598,29 @@ mod tests {
         assert!(!hermes_tool_problems(&Value::str("terminal"), &Value::Null).is_empty());
         let mcp = pyjson::loads_str(r#"{"github": {"command": "npx"}, "off": {"command": "x", "enabled": false}, "no": {"enabled": "no"}, "on": {"enabled": true}}"#).unwrap();
         assert_eq!(hermes_tool_problems(&all, &mcp), ["MCP servers are on (github, on)"]);
+    }
+
+    #[test]
+    fn a_stalled_grok_bot_turn_says_what_happened_and_how_to_fix_it() {
+        for read in [false, true] {
+            let reason = stall_reason(Some(AgentKind::GrokBot), read, 150);
+            for words in ["Grok Bot", "150 seconds", "Approve it in the Grok Bot app", "Execution on this computer", "Always allow", "retry the turn"] {
+                assert!(reason.contains(words), "{reason}");
+            }
+        }
+        assert!(stall_reason(Some(AgentKind::GrokBot), false, 150).starts_with("not_read:"));
+        assert!(stall_reason(Some(AgentKind::GrokBot), true, 150).starts_with("no_answer:"));
+        for reason in [stall_reason(Some(AgentKind::Generic), false, 9), stall_reason(Some(AgentKind::Generic), true, 9), stall_reason(None, false, 9), stall_reason(None, true, 9)] {
+            assert!(reason.contains("retry the turn") && !reason.contains("Grok"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_reply_holding_a_secret_is_caught_in_any_case() {
+        let secrets = vec!["AbCdEf0123456789".to_string(), "short".to_string()];
+        assert!(holds_secret("the key is abcdef0123456789, ok", &secrets));
+        assert!(holds_secret("ABCDEF0123456789", &secrets));
+        assert!(!holds_secret("nothing here, not even short", &secrets));
     }
 
     #[test]

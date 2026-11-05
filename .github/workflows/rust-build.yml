@@ -54,9 +54,22 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "${{ matrix.target }}"
           rustup default "$RUST_TOOLCHAIN"
 
+      # `ring`, for HTTPS webhooks, compiles some C, and for musl it must use musl's own compiler.
+      - name: Install the musl C compiler
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+          target_env=$(echo "${{ matrix.target }}" | tr '-' '_')
+          echo "CC_${target_env}=musl-gcc" >> "$GITHUB_ENV"
+
       - name: Test
         working-directory: rust
         run: cargo test --locked --target "${{ matrix.target }}"
+
+      - name: Test without HTTPS, the build that needs no C compiler
+        working-directory: rust
+        run: cargo test --locked --no-default-features --target "${{ matrix.target }}"
 
       - name: Build
         working-directory: rust
