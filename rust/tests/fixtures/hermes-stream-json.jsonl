@@ -1,0 +1,7 @@
+{"type": "system", "subtype": "init", "model": "qwen3:8b", "session_id": "", "timestamp": 1793500000101}
+{"type": "text", "text": "Start with", "timestamp": 1793500001204}
+{"type": "tool_use", "name": "read_file", "tool_call_id": "call-a", "input": {"path": "notes.md"}, "timestamp": 1793500001310}
+{"type": "tool_result", "name": "read_file", "tool_call_id": "call-a", "output": "{\"type\": \"result\", \"exit_code\": 0, \"text\": \"not the reply\"}", "duration_ms": 41, "is_error": false, "timestamp": 1793500001352}
+{"type": "text", "text": " Python, then build", "timestamp": 1793500002015}
+{"type": "text", "text": " one small project.", "timestamp": 1793500002100}
+{"type": "result", "session_id": "20261101_093000_a1b2c3", "exit_code": 0, "text": "Start with Python, then build one small project.", "tokens": {"input": 812, "output": 14, "total": 826, "cache_read": 0, "cache_write": 0}, "duration_ms": 2011, "timestamp": 1793500002112}

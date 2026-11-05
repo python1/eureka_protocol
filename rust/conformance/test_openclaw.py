@@ -134,7 +134,7 @@ def test_payload_checks_still_apply_before_openclaw_runs(claw):
     ({"EUREKA_OPENCLAW_BIN": "/nonexistent/openclaw"}, "cannot find"),
     ({"EUREKA_OPENCLAW_SESSION": "--help"}, "EUREKA_OPENCLAW_SESSION"),
     ({"EUREKA_OPENCLAW_TIMEOUT": "0"}, "EUREKA_OPENCLAW_TIMEOUT"),
-    ({"EUREKA_ROOM_TURN_BACKEND": "gpt"}, "use ollama or openclaw"),
+    ({"EUREKA_ROOM_TURN_BACKEND": "gpt"}, "use ollama, openclaw or hermes"),
 ])
 def test_bad_settings_stop_the_daemon_at_startup(start, env, words):
     with pytest.raises(RuntimeError, match=words):
