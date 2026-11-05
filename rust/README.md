@@ -252,8 +252,20 @@ Timeouts, failures, named sessions and the refusal of an unsafe profile have run
 only against `conformance/fake_hermes.py`, a stand-in written from v0.22.7's
 source. Other Hermes versions have not been tried.
 
-That run predates the current message format, so what a real Hermes does with
-the format below is not yet tested.
+**The current message format, on the same setup.** Four more room turns, in a
+separate run at commit `a6ccbb0`:
+
+- Each reply was signed by the pinned key, with the expected grant (the objective
+  and the last 1 of N messages).
+- The replies read as normal conversation. None showed the `<room-turn-…>` markers
+  or the JSON, or mentioned the notice, and the model kept to its role.
+- With one member and a latest-message grant, the replies came out identical and
+  Knights Circle stopped the room with "Repeated responses detected". That was
+  expected.
+
+**Not yet tested:** a forged message in the room, such as one imitating a marker or
+a role. The conformance tests check that the escaping holds, but how a real model
+treats such a message is still unknown.
 
 With `EUREKA_ROOM_TURN_BACKEND=hermes`, each room turn runs
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) headless:
