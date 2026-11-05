@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-A stand-in for the `hermes` CLI (Hermes Agent v0.22.5), for testing the Hermes room-turn backend.
+A stand-in for the `hermes` CLI (Hermes Agent v0.22.7), for testing the Hermes room-turn backend.
 
 `-p <profile> config get <key> --json` prints json.dumps of that key from the JSON file
 $FAKE_HERMES_CONFIG (dotted key -> value), or exits 1 with "Config key not set: <key>" on stderr,
@@ -9,11 +9,12 @@ as hermes_cli/config.py does; $FAKE_HERMES_CONFIG_FAIL makes it exit 2.
 Otherwise expects `-p <profile> chat --query-file - --format stream-json ...`, reads the query from stdin,
 records argv and the query (as JSON, one line per call) to $FAKE_HERMES_LOG, then behaves as
 $FAKE_HERMES_MODE says. Events are written the way hermes_cli/stream_json.py writes them: one JSON
-object per stdout line, ending with a `result` event; `session_id:` goes to stderr.
+object per stdout line, ending with a `result` event. `Session:` and `session_id:` go to stderr.
+`--run-budget` is refused on every run, with a failed result and exit 2, as hermes_cli/gateway_chat.py does.
 
   ok     a reply quoting the profile and the last line of the query
   tools  the same, with a tool call whose output looks like a result event
-  noisy  a stray log line on stdout before the events
+  noisy  stray log lines and the Session lines on stdout before the events
   gap    text deltas stop early (replay gap); the result carries the whole reply
   fail   a result with exit_code 1 and an error, then exit 1
   empty  a result with no text
@@ -69,9 +70,18 @@ def result(text, exit_code=0, error=None):
     sys.exit(exit_code)
 
 
+if "--run-budget" in args:
+    message = ("Unsupported gateway CLI options: --run-budget. No local fallback or policy changes were made.\n"
+               "  --run-budget: use `agent.run_budget_seconds` in config.yaml")
+    emit({"type": "system", "subtype": "init", "model": "qwen3:8b", "session_id": ""})
+    print("Error: " + message, file=sys.stderr, flush=True)
+    result("", exit_code=2, error=message)
 if mode == "noisy":
-    print("Hermes Agent v0.22.5: checking for updates")
+    print("Hermes Agent v0.22.7: checking for updates")
+    print(f"Session: {SESSION}")
+    print(f"session_id: {SESSION}", flush=True)
 emit({"type": "system", "subtype": "init", "model": "qwen3:8b", "session_id": ""})
+print(f"Session: {SESSION}", file=sys.stderr, flush=True)
 reply = f"Hermes here (profile {profile}). You said: {last}"
 if mode in ("ok", "noisy"):
     for part in (reply[:10], reply[10:]):
@@ -87,6 +97,7 @@ elif mode == "gap":
     emit({"type": "text", "text": reply[:5]})
     result(reply)
 elif mode == "fail":
+    print("Error: No inference provider configured", file=sys.stderr, flush=True)
     result("", exit_code=1, error="No inference provider configured")
 elif mode == "empty":
     result("")

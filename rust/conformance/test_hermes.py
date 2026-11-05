@@ -14,7 +14,7 @@ from test_conformance import handshake, room, run_assign, trusting
 FAKE = str(HERE / "fake_hermes.py")
 CHAT_ONLY = {"agent.disabled_toolsets": ["terminal", "file", "code_execution", "delegation", "cronjob", "browser",
                                          "computer_use", "skills"],
-             "platform_toolsets.cli": []}
+             "platform_toolsets.cli": [], "agent.run_budget_seconds": 120}
 
 
 @pytest.fixture
@@ -78,14 +78,15 @@ def test_a_turn_runs_hermes_in_its_profile_with_the_room_on_stdin(hermes, ollama
     (call,) = calls(log)
     # Exactly these arguments; the room's text is never in argv, only on stdin.
     assert call["argv"] == ["-p", "knights-circle", "chat", "--query-file", "-", "--format", "stream-json",
-                            "--source", "tool", "--run-budget", "120"]
+                            "--source", "tool"]
     assert call["stdin"].startswith("You are an external agent taking one turn in a Knights Circle room")
     assert "[system]\nYou are the Critic.\n\n[user]\nPlan the beds\n\n[user]\nAnd the path; rm -rf / $(whoami) `id`" in call["stdin"]
     assert call["pgid"] == call["pid"]
     # The profile's tool settings were read from Hermes itself, once, at startup.
     assert [e["config"] for e in logged(log) if "config" in e] == [
         ["-p", "knights-circle", "config", "get", "agent.disabled_toolsets", "--json"],
-        ["-p", "knights-circle", "config", "get", "mcp_servers", "--json"]]
+        ["-p", "knights-circle", "config", "get", "mcp_servers", "--json"],
+        ["-p", "knights-circle", "config", "get", "agent.run_budget_seconds", "--json"]]
     assert ollama.requests == []
     assert "room-turn via Hermes Agent" in daemon.output() and "a new session each turn" in daemon.output()
 
@@ -95,7 +96,7 @@ def test_profile_session_and_time_limit_are_configurable(hermes, hermes_home):
     node, daemon, log = hermes(EUREKA_HERMES_PROFILE="rooms", EUREKA_HERMES_SESSION="kc-thread", EUREKA_HERMES_TIMEOUT="45")
     run_assign(node, daemon)
     assert calls(log)[0]["argv"] == ["-p", "rooms", "chat", "--query-file", "-", "--format", "stream-json", "--source", "tool",
-                                     "--run-budget", "45", "-c", "kc-thread", "--create-if-missing"]
+                                     "-c", "kc-thread", "--create-if-missing"]
 
 
 @pytest.mark.parametrize("mode", ["tools", "noisy", "gap"])
@@ -117,6 +118,35 @@ def test_a_failed_or_empty_run_is_upstream_error(hermes, mode):
     node, daemon, _ = hermes(mode)
     result = run_assign(node, daemon)[1]["result"]
     assert (result["status"], result["reason"], result["output"]) == ("failed", "upstream_error", None)
+
+
+def test_the_log_gives_the_reason_for_a_failure_not_the_session_line(hermes):
+    node, daemon, _ = hermes("fail")
+    run_assign(node, daemon)
+    assert "No inference provider configured" in daemon.output()
+
+
+@pytest.mark.parametrize("budget", [{}, {"agent.run_budget_seconds": None}, {"agent.run_budget_seconds": 0},
+                                    {"agent.run_budget_seconds": "soon"}, {"agent.run_budget_seconds": True}])
+def test_a_missing_run_budget_warns_with_the_command_and_turns_still_run(hermes, tmp_path, budget):
+    values = {**{k: v for k, v in CHAT_ONLY.items() if k != "agent.run_budget_seconds"}, **budget}
+    node, daemon, _ = hermes(FAKE_HERMES_CONFIG=settings(tmp_path, values), EUREKA_HERMES_TIMEOUT="45")
+    assert "agent.run_budget_seconds is not set" in daemon.output()
+    assert "hermes -p knights-circle config set agent.run_budget_seconds 45" in daemon.output()
+    assert run_assign(node, daemon)[1]["result"]["status"] == "completed"
+
+
+def test_a_run_budget_longer_than_the_timeout_warns(hermes, tmp_path):
+    node, daemon, _ = hermes(FAKE_HERMES_CONFIG=settings(tmp_path, {**CHAT_ONLY, "agent.run_budget_seconds": 900}))
+    assert "agent.run_budget_seconds is 900, longer than EUREKA_HERMES_TIMEOUT (120)" in daemon.output()
+    assert "config set agent.run_budget_seconds 120" in daemon.output()
+    assert run_assign(node, daemon)[1]["result"]["status"] == "completed"
+
+
+@pytest.mark.parametrize("budget", [120, 100, "60"])
+def test_a_run_budget_within_the_timeout_is_quiet(hermes, tmp_path, budget):
+    _, daemon, _ = hermes(FAKE_HERMES_CONFIG=settings(tmp_path, {**CHAT_ONLY, "agent.run_budget_seconds": budget}))
+    assert "run_budget_seconds" not in daemon.output()
 
 
 def test_a_slow_agent_is_killed_at_the_timeout(hermes):
