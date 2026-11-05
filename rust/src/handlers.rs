@@ -412,6 +412,48 @@ fn hermes_config(program: &Path, profile: &str, key: &str) -> Result<Value, Stri
     pyjson::loads_str(line).map_err(|_| format!("hermes -p {profile} config get {key} --json did not print JSON"))
 }
 
+/// The budget Hermes would use, read the way it reads `agent.run_budget_seconds`
+/// (`_normalize_run_budget_seconds`): a positive number or numeric string; anything else leaves it off.
+fn hermes_run_budget_seconds(value: &Value) -> Option<f64> {
+    let seconds = match value {
+        Value::Int(digits) => digits.parse::<f64>().ok()?,
+        Value::Float(number) => *number,
+        Value::Str(text) => text.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    (seconds > 0.0).then_some(seconds)
+}
+
+/// Why `agent.run_budget_seconds` does not fit the daemon's time limit, if it does not.
+/// Takes what `hermes config get <key> --json` printed, or Null when the key is not set.
+pub fn hermes_run_budget_problem(value: &Value, timeout: u64) -> Option<String> {
+    match hermes_run_budget_seconds(value) {
+        None => Some("agent.run_budget_seconds is not set".to_string()),
+        Some(seconds) if seconds > timeout as f64 => {
+            Some(format!("agent.run_budget_seconds is {seconds}, longer than {HERMES_TIMEOUT_ENV} ({timeout})"))
+        }
+        Some(_) => None,
+    }
+}
+
+/// `hermes chat` is a client of the profile's gateway, so stopping it ends the daemon's wait, not the
+/// turn, and it refuses `--run-budget`. Hermes' own budget is set in its config, so warn when it is off
+/// or longer than the daemon waits. It is advice: it never stops the daemon.
+fn warn_about_hermes_run_budget(program: &Path, profile: &str, timeout: u64) {
+    match hermes_config(program, profile, "agent.run_budget_seconds") {
+        Ok(value) => {
+            if let Some(problem) = hermes_run_budget_problem(&value, timeout) {
+                println!(
+                    "  WARNING: Hermes profile {profile:?}: {problem}. The daemon stops waiting for a turn after {timeout}s, but \
+                     that turn keeps running in Hermes' gateway. To limit how long Hermes waits on a stuck model call, run:\n    \
+                     hermes -p {profile} config set agent.run_budget_seconds {timeout}"
+                );
+            }
+        }
+        Err(why) => println!("  WARNING: could not check agent.run_budget_seconds: {why}"),
+    }
+}
+
 /// Room text includes other models' replies, so the room profile must be chat only: no tool
 /// that runs commands or code or touches files. Asked of Hermes itself (`config get`, its
 /// documented, machine-readable setting reader) at startup; anything else stops the daemon.
@@ -611,6 +653,7 @@ pub fn registry_from_environment() -> Result<Registry, String> {
                     _ => None,
                 };
                 let timeout = timeout_seconds(HERMES_TIMEOUT_ENV, HERMES_DEFAULT_TIMEOUT_SECONDS)?;
+                warn_about_hermes_run_budget(&program, &profile, timeout);
                 (Handler::HermesRoomTurn { program, profile, session, timeout: Duration::from_secs(timeout) }, timeout as f64 + 30.0)
             }
             other => return Err(format!("{BACKEND_ENV}={other:?}: use ollama, openclaw or hermes")),
@@ -735,7 +778,7 @@ impl Handler {
                 if messages.iter().map(|(_, c)| py_len(c)).sum::<usize>() > MAX_TOTAL_CHARS {
                     return failed(REASON_TOO_LONG);
                 }
-                run_agent_cli("hermes", program, &hermes_args(profile, session.as_deref(), *timeout), Some(agent_message(&messages, &crate::crypto::token_hex16())), *timeout, hermes_reply).await
+                run_agent_cli("hermes", program, &hermes_args(profile, session.as_deref()), Some(agent_message(&messages, &crate::crypto::token_hex16())), *timeout, hermes_reply).await
             }
         }
     }
@@ -930,20 +973,20 @@ pub fn openclaw_reply(stdout: &str) -> Result<AgentReply, &'static str> {
     Ok(AgentReply { text, stop_reason, output_tokens })
 }
 
-/// `hermes -p <profile> chat --query-file - --format stream-json --source tool --run-budget <s> [-c <session> --create-if-missing]`.
+/// `hermes -p <profile> chat --query-file - --format stream-json --source tool [-c <session> --create-if-missing]`.
 ///
 /// The room's message goes on stdin (`--query-file -`), never in argv, so the
 /// room's text does not show in `ps` and can never be read as a flag. The
 /// profile is a Hermes home of its own (sessions, memory, config), so rooms
 /// never touch the user's own sessions or memory. Without a session name each
 /// turn is a fresh session, since every turn already carries the whole room;
-/// `--source tool` keeps those out of Hermes' session pickers. `--run-budget`
-/// gives Hermes the same time limit, so the agent wraps up before it is stopped.
-pub fn hermes_args(profile: &str, session: Option<&str>, timeout: Duration) -> Vec<String> {
-    let mut args = ["-p", profile, "chat", "--query-file", "-", "--format", "stream-json", "--source", "tool", "--run-budget"]
+/// `--source tool` keeps those out of Hermes' session pickers. There is no time
+/// flag: Hermes v0.22.7 refuses `--run-budget` on every run, and its budget is set
+/// in the profile's config instead (see `warn_about_hermes_run_budget`).
+pub fn hermes_args(profile: &str, session: Option<&str>) -> Vec<String> {
+    let mut args = ["-p", profile, "chat", "--query-file", "-", "--format", "stream-json", "--source", "tool"]
         .map(String::from)
         .to_vec();
-    args.push(timeout.as_secs().to_string());
     if let Some(name) = session {
         args.extend(["-c", name, "--create-if-missing"].map(String::from));
     }
@@ -1083,7 +1126,14 @@ async fn run_agent_cli(
         return failed(REASON_UPSTREAM_ERROR);
     }
     if !status.is_some_and(|s| s.success()) {
-        let first = String::from_utf8_lossy(&err).lines().find(|l| !l.trim().is_empty()).unwrap_or("").chars().take(200).collect::<String>();
+        // Hermes prints its session id first; the reason for the failure is what belongs in the log.
+        let first = String::from_utf8_lossy(&err)
+            .lines()
+            .find(|l| !l.trim().is_empty() && !l.starts_with("Session: ") && !l.starts_with("session_id: "))
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect::<String>();
         println!("[HANDLER] room-turn: {label} exited with {status:?}: {first}");
         return failed(REASON_UPSTREAM_ERROR);
     }
@@ -1198,6 +1248,9 @@ mod tests {
         ] {
             assert!(hermes_reply(bad).is_err(), "{bad}");
         }
+        // v0.22.7 names the session on stderr, but such lines in stdout must not matter either.
+        let session = "Session: 20261101_093000_a1b2c3\nsession_id: 20261101_093000_a1b2c3\n{\"type\": \"result\", \"exit_code\": 0, \"text\": \"Hello.\"}\n\nsession_id: 20261101_093000_a1b2c3\n";
+        assert_eq!(hermes_reply(session).unwrap().text, "Hello.");
         // A replay gap: the deltas stopped early, the result carries the whole reply.
         let gap = "{\"type\": \"text\", \"text\": \"Sta\"}\n{\"type\": \"result\", \"exit_code\": 0, \"text\": \"Start here.\", \"replay_gap\": true}\n";
         assert_eq!(hermes_reply(gap).unwrap().text, "Start here.");
@@ -1267,12 +1320,26 @@ mod tests {
 
     #[test]
     fn hermes_is_run_in_its_own_profile_with_the_message_on_stdin() {
-        let args = hermes_args("knights-circle", None, Duration::from_secs(120));
-        assert_eq!(args, ["-p", "knights-circle", "chat", "--query-file", "-", "--format", "stream-json", "--source", "tool", "--run-budget", "120"]);
-        let pinned = hermes_args("kc", Some("room-thread"), Duration::from_secs(60));
+        let args = hermes_args("knights-circle", None);
+        assert_eq!(args, ["-p", "knights-circle", "chat", "--query-file", "-", "--format", "stream-json", "--source", "tool"]);
+        let pinned = hermes_args("kc", Some("room-thread"));
         assert_eq!(&pinned[pinned.len() - 3..], ["-c", "room-thread", "--create-if-missing"]);
         assert!(valid_hermes_profile("knights-circle") && valid_hermes_profile("kc_2"));
         assert!(!valid_hermes_profile("-p") && !valid_hermes_profile("Knights") && !valid_hermes_profile("a/b") && !valid_hermes_profile(""));
+    }
+
+    #[test]
+    fn hermes_run_budget_is_read_as_hermes_reads_it() {
+        let value = |json: &str| pyjson::loads_str(json).unwrap();
+        for off in ["null", "0", "-5", "true", "false", "\"abc\"", "\"\"", "[]"] {
+            assert_eq!(hermes_run_budget_problem(&value(off), 120).as_deref(), Some("agent.run_budget_seconds is not set"), "{off}");
+        }
+        for fits in ["120", "119.5", "\"60\"", "0.5"] {
+            assert_eq!(hermes_run_budget_problem(&value(fits), 120), None, "{fits}");
+        }
+        let long = "agent.run_budget_seconds is 900, longer than EUREKA_HERMES_TIMEOUT (120)";
+        assert_eq!(hermes_run_budget_problem(&value("900"), 120).as_deref(), Some(long));
+        assert_eq!(hermes_run_budget_problem(&value("\"900\""), 120).as_deref(), Some(long));
     }
 
     #[test]

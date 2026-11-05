@@ -112,7 +112,7 @@ macOS (arm64 and x64), Linux (x64 and arm64) and Windows x64 by
 | `EUREKA_HERMES_BIN` | The `hermes` executable (default: found on `PATH`) *(Rust only)* |
 | `EUREKA_HERMES_PROFILE` | Hermes profile for room turns (default `knights-circle`; must exist) *(Rust only)* |
 | `EUREKA_HERMES_SESSION` | Optional: one named Hermes session for every turn (default: a new session each turn) *(Rust only)* |
-| `EUREKA_HERMES_TIMEOUT` | Seconds per turn, 1–1800 (default 120), also passed to Hermes as `--run-budget` *(Rust only)* |
+| `EUREKA_HERMES_TIMEOUT` | Seconds the daemon waits per turn, 1–1800 (default 120). Set the profile's `agent.run_budget_seconds` no higher *(Rust only)* |
 | `EUREKA_OLLAMA_URL` | Ollama base URL, literal loopback only (default `http://127.0.0.1:11434`) *(Rust only)* |
 
 Unusable settings stop the daemon at startup with a reason. They never fall
@@ -238,24 +238,26 @@ a real `--json` result from it, trimmed to the reply and its basic run fields.
 
 ### The Hermes Agent backend
 
-> **Untested against a real Hermes.** This backend has been tested only against
-> `conformance/fake_hermes.py`, a stand-in written from Hermes Agent v0.22.5's
-> source. It has not run against a real Hermes install, and won't have until
-> it is tried on WSL2 (the example at the end of this file). Until then, treat
-> the command line, the reply parsing and the startup check as unconfirmed.
+> **Tested on Hermes Agent v0.22.7 under WSL2, by hand.** The command below,
+> run on a chat-only profile (0 of 27 tools, no MCP), gave `exit_code` 0 and a
+> reply in about 20 s. That was before the current message format, so what a
+> real Hermes does with the new format is not yet tested. Timeouts, failures and
+> named sessions have run only against `conformance/fake_hermes.py`, a stand-in
+> written from v0.22.7's source.
 
 With `EUREKA_ROOM_TURN_BACKEND=hermes`, each room turn runs
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) headless:
 
     hermes -p <EUREKA_HERMES_PROFILE> chat --query-file - --format stream-json \
-           --source tool --run-budget <EUREKA_HERMES_TIMEOUT>
+           --source tool
 
 The room's message (the same format OpenClaw gets, see *Room text is untrusted*) is
 written to its stdin. This is Hermes' documented way to send one message from a
 program. `--format stream-json` prints one JSON event per line and ends with a
 `{"type": "result", "exit_code": …, "text": …}` event, and the reply is that
-event's `text`. Text deltas, tool calls, tool output and stray log lines are
-never passed to the room.
+event's `text`. Text deltas, tool calls, tool output and anything that is not
+JSON, such as Hermes' `Session:` and `session_id:` lines, are never passed to the
+room.
 
 **Why a profile of its own.** A Hermes profile is a separate Hermes home, with
 its own sessions, memory, `SOUL.md`, config and skills. Running rooms in
@@ -285,11 +287,38 @@ The safeguards are the OpenClaw ones:
 - **Process cleanup.** The process runs in its own process group, which is
   killed on timeout, on oversized output, or if the turn is abandoned.
   Hermes' own background gateway starts in a session of its own, so it is not
-  killed and exits when idle.
+  killed and exits when idle. See [Time limits](#time-limits) for what that
+  means for a turn already running.
 - **Failure reasons.** These are `upstream_error`: a non-zero exit, a result
   whose `exit_code` is not 0, no result event, or a reply with no text. A
   program that cannot start is `upstream_unavailable`. Passing the time limit
   is `timeout`.
+
+#### Time limits
+
+`EUREKA_HERMES_TIMEOUT` limits how long the daemon waits. The room gets
+`timeout` when it passes, and the daemon kills the `hermes` process.
+
+**That does not stop the turn.** In v0.22.7, `hermes chat` is a client of the
+profile's gateway, and killing a client only detaches it: Hermes' docs say
+accepted work continues at the gateway. The turn runs to its end there and its
+reply is dropped, so a slow model keeps using tokens after the room has moved on.
+With a named session (`EUREKA_HERMES_SESSION`), the next turn can also queue
+behind it. To end such a turn at once, run
+`hermes -p <profile> gateway stop --interrupt`; the next turn starts the gateway again.
+
+v0.22.7 refuses `--run-budget` on every run, so the daemon does not pass it.
+Set the budget in the profile instead, no higher than the timeout:
+
+    hermes -p knights-circle config set agent.run_budget_seconds 120
+
+The daemon reads this at startup. It prints a `WARNING:` with this command if the
+setting is missing or longer than `EUREKA_HERMES_TIMEOUT`, and starts anyway.
+
+The budget is **not a hard stop**. It caps how long Hermes waits on a
+non-streaming provider call that has gone quiet, down to no less than 60 s. Its other effect, a wrap-up
+notice at 80%, is attached to a tool result, so a chat-only profile never gets
+it. A named session keeps the budget from when the session was created.
 
 #### Chat only: no commands, code or files
 
@@ -360,7 +389,7 @@ What the check does **not** cover:
 - **Tools from a future Hermes release.** A later release could add a new
   toolset that runs commands. Re-check `tools --summary` after upgrading.
 
-Built against Hermes Agent v0.22.5 (`hermes_cli/stream_json.py`).
+Built against Hermes Agent v0.22.7 (`hermes_cli/stream_json.py`).
 `tests/fixtures/hermes-stream-json.jsonl` is written field for field as that
 emitter writes events. It was not captured from a live run.
 
@@ -477,15 +506,18 @@ reaches it at `http://127.0.0.1:8765`.
        hermes -p knights-circle setup          # choose its model; a local Ollama keeps it $0
        echo "Say hello in five words." | hermes -p knights-circle chat --query-file - --format stream-json --source tool
 
-   The last line of output should be a `"type": "result"` event with
-   `"exit_code": 0`. Then make the profile chat only, as described in
+   You should see a `"type": "result"` event with `"exit_code": 0`, along with
+   `Session:` and `session_id:` lines, which the daemon ignores. Then make the
+   profile chat only and set its time budget, as described in
    [Chat only](#chat-only-no-commands-code-or-files):
 
        hermes -p knights-circle config set agent.disabled_toolsets '["terminal", "file", "code_execution", "delegation", "cronjob", "browser", "computer_use", "skills"]'
        hermes -p knights-circle config set platform_toolsets.cli '[]'
        hermes -p knights-circle tools --summary
+       hermes -p knights-circle config set agent.run_budget_seconds 120
 
-   The daemon refuses to start until this is done.
+   The daemon refuses to start until the profile is chat only, and warns if the
+   budget is missing.
 
    A fresh profile is used on purpose. `--clone` would also copy your
    `MEMORY.md`, `USER.md` and API keys into a profile whose replies are shared
