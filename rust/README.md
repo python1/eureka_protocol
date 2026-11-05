@@ -105,7 +105,9 @@ macOS (arm64 and x64), Linux (x64 and arm64) and Windows x64 by
 | `EUREKA_INFERENCE` | `1`/`on` to offer `inference` (Ollama `/api/generate`) |
 | `EUREKA_ROOM_TURN_BACKEND` | `ollama` (default), `openclaw` or `hermes` *(Rust only)* |
 | `EUREKA_OPENCLAW_BIN` | The `openclaw` executable (default: found on `PATH`) *(Rust only)* |
-| `EUREKA_OPENCLAW_SESSION` | Session for room turns (default `knights-circle`) *(Rust only)* |
+| `EUREKA_OPENCLAW_SESSION` | Session for room turns (default `knights-circle`, or `room-<agent>` with an agent) *(Rust only)* |
+| `EUREKA_OPENCLAW_AGENT` | A chat-only OpenClaw agent for room turns (default: none, with a warning) *(Rust only)* |
+| `EUREKA_OPENCLAW_REQUIRE_CHAT_ONLY` | `1`/`on` to stop at startup unless that agent is chat only *(Rust only)* |
 | `EUREKA_OPENCLAW_TIMEOUT` | Seconds per turn, 1–1800 (default 120) *(Rust only)* |
 | `EUREKA_HERMES_BIN` | The `hermes` executable (default: found on `PATH`) *(Rust only)* |
 | `EUREKA_HERMES_PROFILE` | Hermes profile for room turns (default `knights-circle`; must exist) *(Rust only)* |
@@ -127,6 +129,39 @@ run this instead, then restart the daemon (it reads the file at startup):
 It writes exactly the file the Python command writes (tested byte for byte).
 It refuses a revoked key.
 
+To withdraw trust from a room, by name or by key, then restart the daemon:
+
+    ./eureka-daemon trust revoke knights-circle-node_xxxxxxxx --reason "lost that browser"
+
+Revoking is permanent. The key stays refused for as long as the revocation is in
+the file, and `trust add` will not bring it back. A running daemon keeps trusting it
+until it restarts. A key that was never trusted can be revoked too, so it can never be
+added by mistake.
+
+### Room text is untrusted
+
+Room text includes other models' output and text from people you do not know.
+OpenClaw and Hermes turns therefore start with a fixed notice saying so, followed
+by the room's messages as one JSON object per line, between markers:
+
+    <room-turn-7f3a…>
+    {"role":"room_instructions","content":"You are the Critic."}
+    {"role":"user","content":"Plan the beds"}
+    </room-turn-7f3a…>
+
+- **Line breaks are escaped**, so a message cannot start a line that looks like
+  another message, a role or a closing marker. Control characters, terminal
+  escapes and bidirectional overrides are escaped too.
+- **The marker is random for each turn**, so room text, written before the marker
+  exists, cannot close the block.
+- **The room's `system` message becomes `room_instructions`**, because it comes
+  from the browser and not from you.
+
+This is labelling. A model can still be talked into things, so what actually limits
+the damage is what the agent can do: keep room agents chat only, as below for each
+backend. The `ollama` backend keeps its short preamble and the roles as sent. It has
+no tools here, and its requests stay identical to the Python daemon's.
+
 ### The OpenClaw backend
 
 With `EUREKA_ROOM_TURN_BACKEND=openclaw`, each room turn runs
@@ -143,9 +178,8 @@ printed before the result are never passed to the room. The safeguards:
   conversation. The room cannot choose it.
 - **No shell.** Arguments go straight to the program. The room's text is one
   argv entry, so `$(…)`, backticks and `;` are just text.
-- **Message format.** The message is Knights Circle's room preamble followed by
-  the room's messages as `[role]` blocks. Payload checks (roles, 200 messages,
-  48,000 characters) run before anything is started.
+- **Message format.** See *Room text is untrusted* below. Payload checks (roles,
+  200 messages, 48,000 characters) run before anything is started.
 - **Limits.** stdin is closed. stdout is read up to 8 MiB (a one-line reply
   is about 23 KB of JSON). Colour codes are removed from the reply, and the
   reply is capped at 12,000 characters. stderr goes to the log only.
@@ -157,7 +191,49 @@ printed before the result are never passed to the room. The safeguards:
   run, or a reply with no text. A program that cannot start is
   `upstream_unavailable`. Passing the time limit is `timeout`.
 
-Tested against OpenClaw 2026.6.5. `tests/fixtures/openclaw-agent-json.json` is
+**Chat only.** OpenClaw's tools run as your user, and with no profile set its core
+tools are not filtered. Room turns should go to an agent of their own that cannot
+run commands or touch files:
+
+    openclaw agents add knights-circle --workspace ~/.openclaw/workspace-knights-circle --non-interactive
+    openclaw config set agents.entries.knights-circle.tools.profile minimal
+    openclaw config set agents.entries.knights-circle.tools.deny '["group:runtime","group:fs","group:ui","group:automation","group:nodes","group:plugins","group:agents","group:web","group:messaging","group:media","group:memory"]' --strict-json
+
+Then set `EUREKA_OPENCLAW_AGENT=knights-circle`. Each turn runs with `--agent
+knights-circle` and, unless you set `EUREKA_OPENCLAW_SESSION`, the session
+`room-knights-circle`. The session has its own name because an existing session keeps
+the agent it began with, so reusing an old `knights-circle` session could keep the
+main agent and its tools. If you do set a session, use one this agent started.
+
+At startup the daemon reads the policy with `openclaw config get
+agents.entries.<id>.tools --json`. It wants the `minimal` profile, every group above
+in `deny`, and no `allow`, `alsoAllow`, `byProvider` or `toolsBySender`.
+
+- **Run directly**, a missing or unsafe agent prints a `WARNING:` with the fix, and
+  the daemon carries on, so an existing setup keeps working. With no agent set, it
+  doesn't read the policy at all.
+- **With `EUREKA_OPENCLAW_REQUIRE_CHAT_ONLY=1`**, the same finding stops the daemon,
+  and so does a policy it cannot read.
+
+> **Not yet run against a real OpenClaw.** The agent setup, policy check and
+> `--agent` turn are tested only against `conformance/fake_openclaw.py`, written
+> from OpenClaw's documentation. Confirm them on a spare agent first, for example by
+> asking the room agent to run a command and checking that it cannot.
+
+What the check does not cover:
+
+- **It reads your written config, not the tools the model finally gets.** OpenClaw
+  documents no command that prints the resolved list. Use the test above, or `openclaw
+  logs --follow | grep tools`.
+- **Older `agents.list` rosters.** The check reads `agents.entries` and reports a
+  policy kept anywhere else as missing. `openclaw doctor` migrates them.
+- **`$skill-name` references.** OpenClaw's docs say `--message` still honours these,
+  and room text can contain them. Keep skills out of the room agent's workspace.
+- **Later edits and new releases.** The check runs at startup, and a later release
+  could add a tool group this list doesn't name.
+
+Reply parsing and the command line without `EUREKA_OPENCLAW_AGENT` were tested against
+OpenClaw 2026.6.5, before the current message format. `tests/fixtures/openclaw-agent-json.json` is
 a real `--json` result from it, trimmed to the reply and its basic run fields.
 
 ### The Hermes Agent backend
@@ -174,7 +250,7 @@ With `EUREKA_ROOM_TURN_BACKEND=hermes`, each room turn runs
     hermes -p <EUREKA_HERMES_PROFILE> chat --query-file - --format stream-json \
            --source tool --run-budget <EUREKA_HERMES_TIMEOUT>
 
-The room's message (the same preamble and `[role]` blocks OpenClaw gets) is
+The room's message (the same format OpenClaw gets, see *Room text is untrusted*) is
 written to its stdin. This is Hermes' documented way to send one message from a
 program. `--format stream-json` prints one JSON event per line and ends with a
 `{"type": "result", "exit_code": …, "text": …}` event, and the reply is that
@@ -342,7 +418,8 @@ Nothing is exposed on the LAN, and the browser still talks to
        EUREKA_ROOM_TURN=1 EUREKA_ROOM_TURN_BACKEND=openclaw \
          eureka-daemon 8765 --cors-origin https://knights-circle.vercel.app
 
-   It prints `public key: …`, which you need in step 6. The line
+   This example has no dedicated agent, so it prints a `WARNING:` with the steps to
+   add one (see *The OpenClaw backend*). It prints `public key: …`, which you need in step 6. The line
    `room-turn via OpenClaw (… agent --session-id knights-circle, 120s limit)`
    confirms the backend. If `openclaw` is not on root's `PATH`, set
    `EUREKA_OPENCLAW_BIN=/full/path/to/openclaw`.

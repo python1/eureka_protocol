@@ -11,7 +11,7 @@ records argv and the query (as JSON, one line per call) to $FAKE_HERMES_LOG, the
 $FAKE_HERMES_MODE says. Events are written the way hermes_cli/stream_json.py writes them: one JSON
 object per stdout line, ending with a `result` event; `session_id:` goes to stderr.
 
-  ok     a reply quoting the profile and the last line of the query
+  ok     a reply quoting the profile and the last line of the last room message
   tools  the same, with a tool call whose output looks like a result event
   noisy  a stray log line on stdout before the events
   gap    text deltas stop early (replay gap); the result carries the whole reply
@@ -50,7 +50,9 @@ if log:
 
 mode = os.environ.get("FAKE_HERMES_MODE", "ok")
 profile = args[args.index("-p") + 1] if "-p" in args else "default"
-last = query.strip().splitlines()[-1] if query and query.strip() else ""
+# The last room message: the last line of the last JSON line between the room-turn markers.
+room_lines = [json.loads(line) for line in (query or "").splitlines() if line.startswith('{"role"')]
+last = room_lines[-1]["content"].strip().splitlines()[-1] if room_lines else ""
 SESSION = "20261101_093000_a1b2c3"
 
 

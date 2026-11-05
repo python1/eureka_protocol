@@ -7,7 +7,11 @@ $FAKE_OPENCLAW_LOG, then behaves as $FAKE_OPENCLAW_MODE says. With --json,
 replies are printed the way OpenClaw 2026.6.5 prints them: a result object
 with the reply in result.payloads[].text, among run metadata.
 
-  ok     reply quoting the session and the last line of the message
+`config get <path> --json` prints that path from the JSON file $FAKE_OPENCLAW_CONFIG (path -> value),
+or the failure envelope and exit 1 when it is not there, as OpenClaw documents.
+$FAKE_OPENCLAW_CONFIG_FAIL makes it exit 2.
+
+  ok     reply quoting the session and the last line of the last room message
   ansi   the same reply wrapped in colour codes
   banner the terminal banner and a joke line, then the result
   error  a result with status "error"
@@ -27,6 +31,20 @@ import sys
 import time
 
 log = os.environ.get("FAKE_OPENCLAW_LOG")
+if sys.argv[1:3] == ["config", "get"]:
+    if log:
+        with open(log, "a") as f:
+            f.write(json.dumps({"config": sys.argv[1:]}) + "\n")
+    if os.environ.get("FAKE_OPENCLAW_CONFIG_FAIL"):
+        print("config could not be read", file=sys.stderr)
+        sys.exit(2)
+    path = os.environ.get("FAKE_OPENCLAW_CONFIG")
+    settings = json.load(open(path)) if path else {}
+    if sys.argv[3] not in settings:
+        print(json.dumps({"ok": False, "error": {"type": "cli_error", "message": "unset"}}))
+        sys.exit(1)
+    print(json.dumps(settings[sys.argv[3]], indent=2))
+    sys.exit(0)
 if log:
     with open(log, "a") as f:
         f.write(json.dumps({"argv": sys.argv[1:], "pid": os.getpid(), "pgid": os.getpgid(0)}) + "\n")
@@ -35,7 +53,9 @@ mode = os.environ.get("FAKE_OPENCLAW_MODE", "ok")
 args = sys.argv[1:]
 session = args[args.index("--session-id") + 1] if "--session-id" in args else "?"
 message = args[args.index("--message") + 1] if "--message" in args else ""
-last = message.strip().splitlines()[-1] if message.strip() else ""
+# The last room message: the last line of the last JSON line between the room-turn markers.
+room_lines = [json.loads(line) for line in message.splitlines() if line.startswith('{"role"')]
+last = room_lines[-1]["content"].strip().splitlines()[-1] if room_lines else ""
 as_json = "--json" in args
 BANNER = "\u2502\n\u25c7  OpenClaw 2026.6.5 (5181e4f)\n\u2502\n\u2502  Why did the lobster refuse to share? It was a little shellfish.\n\u2502\n\u25c7\n"
 

@@ -80,7 +80,11 @@ def test_a_turn_runs_hermes_in_its_profile_with_the_room_on_stdin(hermes, ollama
     assert call["argv"] == ["-p", "knights-circle", "chat", "--query-file", "-", "--format", "stream-json",
                             "--source", "tool", "--run-budget", "120"]
     assert call["stdin"].startswith("You are an external agent taking one turn in a Knights Circle room")
-    assert "[system]\nYou are the Critic.\n\n[user]\nPlan the beds\n\n[user]\nAnd the path; rm -rf / $(whoami) `id`" in call["stdin"]
+    assert "untrusted data" in call["stdin"]
+    assert [json.loads(line) for line in call["stdin"].splitlines() if line.startswith('{"role"')] == [
+        {"role": "room_instructions", "content": "You are the Critic."},
+        {"role": "user", "content": "Plan the beds"},
+        {"role": "user", "content": "And the path; rm -rf / $(whoami) `id`"}]
     assert call["pgid"] == call["pid"]
     # The profile's tool settings were read from Hermes itself, once, at startup.
     assert [e["config"] for e in logged(log) if "config" in e] == [

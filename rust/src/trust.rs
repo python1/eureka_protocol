@@ -186,6 +186,26 @@ impl TrustList {
         self.add(name, key, granted)
     }
 
+    /// `TrustList.revoke(public_key, reason)`. Returns the name the key held, if any. A key that was
+    /// never trusted can be revoked too, so it can never be added by mistake.
+    pub fn revoke(&mut self, public_key: &str, reason: Option<&str>) -> Result<Option<String>, TrustError> {
+        let key = normalise_public_key(&Value::str(public_key), "revocation")?;
+        let name = self.by_key.get(&key).cloned();
+        let mut entry = vec![("public_key", Value::str(public_key))];
+        if let Some(reason) = reason {
+            entry.push(("reason", Value::str(reason)));
+        }
+        entry.push(("revoked_at", Value::str(crate::isotime::now_iso())));
+        let entry = Value::Object(entry.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+        self.apply_revocation(&entry)?;
+        Ok(name)
+    }
+
+    /// The public key trusted under this name.
+    pub fn key_named(&self, name: &str) -> Option<String> {
+        self.by_key.iter().find(|(_, n)| n.as_str() == name).map(|(k, _)| k.clone())
+    }
+
     /// `TrustList.to_document()`: always the current version, with a revocation list even when empty.
     pub fn to_document(&self) -> Value {
         let peers = self
