@@ -132,6 +132,10 @@ jobs:
             fi
           done
 
+      - name: Check the third-party notices are up to date
+        if: runner.os == 'Linux'
+        run: python3 rust/ci/third-party-licenses.py --check
+
       - name: Package
         run: rust/ci/package.sh "${{ matrix.target }}" dist
 
