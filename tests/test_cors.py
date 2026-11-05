@@ -66,7 +66,7 @@ def test_origins_must_be_exact():
     assert cors.normalise_origin("http://127.0.0.1:4173") == "http://127.0.0.1:4173"
     assert cors.normalise_origin("http://localhost:4173") == "http://localhost:4173"
     for bad in ("*", "https://*.vercel.app", "https://example.com/path", "example.com",
-                "http://example.com", "http://192.168.1.5:4173", "ftp://example.com", "",
+                "http://example.com", "http://192.168.0.5:4173", "ftp://example.com", "",
                 "https://user@example.com", "https://example.com/?q=1"):
         with pytest.raises(ValueError):
             cors.normalise_origin(bad)

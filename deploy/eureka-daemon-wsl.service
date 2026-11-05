@@ -1,16 +1,16 @@
 [Unit]
-Description=Eureka Protocol daemon (WSL, wsl-hermes)
-Documentation=file:///home/stunner/eureka/eureka_protocol/DEPLOYMENT.md
+Description=Eureka Protocol daemon (WSL, wsl-peer)
+Documentation=file:///home/operator/eureka/eureka_protocol/DEPLOYMENT.md
 After=network-online.target
 Wants=network-online.target
 
-# Same crash-loop guard as CT 101, and the same arithmetic: StartLimitIntervalSec
+# Same crash-loop guard as Host A, and the same arithmetic: StartLimitIntervalSec
 # must be comfortably longer than RestartSec x StartLimitBurst or the limiter
 # never trips. Five attempts with backoff span ~100s against a 300s window.
 #
-# It matters more here than on CT 101, because the most likely failure on this
+# It matters more here than on Host A, because the most likely failure on this
 # host is a preflight refusal -- a wrong path, or an identity that is not
-# node_ef0a1f59 -- and that is a mistake to stop on, not to retry forever.
+# node_cccccccc -- and that is a mistake to stop on, not to retry forever.
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -24,22 +24,22 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 
 # --- Identity: the four variables the preflight refuses to default ----------
-# On CT 101 these two lines are the only thing standing between a typo and a
+# On Host A these two lines are the only thing standing between a typo and a
 # node that comes back under a different node_id, because the identity loader
 # CREATES a key when the file it is pointed at does not exist. This host has a
 # third and a fourth: EUREKA_EXPECT_NODE_ID pins the answer, so the failure is
 # caught rather than merely made unlikely, and EUREKA_PYTHON names the one
 # interpreter that has the dependencies -- there is more than one venv on this
 # machine's PATH depending on who started what.
-Environment=EUREKA_PYTHON=/home/stunner/eureka/venv/bin/python
-Environment=EUREKA_IDENTITY_PATH=/home/stunner/.eureka/identity.key
-Environment=EUREKA_TRUST_PATH=/home/stunner/.eureka/trust.json
-Environment=EUREKA_EXPECT_NODE_ID=node_ef0a1f59
+Environment=EUREKA_PYTHON=/home/operator/eureka/venv/bin/python
+Environment=EUREKA_IDENTITY_PATH=/home/operator/.eureka/identity.key
+Environment=EUREKA_TRUST_PATH=/home/operator/.eureka/trust.json
+Environment=EUREKA_EXPECT_NODE_ID=node_cccccccc
 
 # --- Capabilities: which of them this HOST can actually serve ---------------
 # web-retrieval needs nothing but an outbound socket, so it is registered
-# everywhere. inference needs an Ollama on this machine, which CT 101 does not
-# have -- so registering it unconditionally would make CT 101 advertise a
+# everywhere. inference needs an Ollama on this machine, which Host A does not
+# have -- so registering it unconditionally would make Host A advertise a
 # capability it cannot serve, which is the exact lie the registry's startup
 # check exists to prevent, only moved one level down where that check cannot
 # see it. The decision is therefore per host, and this is where a host says so,
@@ -50,12 +50,12 @@ Environment=EUREKA_EXPECT_NODE_ID=node_ef0a1f59
 # not offering what it was deployed for.
 Environment=EUREKA_INFERENCE=1
 
-WorkingDirectory=/home/stunner/eureka
+WorkingDirectory=/home/operator/eureka
 
 # Checked before uvicorn binds anything: paths present, identity is the node
 # peers already trust, trust file loads against the advertised list. A non-zero
 # exit here means ExecStart never runs, and the reason is in the journal.
-ExecStartPre=/home/stunner/eureka/eureka_protocol/deploy/wsl-preflight.sh
+ExecStartPre=/home/operator/eureka/eureka_protocol/deploy/wsl-preflight.sh
 
 # The preflight now makes a real generate call against Ollama, and the first
 # one after a boot pays to load 5.2 GB into VRAM before it answers. systemd's
@@ -66,7 +66,7 @@ ExecStartPre=/home/stunner/eureka/eureka_protocol/deploy/wsl-preflight.sh
 # failed to start".
 TimeoutStartSec=300
 
-# TLS only, exactly as CT 101 serves. --no-plain refuses to start without
+# TLS only, exactly as Host A serves. --no-plain refuses to start without
 # --tls-port, so a half-edit cannot produce a daemon listening on nothing.
 #
 # --host 0.0.0.0 is required: the daemon binds loopback unless told
@@ -78,7 +78,7 @@ TimeoutStartSec=300
 # deployment only ever reads. Pointing it at the state directory keeps
 # ~/.eureka untouched, and the material there is derived from the identity and
 # regenerated whenever it stops matching, so it is safe to delete.
-ExecStart=/home/stunner/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
+ExecStart=/home/operator/eureka/venv/bin/python -m eureka_protocol.src.eureka_daemon.server \
     --tls-port 8443 --no-plain --tls-dir /var/lib/eureka-wsl/tls --host 0.0.0.0
 
 # on-failure, not always: a clean exit 0 is somebody stopping the daemon on
@@ -93,16 +93,16 @@ StandardError=journal
 SyslogIdentifier=eureka-daemon
 
 # --- Identity ---------------------------------------------------------------
-# The invoking user, not a dedicated system account. CT 101 has one because its
+# The invoking user, not a dedicated system account. Host A has one because its
 # key lives in /var/lib and nothing else needs it; here the identity is at
-# ~stunner/.eureka and the venv and repo are under ~stunner too, so a separate
+# ~operator/.eureka and the venv and repo are under ~operator too, so a separate
 # account would need read access across that whole home directory -- which is
 # strictly more exposure than reusing the account that already owns it.
-User=stunner
-Group=stunner
+User=operator
+Group=operator
 
 # --- Hardening --------------------------------------------------------------
-# read-only, not yes. CT 101 can afford ProtectHome=yes because its key,
+# read-only, not yes. Host A can afford ProtectHome=yes because its key,
 # interpreter and code all live outside /home; on this host all three are
 # inside it, so hiding it entirely would leave the daemon nothing to start
 # from. read-only is the useful half of that setting: the identity and the
@@ -120,11 +120,11 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 
-# /var/lib/eureka-wsl, created 0700 and owned by stunner, holding only the TLS
+# /var/lib/eureka-wsl, created 0700 and owned by operator, holding only the TLS
 # certificate and key. This is the one writable path the service has, and it is
 # derived state: delete it and the next start rebuilds it from the identity.
 #
-# Deliberately NOT /var/lib/eureka. That name is CT 101's, and a directory
+# Deliberately NOT /var/lib/eureka. That name is Host A's, and a directory
 # called eureka on a second host is how somebody eventually copies an identity
 # into the wrong one.
 StateDirectory=eureka-wsl

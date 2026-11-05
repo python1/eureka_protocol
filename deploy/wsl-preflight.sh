@@ -16,7 +16,7 @@
 #     starts and refuses every handshake.
 #
 # Both are right for the library. Neither is right for a redeploy of a node
-# whose whole job is to keep answering to node_ef0a1f59. So the paths are
+# whose whole job is to keep answering to node_cccccccc. So the paths are
 # required rather than defaulted, the files must already exist, and the
 # identity must hash to the node_id named in the unit -- checked before uvicorn
 # binds anything, so a provisioning mistake is a start failure with a reason in

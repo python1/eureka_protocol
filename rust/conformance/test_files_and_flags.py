@@ -95,7 +95,7 @@ def run_binary(*args, env=None):
     (["--hos", "127.0.0.1", "--nope"], {}, "unrecognized arguments: --nope"),
     ([], {"EUREKA_ROOM_TURN": "maybe"}, "neither on nor off"),
     ([], {"EUREKA_ROOM_TURN": "1", "EUREKA_ROOM_TURN_MODEL": "a b"}, "not an Ollama model name"),
-    ([], {"EUREKA_ROOM_TURN": "1", "EUREKA_OLLAMA_URL": "http://192.168.1.5:11434"}, "not loopback"),
+    ([], {"EUREKA_ROOM_TURN": "1", "EUREKA_OLLAMA_URL": "http://192.168.0.5:11434"}, "not loopback"),
 ])
 def test_bad_flags_and_settings_stop_with_a_reason(args, env, words):
     result = run_binary(str(free_port()), *args, env=env) if args[:1] != ["abc"] else run_binary(*args, env=env)

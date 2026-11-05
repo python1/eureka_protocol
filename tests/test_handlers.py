@@ -466,7 +466,7 @@ def test_the_concurrency_cap_survives_a_second_event_loop():
 
 @pytest.mark.parametrize("address", [
     "127.0.0.1", "127.1.2.3", "::1",
-    "10.0.0.7", "172.16.4.1", "192.168.1.180",
+    "10.0.0.7", "172.16.4.1", "192.168.0.11",
     "169.254.169.254",                     # cloud metadata, the classic target
     "100.64.0.1",                          # carrier-grade NAT
     "0.0.0.0", "::",
@@ -504,7 +504,7 @@ def test_the_test_only_flags_open_exactly_one_door_each():
 
 @pytest.mark.parametrize("url", [
     "http://127.0.0.1/", "http://127.0.0.1:8443/v1/manifest",
-    "http://[::1]/", "http://10.0.0.7/", "http://192.168.1.180:8443/v1/peers",
+    "http://[::1]/", "http://10.0.0.7/", "http://192.168.0.11:8443/v1/peers",
     "http://169.254.169.254/latest/meta-data/",
     "https://172.16.0.1/", "http://[::ffff:127.0.0.1]/",
 ])
@@ -841,7 +841,7 @@ def test_the_payload_cannot_choose_the_model_or_anything_else(ollama):
     result = run(infer(endpoint)({
         "prompt": "hello",
         "model": "gemma4:e4b",
-        "endpoint": "http://192.168.1.174:11434/api/generate",
+        "endpoint": "http://192.168.0.12:11434/api/generate",
         "url": "http://169.254.169.254/latest/meta-data/",
         "stream": True,
         "think": True,
@@ -997,7 +997,7 @@ def test_the_deployed_endpoint_is_a_literal_loopback_address():
 
 
 def test_an_endpoint_that_is_not_loopback_is_refused_at_construction():
-    for endpoint in ("http://192.168.1.152:11434/api/generate",
+    for endpoint in ("http://192.168.0.13:11434/api/generate",
                      "http://169.254.169.254/api/generate",
                      "http://8.8.8.8:11434/api/generate",
                      "http://[::ffff:8.8.8.8]:11434/api/generate"):
@@ -1093,7 +1093,7 @@ def test_a_nonsense_deadline_is_refused_at_registration():
 
 def test_inference_is_off_unless_the_host_says_otherwise():
     """
-    CT 101 has no Ollama. Registering the handler unconditionally would make it
+    Host A has no Ollama. Registering the handler unconditionally would make it
     advertise a capability it cannot serve -- the exact lie validate_advertised
     exists to prevent, moved one level down where that check cannot see it.
     """
@@ -1141,7 +1141,7 @@ def test_advertising_inference_without_a_handler_still_fails_at_startup():
 
 def test_enabling_inference_changes_nothing_about_web_retrieval():
     """
-    CT 101 and WSL both serve web-retrieval and only one of them serves
+    Host A and WSL both serve web-retrieval and only one of them serves
     inference. The second capability must not alter the first.
     """
     without = default_registry(inference=False)

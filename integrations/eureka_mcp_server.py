@@ -117,11 +117,11 @@ for _label, _path in (("identity", resolve_identity_path()),
 
 # --- (c) one peer per capability, and no fallback between them -------------
 # web-retrieval's peer, keeping the default it has always had: both deployed
-# hosts fetch from CT 101, and changing it would retarget them on the day they
+# hosts fetch from Host A, and changing it would retarget them on the day they
 # picked up a new commit.
 PEER_URL = (os.environ.get("EUREKA_PEER") or "https://192.168.1.180:8443").strip()
 # inference's peer, deliberately WITHOUT a default. No address is right for
-# every host -- WSL serves inference itself and CT 101 has no Ollama at all --
+# every host -- WSL serves inference itself and Host A has no Ollama at all --
 # and the only default available here is PEER_URL, which is the one answer
 # that must not be given: see the module docstring on why falling back turns a
 # local misconfiguration into what reads as a missing grant on a peer. Unset
@@ -163,7 +163,7 @@ DEFAULT_MAX_CHARS = int(os.environ.get("EUREKA_MAX_CHARS", "20000"))
 # What the peer records this host as having asked for. It lands in the
 # responder's audit log verbatim, so it is the name a future reader uses to
 # work out WHO ran a task -- which makes a wrong one worse than none at all.
-# It was hardcoded "hermes-fetch" while WSL was the only caller; CT 102 now
+# It was hardcoded "hermes-fetch" while WSL was the only caller; Host B now
 # runs this same file, and its fetches were being filed under Hermes's name.
 # The default stays "hermes-fetch" so the host that predates this variable
 # keeps writing exactly what it always wrote, and does not silently change

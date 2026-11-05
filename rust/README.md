@@ -10,6 +10,13 @@ file, wire protocol and answers, so Knights Circle and existing Python peers
 use it unchanged. The Python daemon stays the reference implementation, and
 `vectors/signatures-v1.json` is the shared contract both must meet byte for byte.
 
+**To seat your own agent in a Knights Circle room, start with the
+[quickstart](../docs/seat/quickstart.md).** Guides: [Grok Bot](../docs/seat/grok-bot.md),
+[OpenClaw](../docs/seat/openclaw.md), [Hermes Agent](../docs/seat/hermes.md),
+[Ollama](../docs/seat/ollama.md), [custom webhook](../docs/seat/custom-webhook.md),
+[security](../docs/seat/security.md) and [troubleshooting](../docs/seat/troubleshooting.md).
+The rest of this page is the reference.
+
 ## What is the same
 
 - **Protocol.** Three-message mutual handshake, signed `/v1/assign`, signed
@@ -103,6 +110,10 @@ Every pull request that touches the daemon is built, tested and smoke-tested on
 macOS (arm64 and x64), Linux (x64 and arm64) and Windows x64 by
 `.github/workflows/rust-build.yml`. That workflow publishes nothing.
 
+A version tag on `master` runs `.github/workflows/draft-release.yml`, which builds every platform and
+creates a **draft** release with `SHA256SUMS` and build attestations. It can't publish: a person reads
+the draft and presses Publish.
+
 ## Set up a seat
 
 A seat is the guided way to put one agent in a Knights Circle room:
@@ -136,7 +147,7 @@ routine and Execution on this computer set to Always allow, on a Mac, at commit 
 - Native Windows at a real console, where the hidden prompts use a different mechanism.
 
 **`setup`** asks which agent sits here (Grok Bot, OpenClaw, Hermes or Ollama), a seat
-name (default `Bot`) and a port (default the first free one from 8765). It creates the
+name (default `Bot`) and a port (default the first free one from 8766). It creates the
 identity, prints the public key to paste into Knights Circle, and takes the room key,
 which it trusts for room turns only.
 
@@ -666,8 +677,8 @@ and Hermes tests use `conformance/fake_openclaw.py` and
 
 ## Example: an OpenClaw agent on a Linux box, reached through SSH
 
-This uses the Antiochus setup: OpenClaw in a Proxmox container at
-`192.168.1.174`, Knights Circle in Chrome on the Mac. The daemon listens only
+This example has OpenClaw in a container or on a Linux box at
+`192.168.0.12`, Knights Circle in Chrome on the Mac. The daemon listens only
 on the container's loopback, and the Mac reaches it through an SSH tunnel.
 Nothing is exposed on the LAN, and the browser still talks to
 `http://127.0.0.1:8765`.
@@ -677,7 +688,7 @@ Nothing is exposed on the LAN, and the browser still talks to
        cd rust
        rustup target add x86_64-unknown-linux-musl
        cargo build --release --no-default-features --target x86_64-unknown-linux-musl
-       scp target/x86_64-unknown-linux-musl/release/eureka-daemon root@192.168.1.174:/usr/local/bin/
+       scp target/x86_64-unknown-linux-musl/release/eureka-daemon root@192.168.0.12:/usr/local/bin/
 
 2. **Check OpenClaw answers on its own (container).**
 
@@ -702,12 +713,12 @@ Nothing is exposed on the LAN, and the browser still talks to
 
 5. **Open the tunnel (Mac, leave it running).**
 
-       ssh -N -L 8765:127.0.0.1:8765 root@192.168.1.174
+       ssh -N -L 8765:127.0.0.1:8765 root@192.168.0.12
 
-6. **Add the agent (Knights Circle).** Name it `Antiochus`, give the address
+6. **Add the agent (Knights Circle).** Name it `Agent`, give the address
    `http://127.0.0.1:8765` and the public key from step 4, then choose
    **Check**. If Chrome asks to let the site reach devices on your local
-   network, allow it. Then in **Rooms**, pick *External agent · Antiochus* as
+   network, allow it. Then in **Rooms**, pick *External agent · Agent* as
    a team member.
 
 To keep it running, a systemd unit in the container

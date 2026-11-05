@@ -214,6 +214,12 @@ def test_running_out_of_input_says_so(seat):
     assert made.returncode == 1 and "input ended" in made.stderr
 
 
+def test_setup_suggests_ports_from_8766_and_leaves_8765_for_ssh_tunnels(seat):
+    made = seat.setup("4", "", "", ROOM_KEY, "")
+    assert made.returncode == 0, made.stdout + made.stderr
+    assert seat.config()["port"] >= 8766
+
+
 def test_setup_again_keeps_the_identity_and_other_rooms(seat, hook):
     seat.grok(hook)
     first = (seat.dir / "identity.key").read_text()

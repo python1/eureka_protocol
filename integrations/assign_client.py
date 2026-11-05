@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-antiochus_client.py -- issue a signed /v1/assign from CT 102 to a Eureka peer.
+assign_client.py -- issue a signed /v1/assign from a client node to a Eureka peer.
 
-The Antiochus-side counterpart to eureka_mcp_server.py. That one exposes a
+The agent-side counterpart to eureka_mcp_server.py. That one exposes a
 peer's capabilities to Hermes over MCP; this one is a plain CLI, so the node
 can be exercised and proven before anything is wired into OpenClaw. The
 protocol path is identical -- mutual handshake, signed assign, verified result
 -- because the point of this script is to prove the node works, and a proof
 that runs a different path than production proves the wrong thing.
 
-Antiochus is a CLIENT node. It advertises nothing and executes nothing: it is
+The agent is a CLIENT node. It advertises nothing and executes nothing: it is
 built with an empty capability list and no handler registry, so an assign that
 somehow reached it would be refused rather than dispatched. Its trust file
-therefore grants CT 101 nothing. Trusting a key and granting it a capability
+therefore grants Host A nothing. Trusting a key and granting it a capability
 are different acts, and only the first is needed to *call* a peer -- grants
 govern what a peer may ask of us, and there is nothing here to ask for.
 
@@ -47,11 +47,11 @@ how the payload is built, how long the client waits, and what a successful
 answer carries -- see CAPABILITY_TIMEOUTS and _payload_for.
 
 Usage:
-    export EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key
-    export EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json
-    ./antiochus_client.py https://example.com
-    ./antiochus_client.py --peer https://192.168.1.180:8443 https://example.com
-    ./antiochus_client.py --peer https://192.168.1.152:8443 \
+    export EUREKA_IDENTITY_PATH=/var/lib/eureka-agent/identity.key
+    export EUREKA_TRUST_PATH=/var/lib/eureka-agent/trust.json
+    ./assign_client.py https://example.com
+    ./assign_client.py --peer https://192.168.0.11:8443 https://example.com
+    ./assign_client.py --peer https://192.168.0.13:8443 \
         --capability inference "Say the single word: ping"
 
 stdout is the JSON result and nothing else, so the caller can pipe it. All
@@ -71,7 +71,7 @@ from typing import Any, Dict, NoReturn
 
 
 def _die(message: str) -> NoReturn:
-    print(f"antiochus-client: FATAL: {message}", file=sys.stderr, flush=True)
+    print(f"assign-client: FATAL: {message}", file=sys.stderr, flush=True)
     raise SystemExit(2)
 
 
@@ -105,7 +105,7 @@ from eureka_protocol.src.eureka_daemon.node import (  # noqa: E402
 )
 from eureka_protocol.src.eureka_daemon.trust import TrustError, TrustList  # noqa: E402
 
-DEFAULT_PEER = "https://192.168.1.180:8443"
+DEFAULT_PEER = "https://127.0.0.1:8443"
 
 # How long to wait, per capability. Each figure is sized against the
 # responder's registry DEADLINE for that capability and not against the
@@ -287,7 +287,7 @@ async def run(node: EurekaNode, peer: str, subject: str, capability: str,
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Issue a signed /v1/assign from Antiochus to a Eureka peer.")
+        description="Issue a signed /v1/assign to a Eureka peer.")
     parser.add_argument("subject",
                         help="the capability's input: the URL to have the peer "
                              "fetch, or with --capability inference the prompt "
@@ -303,11 +303,11 @@ def main() -> int:
     parser.add_argument("--capability", default="web-retrieval",
                         choices=sorted(CAPABILITY_TIMEOUTS))
     # Names the ENTRY POINT, not the host -- the host is already named by the
-    # signing key in every log line. CT 102 reaches CT 101 two ways, and while
-    # both wrote "antiochus-fetch" the peer's audit log could not tell a
+    # signing key in every log line. Host B reaches Host A two ways, and while
+    # both wrote "agent-fetch" the peer's audit log could not tell a
     # hand-run script from a Telegram message, which left "which path was
     # that?" answerable only by whoever remembered what they had run.
-    parser.add_argument("--task-name", default="antiochus-cli")
+    parser.add_argument("--task-name", default="assign-cli")
     parser.add_argument("--timeout", type=float, default=None,
                         help="seconds; defaults to the figure for the chosen "
                              "capability -- see CAPABILITY_TIMEOUTS")
@@ -321,7 +321,7 @@ def main() -> int:
     # EurekaNode prints progress to stdout; stdout here is the JSON payload.
     with contextlib.redirect_stdout(sys.stderr):
         node = build_node(identity_path, trust_path)
-        print(f"antiochus-client: node {node.node_id} "
+        print(f"assign-client: node {node.node_id} "
               f"({node.public_key_hex[:16]}...) -> {args.peer} "
               f"[{args.capability}, {timeout:g}s]", file=sys.stderr)
         outcome = asyncio.run(run(node, args.peer, args.subject, args.capability,

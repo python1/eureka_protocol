@@ -1,9 +1,14 @@
 # Eureka Protocol — working three-node deployment
 
+> **The names here are placeholders.** This is a working log from one real
+> deployment, with its machine names, addresses, user names, node IDs and keys
+> replaced: **Host A** runs the responder, **Host B** runs an OpenClaw agent, and
+> **the WSL host** runs Hermes Agent. Use your own values. Commit IDs and dates are real.
+
 First successful cross-machine mutual handshake: 2026-08-24, commit 976c1f1.
-Responder moved from CT 102 to its own container, CT 101, on 2026-08-28 —
-see "Moving the responder to another host". CT 101's trust file was migrated
-v1 -> v3 the same day and `wsl-hermes` now holds `web-retrieval`, which the
+Responder moved from Host B to its own container, Host A, on 2026-08-28 —
+see "Moving the responder to another host". Host A's trust file was migrated
+v1 -> v3 the same day and `wsl-peer` now holds `web-retrieval`, which the
 peer exercised end to end on 2026-08-29 — see "What the WSL peer proved". That
 peer is now driven by Hermes Agent over MCP; see "Hermes Agent reaching
 Eureka".
@@ -12,10 +17,10 @@ WSL gained a second capability on 2026-09-02: `inference`, served from a local
 Ollama, advertised there and on no other host, and granted to nobody yet. See
 "inference: what the caller does not get to choose".
 
-A third node joined on 2026-09-01: `ct102-openclaw` on CT 102, the host that
-holds the origin repo and runs Antiochus. It is an initiator only — no daemon,
-no listening port — and it proved a signed `/v1/assign` against CT 101 the same
-day. See "Adding Antiochus as a third node (CT 102)". Later the same day it was
+A third node joined on 2026-09-01: `agent-peer` on Host B, the host that
+holds the origin repo and runs the agent. It is an initiator only — no daemon,
+no listening port — and it proved a signed `/v1/assign` against Host A the same
+day. See "Adding the agent as a third node (Host B)". Later the same day it was
 wired into OpenClaw and is reachable from Telegram — see "Reaching Eureka from
 Telegram".
 
@@ -23,19 +28,19 @@ Telegram".
 
 | Node | Host | node_id | public key |
 |---|---|---|---|
-| eureka-node | CT 101 (192.168.1.180), Debian 13 unprivileged | node_a2ed8dc7 | a718592fde751a92db31fa27ee1e88efbd6c1134753fd9a5d92b08b89d118fd1 |
-| wsl-hermes | Alienware WSL2 (Ubuntu 24.04), 192.168.1.152 | node_ef0a1f59 | bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae |
-| ct102-openclaw | CT 102 (192.168.1.174), the origin-repo host | node_485428e3 | c373fd0d8b58bb325895859cdc065a2ed767a881717bd0246b617dcda335feba |
+| responder-node | Host A (192.168.0.11), Debian 13 unprivileged | node_aaaaaaaa | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa |
+| wsl-peer | Windows PC WSL2 (Ubuntu 24.04), 192.168.0.13 | node_cccccccc | cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc |
+| agent-peer | Host B (192.168.0.12), the origin-repo host | node_bbbbbbbb | bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb |
 
-**`ct102-antiochus` is not a name in this table, and must not become one.** It
-was `eureka-node`'s label before the move, so in this document it means key
-`a718592f...` — the identity CT 101 serves. Antiochus's own node is
-`ct102-openclaw`, key `c373fd0d...`, and the two have never shared a key. The
+**`old-agent-label` is not a name in this table, and must not become one.** It
+was `responder-node`'s label before the move, so in this document it means key
+`aaaaaaaa...` — the identity Host A serves. The agent's own node is
+`agent-peer`, key `bbbbbbbb...`, and the two have never shared a key. The
 label was retired rather than reused precisely so that a reader who greps this
-file for `ct102-antiochus` finds one meaning instead of two.
+file for `old-agent-label` finds one meaning instead of two.
 
-`eureka-node` was `ct102-antiochus` until the move. Only the label and the
-address changed: the key is the same bytes, so `node_a2ed8dc7` and the pinned
+`responder-node` was `old-agent-label` until the move. Only the label and the
+address changed: the key is the same bytes, so `node_aaaaaaaa` and the pinned
 public key are unchanged and no peer was reprovisioned. Names in a trust file
 are human labels — lookups are by key — so a peer that renames its entry, or
 does not, is unaffected either way.
@@ -46,26 +51,26 @@ machines, and the source copy is left in place rather than moved.
 
 ## Paths
 
-CT 101 (the live responder): repo /root/eureka_protocol, deployed runtime
+Host A (the live responder): repo /root/eureka_protocol, deployed runtime
 /opt/eureka, identity /var/lib/eureka/identity.key, trust
 /var/lib/eureka/trust.json, state owned by the `eureka` system user.
 The service runs /opt/eureka/venv; there is no separate development venv on
 this host, so the test suite runs against /opt/eureka/venv too.
 
-CT 102 (192.168.1.174) still holds the origin repo at
+Host B (192.168.0.12) still holds the origin repo at
 /root/.openclaw/workspace/eureka_protocol and its development venv
 /root/eureka_venv. Since 2026-09-01 it is also a node in its own right:
-identity /var/lib/eureka-antiochus/identity.key, trust
-/var/lib/eureka-antiochus/trust.json, both root-owned in a 0700 directory. It
+identity /var/lib/eureka-agent/identity.key, trust
+/var/lib/eureka-agent/trust.json, both root-owned in a 0700 directory. It
 runs no daemon — it initiates and nothing listens — so there is no service unit
 and no TLS material on this host.
 
-**CT 102 has two eureka state directories, and only one of them is Antiochus.**
+**Host B has two eureka state directories, and only one of them is the agent.**
 
 | directory | what it is | who uses it |
 |---|---|---|
-| `/var/lib/eureka-antiochus` | Antiochus's own identity, `node_485428e3` | `ct102-openclaw`, live |
-| `/var/lib/eureka` | the pre-move backup of `node_a2ed8dc7` | nobody — CT 101 serves that identity |
+| `/var/lib/eureka-agent` | The agent's own identity, `node_bbbbbbbb` | `agent-peer`, live |
+| `/var/lib/eureka` | the pre-move backup of `node_aaaaaaaa` | nobody — Host A serves that identity |
 
 The second one is the trap, and it is why the paths above are spelled out
 rather than left to default. Its daemon is stopped and disabled as of
@@ -73,14 +78,14 @@ rather than left to default. Its daemon is stopped and disabled as of
 backup, and two hosts must never serve this identity at once. Its `trust.json`
 there is still v1 (checked 2026-08-28) and predates the grant, so that backup
 restores the identity and an allowlist that grants nothing. Same for
-`/root/trust.json.v1.bak-20260828` on CT 101 — see "Granting a capability".
+`/root/trust.json.v1.bak-20260828` on Host A — see "Granting a capability".
 
-Pointing anything on CT 102 at `/var/lib/eureka` would bring up a second
-`node_a2ed8dc7` holding the same private key CT 101 is serving. It would
-handshake — CT 101 trusts that key — and the mesh would contain two nodes that
+Pointing anything on Host B at `/var/lib/eureka` would bring up a second
+`node_aaaaaaaa` holding the same private key Host A is serving. It would
+handshake — Host A trusts that key — and the mesh would contain two nodes that
 cannot be told apart. Nothing prevents this but the explicit paths.
 
-WSL (192.168.1.152, user `stunner`): repo ~/eureka/eureka_protocol, venv
+WSL (192.168.0.13, user `operator`): repo ~/eureka/eureka_protocol, venv
 ~/eureka/venv, identity ~/.eureka/identity.key, trust ~/.eureka/trust.json.
 Since 2026-09-01 it runs a daemon as well as initiating -- unit
 `eureka-daemon-wsl.service`, TLS material in /var/lib/eureka-wsl/tls, which is
@@ -89,7 +94,7 @@ and trust file are read, and the service mounts /home read-only. See "Stand up
 the responder on WSL".
 
 Both files in `~/.eureka` are 0600; the trust file was set to that on
-2026-09-02, matching CT 101's `/var/lib/eureka/trust.json`. It holds no secrets
+2026-09-02, matching Host A's `/var/lib/eureka/trust.json`. It holds no secrets
 -- public keys and labels -- but it is the allowlist that decides which keys
 this node will speak to, and it has no business being more readable than the
 identity sitting beside it.
@@ -117,7 +122,7 @@ peers maps NAME -> an entry. Lookups are by key; the name is a human label.
 Each node trusts the other's public key. Empty or absent file trusts nobody.
 No trust-on-first-use, no bypass.
 
-CT 101's live file has been v3 since 2026-08-28. Older versions still load:
+Host A's live file has been v3 since 2026-08-28. Older versions still load:
 v1 (peers maps name -> bare key string) grants nothing, v2 adds capabilities.
 Both are read-only history at this point -- neither can express a revocation,
 and a `revoked` list in a file declaring version 1 or 2 is a load error rather
@@ -144,7 +149,7 @@ every gate had already told yes.
 **This narrows what the trust file may grant.** A file granting `code-exec` or
 `data-analysis` loaded fine before and does not load now, and an unloadable
 trust file does not degrade the daemon, it stops it -- five attempts, then
-`failed`. CT 101's file grants `wsl-hermes` exactly `web-retrieval`, so it is
+`failed`. Host A's file grants `wsl-peer` exactly `web-retrieval`, so it is
 unaffected; check any other file before deploying, with the load in step 3 of
 "Granting a capability", which now takes its advertised list from the registry
 rather than repeating it.
@@ -161,8 +166,8 @@ restarting** -- see "Granting a capability".
 
 A v1 file authenticates peers and grants nothing, so a peer on it handshakes
 normally and gets `capability_not_granted` from `/v1/assign`. That is the safe
-direction to be wrong in, and it is where CT 101 sat until 2026-08-28: the file
-carried over from CT 102 was v1, so `wsl-hermes` was trusted and entitled to
+direction to be wrong in, and it is where Host A sat until 2026-08-28: the file
+carried over from Host B was v1, so `wsl-peer` was trusted and entitled to
 nothing. It was migrated that day, by the procedure below; what the run
 actually produced is recorded after it.
 
@@ -188,7 +193,7 @@ depending on a file nobody has loaded yet:
     from eureka_protocol.src.eureka_daemon.trust import TrustList
     path = '/var/lib/eureka/trust.json'
     trust = TrustList.load(path)
-    trust.add('wsl-hermes', trust.key_for('wsl-hermes'), ['web-retrieval'])
+    trust.add('wsl-peer', trust.key_for('wsl-peer'), ['web-retrieval'])
     with open(path, 'w') as fh:
         json.dump(trust.to_document(), fh, indent=2); fh.write('\n')
     "
@@ -203,7 +208,7 @@ depending on a file nobody has loaded yet:
     advertised = sorted(default_registry().names())
     print('this node advertises:', advertised)
     t = TrustList.load('/var/lib/eureka/trust.json', advertised=advertised)
-    k = t.key_for('wsl-hermes')
+    k = t.key_for('wsl-peer')
     print('grants:', sorted(t.capabilities_for(k)),
           '| web-retrieval:', t.grants(k, 'web-retrieval'),
           '| code-exec:', t.grants(k, 'code-exec'))
@@ -229,7 +234,7 @@ act that would make every standing grant for it live at once. A grant written
 now is a decision taken now -- and today a `code-exec` grant is not a dormant
 decision but a file that will not load.
 
-### What the run produced on CT 101, 2026-08-28
+### What the run produced on Host A, 2026-08-28
 
 The backup from step 1 is `/root/trust.json.v1.bak-20260828`, and it is the last
 v1 copy on that host. Restoring it is a rollback of the *migration*, not of the
@@ -254,7 +259,7 @@ answering for it; the third is the one to keep re-reading. `code-exec` is still
 granted to nobody, and now that the file is v3 that is a checked fact rather
 than a side effect of a format that could not grant anything to anyone.
 
-The restart after it brought the daemon back as `node_a2ed8dc7`, manifest
+The restart after it brought the daemon back as `node_aaaaaaaa`, manifest
 answering on 8443. The trust file does not touch the identity, so a node_id that
 moves across a grant means the wrong file was edited -- or `EUREKA_IDENTITY_PATH`
 missed and a key was minted -- not that the grant was bad.
@@ -264,19 +269,19 @@ starting it. That is the evidence step 4 of the move asks for and could not have
 before: `enabled` is a claim, and until something restarted that host the claim
 was all there was.
 
-**The grant is not confirmed end to end, and CT 101 cannot confirm it.** There
-is no self-handshake in this protocol (see "CT 101 cannot run the trusted
+**The grant is not confirmed end to end, and Host A cannot confirm it.** There
+is no self-handshake in this protocol (see "Host A cannot run the trusted
 scenario against itself"), so the only thing that proves the grant is a signed
-`/v1/assign` from `wsl-hermes` naming `web-retrieval` and getting back anything
-other than `capability_not_granted`. The Alienware is powered off, so that is
+`/v1/assign` from `wsl-peer` naming `web-retrieval` and getting back anything
+other than `capability_not_granted`. The Windows PC is powered off, so that is
 outstanding as of 2026-08-28. What is proven is that the daemon loads the file
 and the allowlist answers True for `web-retrieval` and False for `code-exec`;
 what is not proven is that a peer on the far side of a handshake sees the same
 answer. Do not read the restart as the check -- a daemon that starts has loaded
 the file, which is the cheap half.
 
-That gap closed on 2026-08-29, once the executor was deployed and the Alienware
-came back: `wsl-hermes` made the signed call and got a fetched page. The
+That gap closed on 2026-08-29, once the executor was deployed and the Windows PC
+came back: `wsl-peer` made the signed call and got a fetched page. The
 paragraph above stands as what was and was not known on the day, which is the
 point of dating it. See "What the WSL peer proved".
 
@@ -320,7 +325,7 @@ Grants carry across. The old key is revoked, so it cannot be re-added later.
 
 ## Transport encryption (TLS)
 
-**CT 101 serves TLS on 8443 and nothing else. Plaintext is gone.**
+**Host A serves TLS on 8443 and nothing else. Plaintext is gone.**
 
 The daemon binds `127.0.0.1` unless `--host` widens it, so every command here
 that serves LAN peers passes `--host 0.0.0.0`. A unit or command line from
@@ -346,8 +351,8 @@ time; removing plaintext strands every peer that has not moved yet. So:
 3. Only then drop plaintext on this side.
 4. Confirm plaintext is refused and TLS still works.
 
-Done for wsl-hermes on 2026-08-25: verified at step 2 with `mutual: true` and
-`node_ef0a1f59` unchanged, then plaintext dropped. Adding a new peer that
+Done for wsl-peer on 2026-08-25: verified at step 2 with `mutual: true` and
+`node_cccccccc` unchanged, then plaintext dropped. Adding a new peer that
 cannot speak TLS yet means putting 8000 back for the duration, not turning TLS
 off.
 
@@ -364,11 +369,11 @@ client pins.
 
 `require_tls` governs whether a *plain* connection is allowed at all; a TLS
 connection is pinned either way. `demo.sh` sets it for `https://` URLs. Now
-that CT 101 refuses plaintext outright, a client that omits it fails at the
+that Host A refuses plaintext outright, a client that omits it fails at the
 transport rather than at the check -- so the flag is a belt to the transport's
 braces, not the thing keeping the channel encrypted:
 
-    await handshake_over_http(node, "https://192.168.1.180:8443", require_tls=True)
+    await handshake_over_http(node, "https://192.168.0.11:8443", require_tls=True)
 
 What is checked, on every response and not just the first:
 
@@ -422,9 +427,9 @@ the new key out of band. There is deliberately no signed "here is my new key"
 message that peers act on by themselves: a stolen key could use it to rotate
 the thief into permanent trust, which is trust-on-first-use wearing a hat.
 
-## Start the responder (CT 101)
+## Start the responder (Host A)
 
-CT 101 runs the daemon under systemd as `eureka-daemon.service`, enabled at
+Host A runs the daemon under systemd as `eureka-daemon.service`, enabled at
 boot -- and observed coming back on its own after a full container restart on
 2026-08-28, which is the first time that was evidence rather than a setting.
 It is no longer started by hand -- a daemon living in an SSH session dies with
@@ -437,8 +442,8 @@ different node the day someone forgets to export a variable.
 
 Check both listeners:
 
-    curl -sk https://192.168.1.180:8443/v1/manifest    # TLS (the only listener)
-    curl -s  http://192.168.1.180:8000/v1/manifest     # refused: nothing there
+    curl -sk https://192.168.0.11:8443/v1/manifest    # TLS (the only listener)
+    curl -s  http://192.168.0.11:8000/v1/manifest     # refused: nothing there
 
 That manifest carries `node_id` and `runtime` and nothing else. It is the only
 endpoint that answers an unauthenticated caller, and it stays that way because
@@ -451,13 +456,13 @@ the certificate is self-signed and identity lives in the key inside it, not in
 any chain. A real peer pins that key against its trust file. To check the
 served key by hand:
 
-    openssl s_client -connect 192.168.1.180:8443 </dev/null 2>/dev/null \
+    openssl s_client -connect 192.168.0.11:8443 </dev/null 2>/dev/null \
       | openssl x509 -pubkey -noout
 
 To compare it against the pinned key as raw hex rather than by eye -- the
 ed25519 public key is the last 32 bytes of the DER encoding:
 
-    openssl s_client -connect 192.168.1.180:8443 </dev/null 2>/dev/null \
+    openssl s_client -connect 192.168.0.11:8443 </dev/null 2>/dev/null \
       | openssl x509 -pubkey -noout \
       | openssl pkey -pubin -outform DER \
       | tail -c 32 | od -An -tx1 | tr -d ' \n'; echo
@@ -487,7 +492,7 @@ eureka-daemon` shows the unit and every drop-in together.
 
 ### journald in an unprivileged container
 
-CT 101 carries exactly one drop-in, and it is host-specific in precisely the
+Host A carries exactly one drop-in, and it is host-specific in precisely the
 way that rule is for. On a fresh unprivileged LXC, `systemd-journald` fails
 with **`status=243/CREDENTIALS`** — the credentials machinery it is built with
 is not available to the container — and until it is fixed, `journalctl` has
@@ -577,17 +582,17 @@ stops matching, so deleting it costs one restart. Deleting the directory
 `node_id` did not change, because it derives from the key and the key is the
 same bytes -- verified after each move, not assumed, and no peer needed
 reprovisioning. That has now held twice: once dropping from root to the
-`eureka` user on CT 102, and once moving hosts to CT 101.
+`eureka` user on Host B, and once moving hosts to Host A.
 
 **The runtime had to move too, and that is the part the old plan missed.**
-On CT 102 `/root` is mode 0700, so a non-root service cannot traverse it -- and
+On Host B `/root` is mode 0700, so a non-root service cannot traverse it -- and
 the interpreter (`/root/eureka_venv`) and the code (`/root/.openclaw/workspace`)
 both lived under it. Opening `/root` up was the obvious fix and is the wrong
 one: `/root/.openclaw` beneath it is 0755, so making `/root` traversable would
 hand the entire agent workspace to this service account and undo most of the
 point of dropping privileges.
 
-The same split is kept on CT 101 even though there is no agent workspace there
+The same split is kept on Host A even though there is no agent workspace there
 to protect: the repo lives at `/root/eureka_protocol`, which the service still
 cannot see, and only `/opt/eureka` is readable to it. A service that cannot
 reach the repo cannot be surprised by an uncommitted edit in it.
@@ -599,10 +604,10 @@ which the service reads and cannot write:
     /opt/eureka/eureka_protocol    the code the daemon runs
     /opt/eureka/DEPLOYED_COMMIT    which commit that is
 
-The `macbook` git remote is the shared source of truth across hosts, but only
-CT 102 and the MacBook itself can reach it. CT 101 has no remote at all and
-cannot fetch from anywhere -- see "Advancing CT 101 to a new commit" below
-before assuming a fetch there did something. On CT 101 the working copy is
+The `laptop` git remote is the shared source of truth across hosts, but only
+Host B and the laptop itself can reach it. Host A has no remote at all and
+cannot fetch from anywhere -- see "Advancing Host A to a new commit" below
+before assuming a fetch there did something. On Host A the working copy is
 `/root/eureka_protocol`. Refresh the deployment from it the same way the unit is
 installed -- copy, then check:
 
@@ -619,9 +624,9 @@ rsync and the `rev-parse` describe the same tree: refresh with a dirty working
 copy and the file names a commit the deployed code does not match. `git status
 --short` before, or accept that the record is decoration.
 
-### Advancing CT 101 to a new commit
+### Advancing Host A to a new commit
 
-**CT 101 has no git remote at all, deliberately.** It had one until 2026-08-28:
+**Host A has no git remote at all, deliberately.** It had one until 2026-08-28:
 a clone leaves `origin` pointing at whatever it was cloned from, and this host
 was cloned from `/root/migrate/eureka.bundle`, the one-shot file it was seeded
 from during the move. That remote was worse than useless. The default fetch
@@ -636,42 +641,42 @@ So `origin` is gone rather than repointed, and a bare `git fetch` is now inert:
 no remote, no tracking ref, nothing to move. `git status` reports no upstream,
 which is the honest description of a host that has no reachable remote.
 
-**Since 2026-09-01 CT 102 can reach CT 101 directly** (`ssh ct101`, key auth),
-so a bundle no longer has to be relayed by hand through the MacBook. The two-hop
+**Since 2026-09-01 Host B can reach Host A directly** (`ssh host-a`, key auth),
+so a bundle no longer has to be relayed by hand through the laptop. The two-hop
 `scp` in step 2 below collapses to one, and the rest of the procedure is
-unchanged — the bundle is still the transport, because CT 101 still has no
+unchanged — the bundle is still the transport, because Host A still has no
 remote and still must refuse a bundle built against the wrong history. Use the
 direct route; the hop is kept in the text because it is the route every bundle
 before that date took.
 
-Repointing it at the MacBook is not currently possible without widening access.
-CT 101 holds no private key at all (`/root/.ssh` has `authorized_keys` and
-`known_hosts` and nothing else) and has no `macbook` host alias. The MacBook's
-port 22 *is* reachable from CT 101 -- it answers and then refuses with
+Repointing it at the laptop is not currently possible without widening access.
+Host A holds no private key at all (`/root/.ssh` has `authorized_keys` and
+`known_hosts` and nothing else) and has no `laptop` host alias. The laptop's
+port 22 *is* reachable from Host A -- it answers and then refuses with
 `Permission denied (publickey,password,keyboard-interactive)` -- so this is an
 authentication gap, not a network one. Closing it means generating a keypair on
-CT 101 and authorizing it on the MacBook, which adds an inbound credential to a
-laptop and turns a deliberately one-way link (MacBook -> CT 101) into a round
+Host A and authorizing it on the laptop, which adds an inbound credential to a
+laptop and turns a deliberately one-way link (laptop -> Host A) into a round
 trip. That is a decision to take on purpose, not a step to slip into a
-migration. Until someone takes it, commits reach CT 101 as bundles.
+migration. Until someone takes it, commits reach Host A as bundles.
 
 An incremental bundle carries only the range, and names the commit it must be
 applied onto, so it refuses to apply to the wrong history instead of guessing:
 
-    # 1. on CT 102, from a clean working copy.
-    #    OLD is what CT 101 is on now -- ask it, do not assume:
-    #    ssh macbook "ssh root@192.168.1.180 'git -C /root/eureka_protocol rev-parse HEAD'"
-    OLD=<CT 101's HEAD>   NEW=<short sha of master>
+    # 1. on Host B, from a clean working copy.
+    #    OLD is what Host A is on now -- ask it, do not assume:
+    #    ssh laptop "ssh root@192.168.0.11 'git -C /root/eureka_protocol rev-parse HEAD'"
+    OLD=<Host A's HEAD>   NEW=<short sha of master>
     cd /root/.openclaw/workspace/eureka_protocol
     git status --short                      # must be empty, per the note above
     git bundle create /tmp/eureka-$OLD-$NEW.bundle $OLD..master
     git bundle verify /tmp/eureka-$OLD-$NEW.bundle
 
-    # 2. hop it across -- CT 102 -> MacBook -> CT 101, the same route as the move
-    scp /tmp/eureka-$OLD-$NEW.bundle macbook:/tmp/
-    ssh macbook "scp /tmp/eureka-$OLD-$NEW.bundle root@192.168.1.180:/root/migrate/"
+    # 2. hop it across -- Host B -> laptop -> Host A, the same route as the move
+    scp /tmp/eureka-$OLD-$NEW.bundle laptop:/tmp/
+    ssh laptop "scp /tmp/eureka-$OLD-$NEW.bundle root@192.168.0.11:/root/migrate/"
 
-    # 3. on CT 101: verify the prerequisite is present, then fast-forward
+    # 3. on Host A: verify the prerequisite is present, then fast-forward
     B=/root/migrate/eureka-$OLD-$NEW.bundle
     git -C /root/eureka_protocol bundle verify $B
     git -C /root/eureka_protocol fetch $B master
@@ -685,16 +690,16 @@ Merge from `FETCH_HEAD`, and do not recreate a `refs/remotes/origin/*` ref to
 merge from instead. A tracking ref under `origin` implies a remote this host can
 talk to; inventing one to satisfy a habit is what made the rewind above possible
 in the first place. `--ff-only` keeps this a transport rather than a merge: if it
-refuses, CT 101 has commits of its own, and that is a fact to resolve rather than
+refuses, Host A has commits of its own, and that is a fact to resolve rather than
 to force past.
 
 Then refresh `/opt/eureka` with the rsync above, so `DEPLOYED_COMMIT` moves with
 the repo. Keep the bundles in `/root/migrate` named by range -- the filenames
-are the record of how CT 101 got from one commit to the next, which is the only
+are the record of how Host A got from one commit to the next, which is the only
 audit trail a host with no reachable remote has.
 
 The venv carries a `.pth` naming the directory the package is imported from.
-In `/opt/eureka/venv` it says `/opt/eureka`; CT 102's development venv under
+In `/opt/eureka/venv` it says `/opt/eureka`; Host B's development venv under
 `/root` still says `/root/.openclaw/workspace`. Copying a venv without fixing
 that gives an interpreter that silently imports the *other* tree -- so a venv
 built on a new host gets the `.pth` written explicitly:
@@ -713,10 +718,10 @@ when the file it is pointed at does not exist, so a typo in
 node comes back under a node_id no peer trusts. They are set explicitly in the
 unit, and they are the first thing to check if `node_id` ever changes.
 
-### What the run produced on CT 101, 2026-09-01: b8695b9 -> 14b0ed8
+### What the run produced on Host A, 2026-09-01: b8695b9 -> 14b0ed8
 
 Bundle `/root/migrate/eureka-b8695b9-14b0ed8.bundle`, 17 KB, transported
-**direct** over `ssh ct101` -- the first advance to skip the MacBook hop.
+**direct** over `ssh host-a` -- the first advance to skip the laptop hop.
 `bundle verify` named `b8695b9` as its prerequisite on both ends, the fetch
 fast-forwarded cleanly, and `/opt/eureka` was refreshed with `DEPLOYED_COMMIT`
 matching the repo HEAD.
@@ -731,20 +736,20 @@ earn an outage on the mesh's only always-on responder. Check the diff rather
 than assuming either way.
 
 What it fixed, verified immediately after: the documented `demo.sh` invocation
-in "Run the handshake" now runs on CT 101 for the first time since the
-2026-08-28 grant -- trusted PASS as `node_a2ed8dc7`, untrusted PASS with
-`untrusted_key`, against `node_ef0a1f59`. 616 tests pass against
+in "Run the handshake" now runs on Host A for the first time since the
+2026-08-28 grant -- trusted PASS as `node_aaaaaaaa`, untrusted PASS with
+`untrusted_key`, against `node_cccccccc`. 616 tests pass against
 `/opt/eureka/venv`.
 
-### What the run produced on CT 101, 2026-08-28: d8dddc9 -> 7929bc3
+### What the run produced on Host A, 2026-08-28: d8dddc9 -> 7929bc3
 
 The fifth incremental bundle in `/root/migrate`, and the first deploy that
 changes what the node *advertises* rather than only what it does: `7929bc3` is
 the handler registry and `web-retrieval`.
 
-CT 101's HEAD was asked for, not assumed -- `d8dddc9`, working copy clean. The
+Host A's HEAD was asked for, not assumed -- `d8dddc9`, working copy clean. The
 bundle is `/root/migrate/eureka-d8dddc9-7929bc3.bundle`, 35 KB, verified on both
-sides: built and verified on CT 102, verified again on CT 101 before the fetch.
+sides: built and verified on Host B, verified again on Host A before the fetch.
 Then `fetch` + `merge --ff-only` off `FETCH_HEAD`, no ref invented under
 `origin`, and the rsync to `/opt/eureka` with `DEPLOYED_COMMIT` written from the
 repo's HEAD afterwards. Repo, deployment and the file all read `7929bc3`.
@@ -764,26 +769,26 @@ no handler is now a **load error**, so a file that used to sit there being
 refused per request will instead stop the daemon from starting. That is the
 intended direction and it is a sharper edge than it was yesterday.
 
-The suite was also run on CT 101 under `/opt/eureka/venv` -- the service
+The suite was also run on Host A under `/opt/eureka/venv` -- the service
 interpreter, not a development one -- and passed 616. Worth doing here rather
-than trusting CT 102's run: the `.pth` above means that interpreter imports
+than trusting Host B's run: the `.pth` above means that interpreter imports
 `/opt/eureka`, so this exercised the deployed tree, which is the one that
 matters.
 
 Restart was clean: `active`, `enabled`, `NRestarts=0`, PID 1284 -> 1823, no
-errors in the journal. The daemon came back as `node_a2ed8dc7` and served the
+errors in the journal. The daemon came back as `node_aaaaaaaa` and served the
 same TLS key -- the certificate's raw ed25519 key was pulled from the live
-listener and compared against the pin the journal prints, `a718592f...`, and
+listener and compared against the pin the journal prints, `aaaaaaaa...`, and
 matched exactly. No peer needs reprovisioning, and neither the identity nor the
 trust file was touched by any of this.
 
 **What is still not proven is the same thing that was not proven yesterday, and
-it now matters more.** There is no self-handshake, so CT 101 cannot ask itself
-for `web-retrieval`; only a signed `/v1/assign` from `wsl-hermes` proves a peer
+it now matters more.** There is no self-handshake, so Host A cannot ask itself
+for `web-retrieval`; only a signed `/v1/assign` from `wsl-peer` proves a peer
 on the far side sees what the local allowlist says. Until this deploy that
 outstanding check would have returned a canned string either way. Now it would
 return a real fetched page, which makes it the first assign that could actually
-distinguish a working executor from a working gate. The Alienware is still
+distinguish a working executor from a working gate. The Windows PC is still
 powered off.
 
 **It was run the next day, and it distinguished them.** See "What the WSL peer
@@ -792,8 +797,8 @@ that looked exactly like a protocol fault and was not one.
 
 ## Moving the responder to another host
 
-Done on 2026-08-28, CT 102 -> CT 101, at commit 3854f00. The node kept
-`node_a2ed8dc7` and the WSL peer's trust file was not touched — only the
+Done on 2026-08-28, Host B -> Host A, at commit 3854f00. The node kept
+`node_aaaaaaaa` and the WSL peer's trust file was not touched — only the
 address it dials.
 
 **A move is not a rotation.** Rotation mints a new key and every peer must be
@@ -808,8 +813,8 @@ The order that keeps the mesh up:
 1. **Stage the payload.** On the old host, build a git bundle of the deployed
    commit and a `pip freeze` of the *service* venv, and copy the identity and
    trust files. Checksum all four; carry the checksums with them.
-2. **Transfer between your own machines only.** CT 102 has no route to CT 101,
-   so the payload went CT 102 -> MacBook -> CT 101 over existing SSH key auth,
+2. **Transfer between your own machines only.** Host B has no route to Host A,
+   so the payload went Host B -> laptop -> Host A over existing SSH key auth,
    `umask 077` at every hop, and was deleted from the intermediate host as soon
    as it landed. Never stage key material anywhere a third party stores it.
 3. **Build the new host and verify the identity before creating the service.**
@@ -841,7 +846,7 @@ The order that keeps the mesh up:
    and confirm the old port is refused.
 
 **Both daemons must never serve this identity at once.** Two hosts answering as
-`node_a2ed8dc7` keep separate replay tables and separate peer tables, so a
+`node_aaaaaaaa` keep separate replay tables and separate peer tables, so a
 nonce spent against one is still unspent against the other — the same reason
 the TLS and plaintext listeners share a process. Overlap is bounded to the
 verification window in step 5, when the new host is running but no peer has
@@ -857,7 +862,7 @@ directory the payload was unpacked into -- `/root/migrate` here. That copy is
 outside `/var/lib/eureka`, so nothing in the unit protects it: `StateDirectory`
 does not own it, the `eureka` user does not need it, and it is exactly the kind
 of file that later gets swept into a backup or an rsync by someone who does not
-know what it is. As of 2026-08-28 it is **still present on CT 101** and should
+know what it is. As of 2026-08-28 it is **still present on Host A** and should
 be removed once the identity is confirmed installed.
 
 Confirm the installed copy first, then delete the staged one -- in that order,
@@ -874,14 +879,14 @@ host's only record of how it got from one commit to the next.
 The seed bundle `eureka.bundle` is also worth keeping for a different reason --
 it is what a fresh clone here would have to come from, and the clone that
 created it is what left the `origin` remote that had to be removed. See
-"Advancing CT 101 to a new commit".
+"Advancing Host A to a new commit".
 
-## Stand up the responder on WSL (wsl-hermes)
+## Stand up the responder on WSL (wsl-peer)
 
-`wsl-hermes` initiated for its whole life and listened for none of it. Since
-2026-09-01 it also serves: same key, same `node_ef0a1f59`, TLS on 8443, under
+`wsl-peer` initiated for its whole life and listened for none of it. Since
+2026-09-01 it also serves: same key, same `node_cccccccc`, TLS on 8443, under
 systemd inside WSL. Nothing about its initiating side changed -- the MCP server
-config is untouched and Hermes still reaches CT 101 exactly as before.
+config is untouched and Hermes still reaches Host A exactly as before.
 
 **One node, two roles, one identity, and only one listener.** The daemon is the
 only thing bound to a port here; the MCP server is a short-lived subprocess
@@ -900,18 +905,18 @@ from the handler registry (`api.py` builds the node with `default_registry()`;
 than it can run: `validate_advertised` makes an advertised capability with no
 handler a startup error, which is unchanged by there now being two.
 
-CT 101 still advertises `web-retrieval` alone, and that is not an omission --
+Host A still advertises `web-retrieval` alone, and that is not an omission --
 see "inference is a property of the host" below.
 
 **Advertising is a claim about this node; granting is a decision about a peer,
-and when this was written on 2026-09-02 this host granted nothing.** CT 101 and
-CT 102 were both in WSL's trust file with `"capabilities": []`. (CT 102 was
-granted `inference` the next day; CT 101 still holds nothing here, and the
+and when this was written on 2026-09-02 this host granted nothing.** Host A and
+Host B were both in WSL's trust file with `"capabilities": []`. (Host B was
+granted `inference` the next day; Host A still holds nothing here, and the
 separation the paragraph is about is exactly what let one change without the
 other.) They handshake; an `/v1/assign` from either is refused
 before dispatch, because `is_permitted` intersects the advertised list with a
 grant held here. Standing the responder up did not hand anybody a capability,
-and the two questions have to stay separate -- CT 101 has advertised
+and the two questions have to stay separate -- Host A has advertised
 `web-retrieval` since the registry landed while granting it to exactly two keys.
 
 The refusal for "not granted" and "not offered here" is deliberately identical,
@@ -1007,14 +1012,14 @@ against is a field somebody adds later.
 
 ### inference is a property of the host, not of the code
 
-CT 101 has no Ollama. WSL does. So `default_registry()` reads
+Host A has no Ollama. WSL does. So `default_registry()` reads
 `EUREKA_INFERENCE` from the environment, and the unit file is where a host
 declares it:
 
     Environment=EUREKA_INFERENCE=1
 
 Registering the handler unconditionally was the obvious alternative and is
-wrong: CT 101 would then advertise a capability it cannot serve, which is
+wrong: Host A would then advertise a capability it cannot serve, which is
 exactly the lie `validate_advertised` exists to prevent -- only moved one level
 down where that check cannot see it, since the *handler* would exist and the
 static check would pass. The discovery would come at request time, to a peer
@@ -1038,7 +1043,7 @@ list used to cause. So on WSL, once a grant exists:
     EUREKA_INFERENCE=1 ... ./demo.sh https://...
 
 It is left inherited rather than forced on inside demo.sh, because forcing it
-would have demo.sh claim inference on CT 101.
+would have demo.sh claim inference on Host A.
 
 **And it bites the grant procedure itself, one step earlier.** Step 3 of
 "Granting a capability" -- the load-check that is the whole point of the
@@ -1065,7 +1070,7 @@ which runs under systemd and three of which do not.
 
 WSL2 has no init by default, and the distro's VM stops once the last process
 exits. A daemon started with `nohup` from a terminal dies with the WSL session
-that started it, which is the same failure CT 101 was moved off of -- "a daemon
+that started it, which is the same failure Host A was moved off of -- "a daemon
 living in an SSH session dies with the session".
 
 Two separate problems, and they need two mechanisms:
@@ -1083,21 +1088,21 @@ enabling it would have required was not needed. Check before assuming:
 
 The alternative -- a hand-written respawn loop -- was rejected. It means
 reimplementing backoff and a crash-loop guard that systemd already gets right,
-and it gives this host a different operational surface from CT 101 for no gain.
+and it gives this host a different operational surface from Host A for no gain.
 `deploy/eureka-daemon-wsl.service` is a near-copy of `deploy/eureka-daemon.service`
 and the differences are all forced by the host; see below.
 
-### What the unit does differently from CT 101's, and why
+### What the unit does differently from Host A's, and why
 
-| CT 101 | WSL | reason |
+| Host A | WSL | reason |
 |---|---|---|
-| `User=eureka` | `User=stunner` | the identity, venv and repo are all under `~stunner`. A separate account would need read access across that whole home directory -- more exposure, not less. |
-| `ProtectHome=yes` | `ProtectHome=read-only` | CT 101 keeps key, interpreter and code outside `/home` and can hide it entirely. Here all three are inside it. `read-only` is the useful half: the identity **can be read and cannot be written by this service**, which is what "do not touch the key material" asks for, enforced by the kernel rather than by everyone remembering. |
-| `StateDirectory=eureka` | `StateDirectory=eureka-wsl` | a directory called `eureka` on a second host is how somebody eventually copies an identity into the wrong one. Same reason CT 102's is `eureka-antiochus`. |
+| `User=eureka` | `User=operator` | the identity, venv and repo are all under `~operator`. A separate account would need read access across that whole home directory -- more exposure, not less. |
+| `ProtectHome=yes` | `ProtectHome=read-only` | Host A keeps key, interpreter and code outside `/home` and can hide it entirely. Here all three are inside it. `read-only` is the useful half: the identity **can be read and cannot be written by this service**, which is what "do not touch the key material" asks for, enforced by the kernel rather than by everyone remembering. |
+| `StateDirectory=eureka` | `StateDirectory=eureka-wsl` | a directory called `eureka` on a second host is how somebody eventually copies an identity into the wrong one. Same reason Host B's is `eureka-agent`. |
 | `--tls-dir /var/lib/eureka/tls` | `--tls-dir /var/lib/eureka-wsl/tls` | **not the default.** The default writes the certificate *and its key* beside the identity file, which would put a second copy of this node's private key inside `~/.eureka`. Explicit keeps that directory read-only in practice as well as in policy. |
 | — | `PYTHONDONTWRITEBYTECODE=1` | the repo is on a read-only mount for this service, so CPython cannot write `__pycache__` beside the source. Saying so beats letting it discover that per import. |
 | — | `ExecStartPre=deploy/wsl-preflight.sh` | see below. |
-| — | `Environment=EUREKA_INFERENCE=1` | this host has an Ollama and CT 101 does not, so `inference` is registered and advertised here and nowhere else. See "inference is a property of the host". |
+| — | `Environment=EUREKA_INFERENCE=1` | this host has an Ollama and Host A does not, so `inference` is registered and advertised here and nowhere else. See "inference is a property of the host". |
 | — | `TimeoutStartSec=300` | the preflight now makes a real generate call, and the first one after a boot pays to load 5.2 GB into VRAM. systemd's default 90s start timeout would kill the start for the one reason that is not a fault. |
 
 ### The preflight, and the two things it refuses to default
@@ -1115,7 +1120,7 @@ itself:
   identity and the daemon comes up under a `node_id` no peer has ever trusted,
   looking perfectly healthy. This is the same trap `demo.sh` hits (see "demo.sh
   needs the identity paths too") and the same one the unit's `Environment=`
-  lines exist to prevent on CT 101.
+  lines exist to prevent on Host A.
 - `TrustList.load_or_empty()` treats a **missing** trust file as an empty
   allowlist. Correct for a node with no peers yet; indistinguishable from a
   trust file that failed to deploy. The daemon starts and refuses everyone.
@@ -1125,7 +1130,7 @@ all four paths required rather than defaulted (`${VAR:?}`, not a fallback --
 a fallback is the bug it exists to catch), requires the files to already
 exist, and checks that the identity **hashes to the `node_id` named in the
 unit**. That last one is the guard that turns "must not change" from an
-intention into a check: `EUREKA_EXPECT_NODE_ID=node_ef0a1f59`.
+intention into a check: `EUREKA_EXPECT_NODE_ID=node_cccccccc`.
 
 It derives the advertised list from `default_registry()` rather than taking a
 list typed into the script -- typing one is how a check like this drifts from
@@ -1158,7 +1163,7 @@ All four refusals, exercised 2026-09-01 before install:
 
     preflight: no identity file at .../identity.kye (NOT creating one: a new key here is a new node_id)
     preflight: no trust file at .../nope.json (an absent trust file loads as an empty allowlist and refuses every peer)
-    preflight: identity at .../identity.key is node_485428e3, expected node_deadbeef. ...
+    preflight: identity at .../identity.key is node_bbbbbbbb, expected node_deadbeef. ...
     wsl-preflight.sh: line 33: EUREKA_IDENTITY_PATH: not set -- refusing to fall back to ~/.eureka/identity.key, which would be created if absent
 
 Each exits 1, and the typo'd-path case was checked for a stray key afterwards:
@@ -1166,22 +1171,22 @@ none, because the existence test runs before anything calls into the library.
 
 ### The trust file was v1, and carried the retired label
 
-WSL's `~/.eureka/trust.json` was still v1 as of 2026-09-01, and named CT 101's
-key `ct102-antiochus` -- the label this document retired precisely so a grep
+WSL's `~/.eureka/trust.json` was still v1 as of 2026-09-01, and named Host A's
+key `old-agent-label` -- the label this document retired precisely so a grep
 finds one meaning. It worked, because **lookups are by key and names are human
 labels**, and a v1 file grants nothing, which is the safe direction to be wrong
-in. It was migrated to v3 and renamed to `eureka-node` in the same write.
+in. It was migrated to v3 and renamed to `responder-node` in the same write.
 
 `add()` refuses a rename outright -- `existing != name` raises `duplicate
 public key` -- so a load-and-write-back cannot do this. The migration builds a
-fresh `TrustList` instead, and **reads CT 101's key out of the old file rather
+fresh `TrustList` instead, and **reads Host A's key out of the old file rather
 than retyping it**, so a 64-character key cannot be fat-fingered in the one
 step that would silently swap a peer's identity.
 
 ### Windows firewall: two layers, and the rule that works
 
 `networkingMode=mirrored` means WSL shares the Windows host's LAN interface, so
-inbound to 192.168.1.152:8443 meets the **Windows** firewall before it reaches
+inbound to 192.168.0.13:8443 meets the **Windows** firewall before it reaches
 anything in Linux.
 
 **There are two filtering layers, and you only write a rule for one of them.**
@@ -1203,8 +1208,8 @@ The rule as it stands:
 
     New-NetFirewallRule -DisplayName "Eureka daemon (WSL) 8443" `
       -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8443 `
-      -Profile Any -LocalAddress 192.168.1.152 `
-      -RemoteAddress 192.168.1.180,192.168.1.174
+      -Profile Any -LocalAddress 192.168.0.13 `
+      -RemoteAddress 192.168.0.11,192.168.0.12
 
 **Two conditions must both hold, and neither is the network profile.**
 `-RemoteAddress` names the two peers. `-LocalAddress` is what answers "am I on
@@ -1221,28 +1226,28 @@ on any other network the laptop holds a different address and `-LocalAddress`
 stops matching.
 
 `-Profile Any` is only safe *because* of `-LocalAddress`. On its own, with
-`-RemoteAddress` alone, it would be a real hole: `192.168.1.0/24` is the most
-common cafe subnet there is, so a stranger at `.180` would match. They would
+`-RemoteAddress` alone, it would be a real hole: `192.168.0.0/24` is the most
+common cafe subnet there is, so a stranger at `.11` would match. They would
 still be refused at the pin -- that is what pinning is for -- but they would
 reach the open manifest and the handshake tables first, and "the protocol would
 survive it" is a poor reason to allow it.
 
-**Set a DHCP reservation for the Alienware at 192.168.1.152.** `-LocalAddress`
+**Set a DHCP reservation for the Windows PC at 192.168.0.13.** `-LocalAddress`
 keys on a DHCP lease, not on an identity, so a new lease silently stops the rule
-matching and CT 101 and CT 102 start timing out. That address is now baked into
+matching and Host A and Host B start timing out. That address is now baked into
 a firewall rule and into this document.
 
-**Still not set as of 2026-09-02.** The laptop kept .152 across the Windows
+**Still not set as of 2026-09-02.** The laptop kept .13 across the Windows
 reboot that day, which is a lease renewed and not a lease reserved -- it says
 the router had no reason to hand out a different address, not that it cannot.
 
 **A wrong profile looks like a dead host, not a blocked port.** When the rule
-was inert, *every* TCP port on 192.168.1.152 timed out -- 445, 135, 3389, 8443 --
+was inert, *every* TCP port on 192.168.0.13 timed out -- 445, 135, 3389, 8443 --
 while ARP still resolved the MAC. That is the signature: a timeout on
 everything, from a host that is demonstrably up at layer 2. A single port
 refusing while others answer is a different fault. And a `curl` to
 `https://localhost:8443` from Windows now returns nothing, correctly: loopback
-is not one of the two allowed remote addresses. Test from CT 101 or CT 102, not
+is not one of the two allowed remote addresses. Test from Host A or Host B, not
 from the Windows side.
 
 ### Reboot, and sleep
@@ -1279,8 +1284,8 @@ Windows was restarted and logged in to, and nothing was started by hand:
     # in WSL, after logon
     systemctl is-active eureka-daemon-wsl              # active
 
-    # from CT 102
-    curl -sk https://192.168.1.152:8443/v1/manifest    # node_ef0a1f59
+    # from Host B
+    curl -sk https://192.168.0.13:8443/v1/manifest    # node_cccccccc
 
 Both halves of the chain fired, in order: the Task Scheduler entry started the
 distro at logon, and systemd started the daemon behind it via
@@ -1290,13 +1295,13 @@ human.
 `active` also means the preflight passed on that start, because it runs as
 `ExecStartPre=` and there is no path to `active` around it -- so the identity
 file was found where the unit says it lives and still hashed to
-`node_ef0a1f59`, which the manifest then confirmed from the other side of the
+`node_cccccccc`, which the manifest then confirmed from the other side of the
 wire.
 
 **This says nothing about a reboot with nobody logging in.** The trigger is
 `ONLOGON`. A machine that boots to the lock screen and is left there has no WSL
 instance and therefore no daemon, and the symptom is the one from the firewall
-note above: every port on .152 timing out while the host is plainly up. If that
+note above: every port on .13 timing out while the host is plainly up. If that
 ever needs to change, it is a different Task Scheduler trigger, not a change to
 the unit.
 
@@ -1338,49 +1343,49 @@ what this node advertises and what it proved about Ollama:
     journalctl -u eureka-daemon-wsl -n 30 --no-pager | grep preflight
 
     # expected:
-    #   preflight: node_ef0a1f59 ok
+    #   preflight: node_cccccccc ok
     #   preflight:   advertises inference, web-retrieval
     #   preflight:   ollama     http://127.0.0.1:11434/api/generate generating with qwen3:8b
-    #   preflight:   grants     eureka-node: (nothing)
-    #   preflight:   grants     ct102-openclaw: (nothing)
+    #   preflight:   grants     responder-node: (nothing)
+    #   preflight:   grants     agent-peer: (nothing)
 
 The grants lines must still say `(nothing)`. Advertising is not granting, and
 this change deliberately does not touch the trust file.
 
-**Superseded 2026-09-03, for the `ct102-openclaw` line only.** That host was
+**Superseded 2026-09-03, for the `agent-peer` line only.** That host was
 granted `inference` on that date, so a preflight read today prints
-`grants ct102-openclaw: inference` and the expectation above is a record of
-what this step produced rather than what a rerun shows. `eureka-node` is still
+`grants agent-peer: inference` and the expectation above is a record of
+what this step produced rather than what a rerun shows. `responder-node` is still
 `(nothing)`, and the property the line was making — advertising is not
 granting — is unchanged: the grant was a separate decision taken a day later,
 by the procedure in "Granting a capability". See "Granting inference to
-ct102-openclaw".
+agent-peer".
 
 **How the commit reaches WSL: `git pull`, and that is the whole of it.**
-Recorded here on 2026-09-02, because this document had described CT 101's
+Recorded here on 2026-09-02, because this document had described Host A's
 bundle procedure in detail and said nothing about this host. WSL has an
-`origin`, and it points straight at CT 102's working repo over ssh:
+`origin`, and it points straight at Host B's working repo over ssh:
 
     git -C ~/eureka/eureka_protocol remote -v
-    # origin  root@192.168.1.174:/root/.openclaw/workspace/eureka_protocol
+    # origin  root@192.168.0.12:/root/.openclaw/workspace/eureka_protocol
 
     git -C ~/eureka/eureka_protocol pull
     git -C ~/eureka/eureka_protocol log --oneline -1
 
-**This is a different route from the `macbook` remote, and the difference
-matters when a commit looks missing.** CT 102 is the origin repo and pushes to
-`macbook` as the shared source of truth; WSL pulls from **CT 102**, not from
-the MacBook. So a commit that exists on the MacBook and not on CT 102 is
-invisible here, and the fix is to look at CT 102's `master` rather than at the
-MacBook's. Fetching from a non-bare repo like CT 102's is fine -- it is the
+**This is a different route from the `laptop` remote, and the difference
+matters when a commit looks missing.** Host B is the origin repo and pushes to
+`laptop` as the shared source of truth; WSL pulls from **Host B**, not from
+the laptop. So a commit that exists on the laptop and not on Host B is
+invisible here, and the fix is to look at Host B's `master` rather than at the
+laptop's. Fetching from a non-bare repo like Host B's is fine -- it is the
 checked-out `master` that WSL reads.
 
-**Why this host gets a pull and CT 101 gets bundles** is not a preference: CT
-101 has no remote at all, deliberately, and no private key to authenticate one
+**Why this host gets a pull and Host A gets bundles** is not a preference: Host A
+has no remote at all, deliberately, and no private key to authenticate one
 with. WSL has both. The pull is the simpler route and it is available here for
 that reason alone.
 
-Afterwards the check is the same one CT 101 uses -- `log --oneline -1` must
+Afterwards the check is the same one Host A uses -- `log --oneline -1` must
 name the commit you meant -- plus the one this host adds: **the daemon must be
 restarted after it lands.** A running daemon does not notice a changed file
 underneath it, and on this host the preflight is part of the start, so a
@@ -1388,66 +1393,66 @@ restart is also when the new checks actually run.
 
 ### Verifying it
 
-From CT 101 and CT 102, in that order -- CT 101 already trusted this key, CT 102
+From Host A and Host B, in that order -- Host A already trusted this key, Host B
 had to be provisioned:
 
-    curl -sk https://192.168.1.152:8443/v1/manifest      # node_ef0a1f59
+    curl -sk https://192.168.0.13:8443/v1/manifest      # node_cccccccc
 
 `demo.sh` is the real check, because the untrusted scenario is what shows the
 handshake was doing something. Both hosts need the identity paths on the command
 line, for the reason in "demo.sh needs the identity paths too".
 
 The manifest is also where the second capability becomes visible from off the
-host: an authenticated peer reading it should now see both names, and CT 101's
+host: an authenticated peer reading it should now see both names, and Host A's
 should still show one.
 
 A responder cannot run the trusted scenario against itself -- a node does not
 carry its own key in its own allowlist -- so this is checked from the peers,
 never from WSL.
 
-    # from CT 102
+    # from Host B
     cd /root/.openclaw/workspace/eureka_protocol
     EUREKA_PYTHON=/root/eureka_venv/bin/python \
-    EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key \
-    EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json \
-      ./demo.sh https://192.168.1.152:8443
+    EUREKA_IDENTITY_PATH=/var/lib/eureka-agent/identity.key \
+    EUREKA_TRUST_PATH=/var/lib/eureka-agent/trust.json \
+      ./demo.sh https://192.168.0.13:8443
 
-    # from CT 101
+    # from Host A
     cd /opt/eureka/eureka_protocol
     runuser -u eureka -- env \
       EUREKA_PYTHON=/opt/eureka/venv/bin/python \
       EUREKA_IDENTITY_PATH=/var/lib/eureka/identity.key \
       EUREKA_TRUST_PATH=/var/lib/eureka/trust.json \
-      bash demo.sh https://192.168.1.152:8443
+      bash demo.sh https://192.168.0.13:8443
 
-### What was proven, 2026-09-01: wsl-hermes as a responder
+### What was proven, 2026-09-01: wsl-peer as a responder
 
 The daemon came up on 8443 under `eureka-daemon-wsl`, `ExecStartPre` preflight
-passing, as `node_ef0a1f59` -- **the same node_id it has always had**. The
+passing, as `node_cccccccc` -- **the same node_id it has always had**. The
 identity file was read and never written.
 
 The TLS key served on 8443 is
-`bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae`, byte for
-byte the key CT 101 has trusted since before this host listened for anything.
+`cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`, byte for
+byte the key Host A has trusted since before this host listened for anything.
 That is the design working as intended: the certificate wraps the existing
-identity, so **nothing new had to be distributed to make TLS work**, and CT 101
+identity, so **nothing new had to be distributed to make TLS work**, and Host A
 needed no reprovisioning at all. Read it back with the `openssl` pipeline in
-"Start the responder (CT 101)".
+"Start the responder (Host A)".
 
 Both peers, both scenarios, clocks 0s apart:
 
 | initiator | trusted | untrusted |
 |---|---|---|
-| CT 102 `node_485428e3` | `authenticated`, `mutual: true`, peer `node_ef0a1f59` | refused, `untrusted_key` |
-| CT 101 `node_a2ed8dc7` | `authenticated`, `mutual: true`, peer `node_ef0a1f59` | refused, `untrusted_key` |
+| Host B `node_bbbbbbbb` | `authenticated`, `mutual: true`, peer `node_cccccccc` | refused, `untrusted_key` |
+| Host A `node_aaaaaaaa` | `authenticated`, `mutual: true`, peer `node_cccccccc` | refused, `untrusted_key` |
 
 The untrusted leg is what makes the trusted one evidence: a throwaway identity
 with an empty allowlist, refused at the pin with "the key terminating TLS is not
 trusted", against the same listener that had just authenticated a real peer one
 second earlier.
 
-CT 102 needed provisioning to get there and CT 101 did not. CT 101's trust file
-already held `wsl-hermes`; CT 102's held only `eureka-node`, so it could not pin
+Host B needed provisioning to get there and Host A did not. Host A's trust file
+already held `wsl-peer`; Host B's held only `responder-node`, so it could not pin
 WSL's certificate and was refused with `untrusted_key` -- the correct refusal,
 and indistinguishable from a genuine stranger, which is the point. It was added
 with an empty grant.
@@ -1459,7 +1464,7 @@ advertise otherwise; that is a claim about this node, not permission for
 anybody. Standing up the responder and granting a capability are two decisions
 and only the first has been taken.
 
-`wsl-hermes` was re-checked as an initiator afterwards and is unchanged.
+`wsl-peer` was re-checked as an initiator afterwards and is unchanged.
 
 ## Run the handshake (WSL initiates)
 
@@ -1467,7 +1472,7 @@ and only the first has been taken.
 both hosts run the same one:
 
     cd ~/eureka/eureka_protocol
-    ./demo.sh                                # TLS to CT 101 on 8443
+    ./demo.sh https://192.168.0.11:8443      # TLS to Host A on 8443
 
 It runs the same exchange twice, and **the contrast is the point**:
 
@@ -1495,7 +1500,7 @@ longer an open GET (see below):
 
     journalctl -u eureka-daemon | grep "Handshake established"
 
-It takes a URL if you need a different peer or a plaintext one, though CT 101
+It takes a URL if you need a different peer or a plaintext one, though Host A
 no longer serves plaintext: `./demo.sh http://host:port`. Passing the address
 explicitly is also how a host with a stale checkout gets pointed at a moved
 responder without editing anything.
@@ -1515,9 +1520,9 @@ that, something is constructing its own client; the fix is
 along with the chain and leaves the connection unauthenticated.
 
 `demo.sh` picks its interpreter from `$EUREKA_PYTHON`, then `../venv`, then
-CT 102's development venv -- and checks each candidate can actually import the
+Host B's development venv -- and checks each candidate can actually import the
 dependencies, because more than one venv sits next to this repo on some hosts.
-On CT 101 neither fallback exists, so run it with
+On Host A neither fallback exists, so run it with
 `EUREKA_PYTHON=/opt/eureka/venv/bin/python`.
 
 ### demo.sh needs the identity paths too, and fails soft without them
@@ -1553,7 +1558,7 @@ untouched, because `load_or_create` only ever writes the path it resolved. Check
 for a stray `.eureka/` under `/var/lib/eureka` after any run that reported an
 unfamiliar node_id.
 
-The full invocation on CT 101:
+The full invocation on Host A:
 
     cd /opt/eureka/eureka_protocol
     runuser -u eureka -- env \
@@ -1563,7 +1568,7 @@ The full invocation on CT 101:
       bash demo.sh https://<peer>:8443
 
 Read `local node` on the first scenario before reading anything else: it must
-say `node_a2ed8dc7`. If it says anything else the environment did not arrive,
+say `node_aaaaaaaa`. If it says anything else the environment did not arrive,
 and the rest of the run describes a node nobody has ever trusted.
 
 Only the trusted scenario is exposed to this. The untrusted one passes explicit
@@ -1580,10 +1585,10 @@ Fixed 2026-09-01; it now derives the list from `default_registry()`, the same
 place `api.py` takes it from.
 
 A grant is validated against the advertised list when the trust file loads, so
-on CT 101 -- which has granted `web-retrieval` since 2026-08-28 -- the node
+on Host A -- which has granted `web-retrieval` since 2026-08-28 -- the node
 could not be constructed at all:
 
-    TrustError: trust file /var/lib/eureka/trust.json: peer 'wsl-hermes':
+    TrustError: trust file /var/lib/eureka/trust.json: peer 'wsl-peer':
     granted capability 'web-retrieval' that this node does not advertise
 
 It died there, before reaching the peer, on every run against every peer. So
@@ -1592,28 +1597,28 @@ on the responder host, and the invocation printed in this document produced that
 traceback.
 
 It survived that long because of who runs it. The hosts that exercise `demo.sh`
-most are the ones granting nothing -- WSL and CT 102 -- and an arbitrary
+most are the ones granting nothing -- WSL and Host B -- and an arbitrary
 advertised list validates fine against an empty grant. It took standing up a
-second responder, and running the check from CT 101 for the first time since the
+second responder, and running the check from Host A for the first time since the
 grant, to reach it. Deriving the list means the check cannot drift from the
 deployment again.
 
-### CT 101 cannot run the trusted scenario against itself
+### Host A cannot run the trusted scenario against itself
 
-Pointing `demo.sh` at CT 101 *from* CT 101 fails the trusted leg every time,
+Pointing `demo.sh` at Host A *from* Host A fails the trusted leg every time,
 with `untrusted_key` / "the key terminating TLS is not trusted". That is correct
-behaviour, not a regression: CT 101's trust list contains one peer, `wsl-hermes`,
+behaviour, not a regression: Host A's trust list contains one peer, `wsl-peer`,
 and a node does not carry its own key in its own allowlist, so pinning the
 responder's TLS key against it cannot succeed. There is no self-handshake in
 this protocol. The trusted scenario has to be initiated from the WSL peer; run
-locally on CT 101, `demo.sh` proves the listener is up and the refusal path
+locally on Host A, `demo.sh` proves the listener is up and the refusal path
 works, and nothing more.
 
 ## Hermes Agent reaching Eureka (WSL, MCP)
 
-`wsl-hermes` is not only a key in a trust file any more. Hermes Agent on the
-Alienware calls CT 101 through it: the operator asks for a page, Hermes calls a
-tool, and the fetch happens on CT 101 under CT 101's policy, signed. Working as
+`wsl-peer` is not only a key in a trust file any more. Hermes Agent on the
+Windows PC calls Host A through it: the operator asks for a page, Hermes calls a
+tool, and the fetch happens on Host A under Host A's policy, signed. Working as
 of 2026-08-29.
 
 **The seam is an MCP server, not a Hermes plugin, and the reason is
@@ -1642,7 +1647,7 @@ Config, in `~/.hermes/config.yaml`, written by `hermes mcp add`:
         env:
           EUREKA_IDENTITY_PATH: /home/<user>/.eureka/identity.key
           EUREKA_TRUST_PATH: /home/<user>/.eureka/trust.json
-          EUREKA_PEER: https://192.168.1.180:8443
+          EUREKA_PEER: https://192.168.0.11:8443
         connect_timeout: 60
 
 It exposes three tools. `eureka_fetch(url, max_chars)` handshakes, issues a
@@ -1712,8 +1717,8 @@ From inside Hermes, against the live daemon:
 
 | asked | result |
 |---|---|
-| `eureka_peer_status` | mutual handshake, node_ef0a1f59 <-> node_a2ed8dc7 |
-| fetch `https://example.com/` | 200, text/html, 559 bytes, responder node_a2ed8dc7, content returned and summarised by the model |
+| `eureka_peer_status` | mutual handshake, node_cccccccc <-> node_aaaaaaaa |
+| fetch `https://example.com/` | 200, text/html, 559 bytes, responder node_aaaaaaaa, content returned and summarised by the model |
 | fetch `http://127.0.0.1/` | `address_not_allowed`, readable; the model explained the policy and offered an alternative rather than retrying |
 
 That last row is the one worth keeping. The refusal did not merely arrive --
@@ -1731,7 +1736,7 @@ anything on the Eureka side.
 ### Where the server lives, and why there is only one copy
 
 `integrations/eureka_mcp_server.py`, in this repo. It briefly lived only on the
-Alienware -- the one piece of this integration with no history, no backup and
+Windows PC -- the one piece of this integration with no history, no backup and
 no way to reach another host, in a system whose entire record-keeping story is
 that commits and bundle filenames are the audit trail.
 
@@ -1795,11 +1800,11 @@ peers from the table it checks against.
 
 ## Gotchas
 
-- **CT 101 logs in UTC and CT 102 logs in America/Chicago (CDT, -0500).** The
-  evidence method throughout this document is "the caller acted, and CT 101's
+- **Host A logs in UTC and Host B logs in America/Chicago (CDT, -0500).** The
+  evidence method throughout this document is "the caller acted, and Host A's
   journal shows a handshake at the matching second" -- and the two journals are
   five hours apart on the clock while describing the same instant. A gateway
-  restart at 02:18:47 CDT is 07:18:47 in CT 101's journal. Convert before
+  restart at 02:18:47 CDT is 07:18:47 in Host A's journal. Convert before
   concluding that an event did not correlate; `date -u` on both hosts settles
   it faster than reading either journal again.
 - **A stuck Telegram provider looks exactly like a broken Eureka tool, and is
@@ -1830,7 +1835,7 @@ peers from the table it checks against.
   new session builds a new runtime. Full account under "Applying config
   changes, and when a restart is unavoidable".
 - WSL2 is behind NAT unless `networkingMode=mirrored`, which this host sets:
-  it shares the Windows LAN interface, so 192.168.1.152 is the same address
+  it shares the Windows LAN interface, so 192.168.0.13 is the same address
   Windows answers on and inbound meets the **Windows** firewall first. That was
   true while WSL only initiated and nobody had to care; since it started
   serving on 8443 it is the first thing to check when a peer times out rather
@@ -1840,7 +1845,7 @@ peers from the table it checks against.
   `stale_timestamp` refusals in BOTH directions.** The handshake checks
   `abs(age) > freshness_seconds` against the timestamp the *other* side signed,
   at 30s, on message 1 and again on message 3. So a WSL clock that resumes
-  behind rejects CT 101's offers as stale, and CT 101 rejects WSL's, and from
+  behind rejects Host A's offers as stale, and Host A rejects WSL's, and from
   either end it reads as the peer being broken. It is not a network fault and
   it is not a trust problem: nothing was reprovisioned, the clock moved.
   Mattered less while WSL only initiated -- a stale offer failed one command
@@ -1852,16 +1857,16 @@ peers from the table it checks against.
   reads the clock per message, not at startup.
 - Keys must not live on /mnt/c — Windows filesystem breaks mode 0600 and the
   loader refuses group/world-readable key files.
-- SSH root password login to CT 102 is refused (OpenSSH default
+- SSH root password login to Host B is refused (OpenSSH default
   prohibit-password). Use pct exec from the Proxmox host, or set up a key.
-- CT 101 takes key auth from the MacBook, and **since 2026-09-01 from CT 102
-  directly** (`ssh ct101`). The MacBook hop in "Moving the responder" and in
-  the older bundle deploys is history, not a current constraint. CT 101's 8443
-  answers from CT 102 regardless, so the manifest is checkable
-  (`curl -sk https://192.168.1.180:8443/v1/manifest`) even when nothing else
+- Host A takes key auth from the laptop, and **since 2026-09-01 from Host B
+  directly** (`ssh host-a`). The laptop hop in "Moving the responder" and in
+  the older bundle deploys is history, not a current constraint. Host A's 8443
+  answers from Host B regardless, so the manifest is checkable
+  (`curl -sk https://192.168.0.11:8443/v1/manifest`) even when nothing else
   about that host is reachable.
-- Run from the parent of eureka_protocol so the package resolves. On CT 101 and
-  CT 102 a .pth in the venv handles this; on WSL use sys.path.insert or
+- Run from the parent of eureka_protocol so the package resolves. On Host A and
+  Host B a .pth in the venv handles this; on WSL use sys.path.insert or
   cd ~/eureka.
 - A fresh unprivileged LXC has no working journald until the credentials
   drop-in is applied (status=243/CREDENTIALS). See "journald in an
@@ -1883,30 +1888,30 @@ peers from the table it checks against.
   back `address_not_allowed`, the target really does resolve into one of those
   ranges -- that is the check working, not a bug. See "web-retrieval, and what
   it refuses".
-- CT 101 has no git remote, on purpose: its `origin` was the seed bundle, and
+- Host A has no git remote, on purpose: its `origin` was the seed bundle, and
   a bare fetch force-rewound `origin/master` to the seed commit. New commits
-  get there by bundle -- see "Advancing CT 101 to a new commit". Do not add a
+  get there by bundle -- see "Advancing Host A to a new commit". Do not add a
   remote back without reading that section first.
 - `demo.sh` without `EUREKA_IDENTITY_PATH`/`EUREKA_TRUST_PATH` creates a
   throwaway identity instead of failing, and reports a node_id that never
   existed. See "demo.sh needs the identity paths too".
-- `wsl-hermes`'s `web-retrieval` grant was exercised by the peer on
-  2026-08-29 and works end to end. It sat unexercised for a day because CT 101
+- `wsl-peer`'s `web-retrieval` grant was exercised by the peer on
+  2026-08-29 and works end to end. It sat unexercised for a day because Host A
   cannot test it against itself, and validating the file locally stayed a
   different check from a peer getting past the gate. See "What the WSL peer
   proved".
-- **CT 101's DNS was broken in a way that looked like a protocol bug.** Its
-  PVE-managed `/etc/resolv.conf` listed `1.1.1.1` first, and UDP/53 to
-  `1.1.1.1` and `8.8.8.8` is blocked LAN-wide -- CT 102 sees the same block.
+- **Host A's DNS was broken in a way that looked like a protocol bug.** Its
+  container-host-managed `/etc/resolv.conf` listed `1.1.1.1` first, and UDP/53 to
+  `1.1.1.1` and `8.8.8.8` is blocked LAN-wide -- Host B sees the same block.
   glibc waited out the default `timeout:5` on the first nameserver before
   falling back to one that answered, so every cold lookup cost a flat five
   seconds. `web-retrieval` resolves twice on purpose (once for the policy
   check, once inside httpx when it connects), so a fetch of a 559-byte page
   took ten seconds and the peer's client timed out before the answer came
-  back. Fixed on 2026-08-29 with `pct set 101 --nameserver 192.168.1.1` on the
+  back. Fixed on 2026-08-29 with `pct set <container-id> --nameserver 192.168.0.1` on the
   Proxmox host; cold `getaddrinfo` went from 5.05s to 0.056s and the whole
-  handler from ~10s to 0.16s. Editing `/etc/resolv.conf` on CT 101 does not
-  hold -- PVE regenerates it.
+  handler from ~10s to 0.16s. Editing `/etc/resolv.conf` on Host A does not
+  hold -- the container host regenerates it.
 - **A client calling /v1/assign must outlast the registry's deadline, not the
   fetch timeout.** Those are different numbers: the fetch gets 10s, but the
   pre-flight DNS resolution runs before it and is not covered by it, and 30s
@@ -1927,7 +1932,7 @@ peers from the table it checks against.
   four times later the same day, each followed by success on the next attempt.
   Nothing is wrong with the server when this happens, and the way to tell is
   that **a malformed tool call never reaches it**: the MCP server's stderr
-  carries no `eureka-mcp:` line, and CT 101's journal shows no
+  carries no `eureka-mcp:` line, and Host A's journal shows no
   `Handshake established`. A real fault leaves traces on both. If the model
   eventually succeeds and the fetch works, that was this, and the fix is a
   better tool-calling model rather than anything in Eureka or the server.
@@ -2022,8 +2027,8 @@ node can. So only globally routable unicast addresses may be fetched. Refused:
     CGNAT             100.64/10
     multicast, reserved, unspecified, and IPv4-mapped forms of any of these
 
-CT 101's own API is covered by that without a special case: it answers on
-192.168.1.180 and on loopback, both refused. So is CT 102 on 192.168.1.174, and
+Host A's own API is covered by that without a special case: it answers on
+192.168.0.11 and on loopback, both refused. So is Host B on 192.168.0.12, and
 so is everything else on the LAN -- **a `web-retrieval` grant does not let a
 peer reach anything inside this perimeter, which is the only reason it is safe
 to grant to a peer outside it.**
@@ -2042,7 +2047,7 @@ To see the policy for yourself on the deployed node:
     runuser -u eureka -- /opt/eureka/venv/bin/python -c "
     from eureka_protocol.src.eureka_daemon.handlers import AddressPolicy
     p = AddressPolicy()
-    for a in ('127.0.0.1','192.168.1.180','169.254.169.254','93.184.216.34'):
+    for a in ('127.0.0.1','192.168.0.11','169.254.169.254','93.184.216.34'):
         print(a, p.refusal(a) or 'allowed')
     "
 
@@ -2070,7 +2075,7 @@ executor from a working gate -- the refusals were always distinguishable, but a
 *granted* request returned the same canned string whether anything behind the
 gate could run or not.
 
-`wsl-hermes` (node_ef0a1f59, on the Alienware) ran one handshake and then seven
+`wsl-peer` (node_cccccccc, on the Windows PC) ran one handshake and then seven
 cases behind it, because `is_permitted` consults a peer record that exists only
 after a handshake -- it lives in the responder's memory until the daemon
 restarts, so the cases share a run but need not share a connection. Round trip
@@ -2094,7 +2099,7 @@ web server was unreachable.
 
 **Two things went wrong, and neither was the daemon.**
 
-The first attempt timed out client-side at exactly ten seconds while CT 101
+The first attempt timed out client-side at exactly ten seconds while Host A
 finished the work and had nobody to hand it to -- the DNS fault in "Gotchas",
 which presented as a protocol failure and was a blocked nameserver. Worth
 remembering the shape: the journal showed the dispatch and the log entry ten
@@ -2110,20 +2115,20 @@ reads; `handlers.REASON_OK` is `"ok"`, the work's verdict, which lives inside
 the exact distinction the row above is about, tripped over while testing it.
 Import the constants rather than typing the strings.
 
-## Adding Antiochus as a third node (CT 102)
+## Adding the agent as a third node (Host B)
 
-Done 2026-09-01, at master c230d37. CT 102 already held the origin repo and ran
-Antiochus; what it did not have was an identity of its own. It now initiates to
-CT 101 as `ct102-openclaw` / `node_485428e3`.
+Done 2026-09-01, at master c230d37. Host B already held the origin repo and ran
+the agent; what it did not have was an identity of its own. It now initiates to
+Host A as `agent-peer` / `node_bbbbbbbb`.
 
 **It is an initiator, not a responder.** No daemon, no unit, no listening port,
 no TLS material. It advertises nothing and executes nothing, which is what a
 client node is here: built with `capabilities=[]` and no handler registry, so an
 assign that somehow reached it would be refused rather than dispatched.
 
-**Its trust file grants CT 101 nothing, and that is not an oversight.** Trusting
-a key and granting it a capability are different acts. Trust is what CT 102
-needs to *call* CT 101 — the TLS pin checks the key that terminated the
+**Its trust file grants Host A nothing, and that is not an oversight.** Trusting
+a key and granting it a capability are different acts. Trust is what Host B
+needs to *call* Host A — the TLS pin checks the key that terminated the
 connection against this file, and the handshake checks the key that signed
 message 2. Grants govern the other direction: what a peer may ask of us. There
 is nothing here to ask for, so a grant would name a capability this node could
@@ -2133,14 +2138,14 @@ there looking effective.
 
 ### 1. Mint the identity, at an explicit path
 
-`/var/lib/eureka` on CT 102 is the pre-move backup of `node_a2ed8dc7` and must
-not be reused — see "Paths". Antiochus gets its own directory:
+`/var/lib/eureka` on Host B is the pre-move backup of `node_aaaaaaaa` and must
+not be reused — see "Paths". The agent gets its own directory:
 
-    mkdir -p -m 0700 /var/lib/eureka-antiochus
+    mkdir -p -m 0700 /var/lib/eureka-agent
     /root/eureka_venv/bin/python -c "
     from eureka_protocol.src.eureka_daemon.crypto import EurekaCrypto
     c = EurekaCrypto()
-    c.save('/var/lib/eureka-antiochus/identity.key')   # no overwrite=True
+    c.save('/var/lib/eureka-agent/identity.key')   # no overwrite=True
     print(c.derive_node_id(), c.get_public_key_hex())
     "
 
@@ -2148,25 +2153,25 @@ not be reused — see "Paths". Antiochus gets its own directory:
 this cannot silently replace a node. Run from `/root/.openclaw/workspace` so
 `eureka_protocol` imports.
 
-### 2. Write CT 102's trust file
+### 2. Write Host B's trust file
 
     /root/eureka_venv/bin/python -c "
     import json
     from eureka_protocol.src.eureka_daemon.trust import TrustList
     t = TrustList()
-    t.add('eureka-node',
-          'a718592fde751a92db31fa27ee1e88efbd6c1134753fd9a5d92b08b89d118fd1', [])
-    with open('/var/lib/eureka-antiochus/trust.json', 'w') as fh:
+    t.add('responder-node',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', [])
+    with open('/var/lib/eureka-agent/trust.json', 'w') as fh:
         json.dump(t.to_document(), fh, indent=2); fh.write('\n')
     "
-    chmod 0600 /var/lib/eureka-antiochus/trust.json
+    chmod 0600 /var/lib/eureka-agent/trust.json
 
-CT 101's public key came from its identity file over ssh — an authenticated
+Host A's public key came from its identity file over ssh — an authenticated
 channel — and was cross-checked against the node table above and the
 `peers should pin:` line the daemon prints at startup. Do not take it from an
 unauthenticated fetch: the key is the whole basis of the pin.
 
-### 3. Grant on CT 101
+### 3. Grant on Host A
 
 By the procedure in "Granting a capability", unchanged, with one addition worth
 keeping: generate the new file as a *candidate* and diff it against the live one
@@ -2176,15 +2181,15 @@ before anything is written in place.
     import json
     from eureka_protocol.src.eureka_daemon.trust import TrustList
     t = TrustList.load('/var/lib/eureka/trust.json')
-    t.add('ct102-openclaw',
-          'c373fd0d8b58bb325895859cdc065a2ed767a881717bd0246b617dcda335feba',
+    t.add('agent-peer',
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
           ['web-retrieval'])
     with open('/root/trust.json.candidate', 'w') as fh:
         json.dump(t.to_document(), fh, indent=2); fh.write('\n')
     "
     diff -u /var/lib/eureka/trust.json /root/trust.json.candidate
 
-The diff is the review. It showed one added peer and `wsl-hermes` untouched,
+The diff is the review. It showed one added peer and `wsl-peer` untouched,
 which is the property that actually matters — a trust edit that quietly alters
 an existing peer is the failure this catches. The candidate was also
 load-checked *before* being put in place, which the original procedure does not
@@ -2202,38 +2207,38 @@ daemon would fail to read it.
 
 ### What the run produced, 2026-09-01
 
-CT 101's allowlist, loaded as the daemon loads it:
+Host A's allowlist, loaded as the daemon loads it:
 
     advertised by this node : ['web-retrieval']
     peers on the allowlist  : 2
     revocations             : 0
 
-      wsl-hermes       bff5536af5a324f8f8d971e93047a4f1944f9c31dc06408826680d5b21d482ae
+      wsl-peer       cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
                        grants=['web-retrieval'] web-retrieval=True code-exec=False
-      ct102-openclaw   c373fd0d8b58bb325895859cdc065a2ed767a881717bd0246b617dcda335feba
+      agent-peer   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
                        grants=['web-retrieval'] web-retrieval=True code-exec=False
 
-`wsl-hermes`'s entry is byte-identical to the pre-change backup. The restart
-brought the daemon back as `node_a2ed8dc7` with `NRestarts=0`, pinning the same
+`wsl-peer`'s entry is byte-identical to the pre-change backup. The restart
+brought the daemon back as `node_aaaaaaaa` with `NRestarts=0`, pinning the same
 key — a node_id that moves across a trust edit means the wrong file was edited,
 not that the grant was bad.
 
-### Driving it: integrations/antiochus_client.py
+### Driving it: integrations/assign_client.py
 
-Version controlled, and the Antiochus-side counterpart to
+Version controlled, and the agent-side counterpart to
 `eureka_mcp_server.py`: same protocol path, no MCP. It is what proves the node
 before anything is wired into OpenClaw.
 
-    export EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key
-    export EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json
-    /root/eureka_venv/bin/python integrations/antiochus_client.py https://example.com
+    export EUREKA_IDENTITY_PATH=/var/lib/eureka-agent/identity.key
+    export EUREKA_TRUST_PATH=/var/lib/eureka-agent/trust.json
+    /root/eureka_venv/bin/python integrations/assign_client.py --peer https://192.168.0.11:8443 https://example.com
 
 **It takes a capability, and the capability decides three things.** The
 positional argument stopped being a URL and became the capability's one input,
 because `inference` wants a prompt where `web-retrieval` wants a URL, and the
 payload key each handler reads is the only thing that differs:
 
-    ... integrations/antiochus_client.py --peer https://192.168.1.152:8443 \
+    ... integrations/assign_client.py --peer https://192.168.0.13:8443 \
         --capability inference "Say the single word: ping"
 
 The three are the payload key, the client timeout, and the shape of a
@@ -2275,7 +2280,7 @@ naming the path it could not read.
 
 ### What was proven, 2026-09-01: the node itself
 
-A signed `/v1/assign` from `node_485428e3` to CT 101 fetched `https://example.com`
+A signed `/v1/assign` from `node_bbbbbbbb` to Host A fetched `https://example.com`
 — HTTP 200, 559 bytes, `text/html` — and the result signature verified against
 the key that terminated TLS, bound to the nonce that was sent.
 
@@ -2283,9 +2288,9 @@ Three runs, and **the contrast is the point**, same as `demo.sh`:
 
 | run | identity | asks for | outcome |
 |---|---|---|---|
-| trusted | `node_485428e3` | `web-retrieval` | `ok: true`, verified, page returned |
+| trusted | `node_bbbbbbbb` | `web-retrieval` | `ok: true`, verified, page returned |
 | untrusted | throwaway key, same trust file | `web-retrieval` | refused `untrusted_key` at handshake |
-| ungranted | `node_485428e3` | `code-exec` | refused `capability_not_granted` at the gate |
+| ungranted | `node_bbbbbbbb` | `code-exec` | refused `capability_not_granted` at the gate |
 
 The second run differs from the first in exactly one variable — which key signs
 — so a green first run is not merely reachability. The third shows the grant is
@@ -2300,11 +2305,11 @@ The untrusted run produced none: an unverified `requester_id` is a claim, and
 attributing log entries to claims would let anyone write history under anyone's
 name.
 
-**`wsl-hermes` re-verified on the wire, same day.** The trust edit added a peer
+**`wsl-peer` re-verified on the wire, same day.** The trust edit added a peer
 and the file said its entry was untouched, but the file is not the wire, and
-`wsl-hermes` is an initiator that nothing on CT 102 can drive. The Alienware
+`wsl-peer` is an initiator that nothing on Host B can drive. The Windows PC
 came up and ran `demo.sh`: trusted PASS (`authenticated` True, `mutual` True,
-peer `node_a2ed8dc7`), untrusted PASS (refused `untrusted_key`). `node_ef0a1f59`
+peer `node_aaaaaaaa`), untrusted PASS (refused `untrusted_key`). `node_cccccccc`
 unchanged. Both scenarios, because a trusted PASS on its own only shows
 reachability.
 
@@ -2321,20 +2326,20 @@ so nobody reads a 0.5s skew as the cause of a refusal it cannot produce. A
 slept host drifting far enough to matter is a real failure mode; this was not
 yet it.
 
-## Granting inference to ct102-openclaw (on WSL)
+## Granting inference to agent-peer (on WSL)
 
 Done 2026-09-03. WSL had advertised `inference` since 2026-09-02 and granted it
-to nobody; Antiochus can now ask Hermes's host to run a prompt. It is the first
+to nobody; the agent can now ask Hermes's host to run a prompt. It is the first
 grant of anything other than `web-retrieval`, and the first grant WSL has ever
 made — until this date that host advertised two capabilities and handed out
 none.
 
 **Only `inference`.** WSL advertises both, and the narrowest grant that does
-the job is one of them. `ct102-openclaw` gets no `web-retrieval` here, which
+the job is one of them. `agent-peer` gets no `web-retrieval` here, which
 also means the gate has something to say `False` about on this host.
 
 By the procedure in "Granting a capability", with the candidate-and-diff
-addition from "Adding Antiochus as a third node", and one change that is not
+addition from "Adding the agent as a third node", and one change that is not
 optional on this host.
 
 ### The load-check needs EUREKA_INFERENCE=1 in the operator's shell
@@ -2349,8 +2354,8 @@ the day something is granted inference", which is the same trap one step later.
     from eureka_protocol.src.eureka_daemon.handlers import default_registry
     advertised = sorted(default_registry().names())
     print('this node advertises:', advertised)
-    t = TrustList.load('/home/stunner/trust.json.candidate', advertised=advertised)
-    for name in ('ct102-openclaw', 'eureka-node'):
+    t = TrustList.load('/home/operator/trust.json.candidate', advertised=advertised)
+    for name in ('agent-peer', 'responder-node'):
         k = t.key_for(name)
         print(name, sorted(t.capabilities_for(k)),
               '| inference:', t.grants(k, 'inference'),
@@ -2362,10 +2367,10 @@ as well as one that must be present — a check that only ever prints True canno
 fail. It printed:
 
     this node advertises: ['inference', 'web-retrieval']
-    ct102-openclaw ['inference'] | inference: True | web-retrieval: False
-    eureka-node    []            | inference: False | web-retrieval: False
+    agent-peer ['inference'] | inference: True | web-retrieval: False
+    responder-node    []            | inference: False | web-retrieval: False
 
-The `eureka-node` row is the one that matters second: CT 101 was in this file
+The `responder-node` row is the one that matters second: Host A was in this file
 before the edit and is unchanged by it.
 
 ### What the run produced, 2026-09-03
@@ -2374,34 +2379,34 @@ Backup at `~/trust.json.bak-20260903`. The in-place rewrite preserved the
 inode — 303865 before and after — so owner and mode survived; a shell redirect
 into a new file would have left the daemon a file it could not read. Note that
 on this host the daemon *cannot* write this file at all (`ProtectHome=read-only`),
-which is why the edit is made as `stunner` rather than by the service account.
+which is why the edit is made as `operator` rather than by the service account.
 
 Preflight after the restart:
 
-    preflight: node_ef0a1f59 ok
+    preflight: node_cccccccc ok
     preflight:   advertises inference, web-retrieval
     preflight:   ollama     http://127.0.0.1:11434/api/generate generating with qwen3:8b
-    preflight:   grants     ct102-openclaw: inference
-    preflight:   grants     eureka-node: (nothing)
+    preflight:   grants     agent-peer: inference
+    preflight:   grants     responder-node: (nothing)
 
-`node_ef0a1f59` unchanged across the trust edit — a node_id that moves means the
+`node_cccccccc` unchanged across the trust edit — a node_id that moves means the
 wrong file was edited, not that the grant was bad.
 
 ### What was proven: the grant, end to end
 
-**This is the check CT 101's 2026-08-28 grant went without for four days.** A
+**This is the check Host A's 2026-08-28 grant went without for four days.** A
 daemon that starts has loaded the file; it has not shown that a peer on the far
 side of a handshake sees the same answer. Here the peer exists and can be
 driven, so the grant was proven the same day it was written:
 
-    EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key \
-    EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json \
-    /root/eureka_venv/bin/python integrations/antiochus_client.py \
-      --peer https://192.168.1.152:8443 \
+    EUREKA_IDENTITY_PATH=/var/lib/eureka-agent/identity.key \
+    EUREKA_TRUST_PATH=/var/lib/eureka-agent/trust.json \
+    /root/eureka_venv/bin/python integrations/assign_client.py \
+      --peer https://192.168.0.13:8443 \
       --capability inference "Say the single word: ping"
 
     ok true, verified true, capability inference
-    responder node_ef0a1f59, pinned_key bff5536a...
+    responder node_cccccccc, pinned_key cccccccc...
     prompt_chars 25, model qwen3:8b
     completion "Ping", chars 4, truncated false, done_reason stop, eval_count 2
 
@@ -2410,21 +2415,21 @@ the completion ended because the model finished, not because it hit the token
 budget or this node's character cap. A four-character answer could have been
 either.
 
-**The pinned key predates the grant.** `bff5536a...` is the `wsl-hermes` entry
-CT 102 has carried since 2026-09-01, so the TLS pin matched material written
+**The pinned key predates the grant.** `cccccccc...` is the `wsl-peer` entry
+Host B has carried since 2026-09-01, so the TLS pin matched material written
 before this edit existed — the grant changed what WSL will *do* for that key
 and nothing about who the key is.
 
-The contrast run was against CT 101 rather than a second identity, and it is the
+The contrast run was against Host A rather than a second identity, and it is the
 sharper one available here: the same signing key asking the same capability of a
 host that neither advertises nor grants it is refused `capability_not_granted`
 at the gate. One grant, one host, one capability — and the refusal for "not
 granted" and "not offered here" is deliberately the same sentence.
 
-## Reaching Eureka from Telegram (OpenClaw, CT 102)
+## Reaching Eureka from Telegram (OpenClaw, Host B)
 
-Done 2026-09-01. Antiochus now calls CT 101 through the same MCP server WSL
-uses. `ct102-openclaw` is reachable from a Telegram message, and the tool that
+Done 2026-09-01. The agent now calls Host A through the same MCP server WSL
+uses. `agent-peer` is reachable from a Telegram message, and the tool that
 answers is the one whose result carries a verified signature.
 
 **OpenClaw's MCP support is real, and its own guides do not document it.** There
@@ -2439,7 +2444,7 @@ is vendored, and there is a full `openclaw mcp` command group. Check
 
 ### One server, two hosts
 
-`integrations/eureka_mcp_server.py` runs unmodified on both WSL and CT 102.
+`integrations/eureka_mcp_server.py` runs unmodified on both WSL and Host B.
 Only the environment differs. That is the whole reason it was committed rather
 than left on one machine: a second copy is the thing that drifts, and the two
 callers would have diverged on the day one of them was fixed.
@@ -2447,13 +2452,13 @@ callers would have diverged on the day one of them was fixed.
     openclaw mcp add eureka \
       --command /root/eureka_venv/bin/python \
       --arg /root/.openclaw/workspace/eureka_protocol/integrations/eureka_mcp_server.py \
-      --env EUREKA_IDENTITY_PATH=/var/lib/eureka-antiochus/identity.key \
-      --env EUREKA_TRUST_PATH=/var/lib/eureka-antiochus/trust.json \
-      --env EUREKA_PEER=https://192.168.1.180:8443 \
+      --env EUREKA_IDENTITY_PATH=/var/lib/eureka-agent/identity.key \
+      --env EUREKA_TRUST_PATH=/var/lib/eureka-agent/trust.json \
+      --env EUREKA_PEER=https://192.168.0.11:8443 \
       --env EUREKA_MAX_CHARS=8000 \
-      --env EUREKA_TASK_NAME=antiochus-fetch \
-      --env EUREKA_INFERENCE_PEER=https://192.168.1.152:8443 \
-      --env EUREKA_INFERENCE_TASK_NAME=antiochus-inference \
+      --env EUREKA_TASK_NAME=agent-fetch \
+      --env EUREKA_INFERENCE_PEER=https://192.168.0.13:8443 \
+      --env EUREKA_INFERENCE_TASK_NAME=agent-inference \
       --timeout 150
 
 `mcp add` **probes the server before saving**, so a command that cannot start is
@@ -2477,12 +2482,12 @@ Five of those values are load bearing:
   Hermes's context window; a Telegram reply is not that. It bounds `eureka_fetch`
   only; completions are bounded by the peer, which is the node that signs the
   flag saying whether it cut one.
-- **`EUREKA_TASK_NAME=antiochus-fetch`** -- see below.
-- **`EUREKA_INFERENCE_PEER=https://192.168.1.152:8443`** is WSL, and it is a
+- **`EUREKA_TASK_NAME=agent-fetch`** -- see below.
+- **`EUREKA_INFERENCE_PEER=https://192.168.0.13:8443`** is WSL, and it is a
   *separate variable from `EUREKA_PEER` on purpose*, with no default and no
   fallback. See the next section.
-- **`EUREKA_INFERENCE_TASK_NAME=antiochus-inference`** -- the audit-log name for
-  the other capability, for the same reason `antiochus-fetch` exists.
+- **`EUREKA_INFERENCE_TASK_NAME=agent-inference`** -- the audit-log name for
+  the other capability, for the same reason `agent-fetch` exists.
 
 No `cwd` is set. `_find_package_root()` resolves the package from `__file__`,
 so the server runs from any working directory, and a `cwd` here would be one
@@ -2498,12 +2503,12 @@ additions only, and the 616 tests still pass on that interpreter.
 
 Added 2026-09-03, with `eureka_inference`. The server had one peer in its env
 and that stopped being enough the moment a second capability existed, because
-**`inference` is not served by the host that serves `web-retrieval`**. CT 101
+**`inference` is not served by the host that serves `web-retrieval`**. Host A
 fetches and has no Ollama; WSL runs the model and grants `inference` to
-`ct102-openclaw` alone. One address cannot name both.
+`agent-peer` alone. One address cannot name both.
 
 The failure this shape exists to avoid is specific. Send an `inference` assign
-to CT 101 and it comes back `capability_not_granted` -- which is exactly what a
+to Host A and it comes back `capability_not_granted` -- which is exactly what a
 missing grant on WSL would say, because the peer deliberately folds "not
 granted" and "not offered here" into one refusal so that neither can be used to
 enumerate the other. So a wrong peer does not look like a wrong peer. It looks
@@ -2530,7 +2535,7 @@ lands, the map is the right thing to do and this paragraph is the argument for
 doing it then.
 
 A per-tool default in the module is wrong for the reason there is only one copy
-of this file: `192.168.1.152` is a fact about CT 102's view of the mesh, not
+of this file: `192.168.0.13` is a fact about Host B's view of the mesh, not
 about the code, and the same bytes run on WSL where that address is the local
 machine.
 
@@ -2590,7 +2595,7 @@ stop being informative, which is the failure nobody notices.
 timeout is an exception on this side, and from here it is indistinguishable
 from a peer that refused. The 30s of headroom covers what the peer's deadline
 does not count: TLS, the three-message handshake and the response body. 120 is
-also the figure `antiochus_client.py` has used since `inference` was proven by
+also the figure `assign_client.py` has used since `inference` was proven by
 hand, and the two paths deliberately wait the same length of time.
 
 **150 > 120** keeps OpenClaw's ceiling above the longest wait this file will
@@ -2668,8 +2673,8 @@ with no punctuation, no apology and nothing in the text to say so.
 ### The task name, and why it got its own variable
 
 `build_assign_query` was called with a hardcoded `"hermes-fetch"` for as long as
-WSL was the only caller. CT 102 then started running the same file, and its
-fetches were filed in CT 101's audit log under Hermes's name.
+WSL was the only caller. Host B then started running the same file, and its
+fetches were filed in Host A's audit log under Hermes's name.
 
 Nothing broke. That is exactly what makes it worth fixing: the log kept working
 and started lying, and the log is how a future reader answers "who ran this".
@@ -2683,31 +2688,31 @@ a new commit. A host that never sets it writes exactly what it always wrote.
 
 **The name identifies the entry point, not the host.** The host is already
 named, in every line, by the key that signed the request -- adding it to the
-task name says nothing new. What the log could not say is *how* CT 102 called,
-and it reaches CT 101 two ways:
+task name says nothing new. What the log could not say is *how* Host B called,
+and it reaches Host A two ways:
 
 | caller | task name |
 |---|---|
-| `integrations/antiochus_client.py`, hand-run | `antiochus-cli` |
-| MCP server, `eureka_fetch` | `antiochus-fetch` |
-| MCP server, `eureka_inference` | `antiochus-inference` |
+| `integrations/assign_client.py`, hand-run | `assign-cli` |
+| MCP server, `eureka_fetch` | `agent-fetch` |
+| MCP server, `eureka_inference` | `agent-inference` |
 
 The third row is `EUREKA_INFERENCE_TASK_NAME`, added 2026-09-03, and it is a
 second variable rather than a reuse of `EUREKA_TASK_NAME` because both deployed
 values of that one end in `-fetch`. An inference request filed under
-`antiochus-fetch` would be a log entry that says it was a fetch, on a host whose
+`agent-fetch` would be a log entry that says it was a fetch, on a host whose
 stated rule is that a log which misattributes work is worse than one that says
 nothing. The default has no legacy to protect the way `hermes-fetch` does --
 no host has ever sent an inference request through this file -- so it is simply
 accurate: `mcp-inference`, naming the entry point, with the host already named
 in every line by the key that signed the request.
 
-`antiochus_client.py` keeps one name for both capabilities. It is right there
-for the same reason it is wrong here: `antiochus-cli` names the entry point and
+`assign_client.py` keeps one name for both capabilities. It is right there
+for the same reason it is wrong here: `assign-cli` names the entry point and
 says nothing about the capability, and the capability is its own field in the
 entry.
 
-Both wrote `antiochus-fetch` for about half an hour on 2026-09-01, and in that
+Both wrote `agent-fetch` for about half an hour on 2026-09-01, and in that
 window the peer's audit log could not tell a hand-run script from a Telegram
 message. Nothing was wrong in the log; the distinction simply was not in it,
 and "which path was that?" was answerable only by whoever remembered what they
@@ -2717,17 +2722,17 @@ can answer.
 
 Verified by running both within twelve seconds and reading the result back:
 
-    07:34:33  EUREKA-LOG generated for task antiochus-cli
-    07:34:45  EUREKA-LOG generated for task antiochus-fetch
+    07:34:33  EUREKA-LOG generated for task assign-cli
+    07:34:45  EUREKA-LOG generated for task agent-fetch
 
-The two `hermes-fetch` entries CT 102 wrote on 2026-09-01 between 06:14 and
+The two `hermes-fetch` entries Host B wrote on 2026-09-01 between 06:14 and
 06:20 are left in the journal as they are. An audit log is not rewritten to
 make it tidy; those entries are a true record that the daemon logged that name,
 and this paragraph is the record of why it was wrong.
 
 ### Applying config changes, and when a restart is unavoidable
 
-Antiochus is a live Telegram agent, so the sequence matters:
+The agent is a live Telegram agent, so the sequence matters:
 
     cp -p ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.pre-<change>-<date>
     # generate the change against a COPY, diff it, then apply
@@ -2811,13 +2816,13 @@ sent to the channel. Asked to fetch `https://example.com` through the peer, the
 agent returned HTTP 200, signature-verified, "Example Domain".
 
 **The agent's own answer is not the evidence.** It could have used its ordinary
-web tool and produced the same three facts. CT 101's journal is the witness:
-`Handshake established with node_485428e3` and an `EUREKA-LOG` at the matching
-second, which nothing but a real signed assign from CT 102 produces.
+web tool and produced the same three facts. Host A's journal is the witness:
+`Handshake established with node_bbbbbbbb` and an `EUREKA-LOG` at the matching
+second, which nothing but a real signed assign from Host B produces.
 
 Transport was audited directly rather than assumed. Driving the server over raw
 stdio JSON-RPC, every line on stdout parsed as JSON-RPC during a live fetch,
-while `[NODE node_485428e3] Handshake established` went to stderr where
+while `[NODE node_bbbbbbbb] Handshake established` went to stderr where
 `_protocol_safe_stdout()` puts it. This is the failure that broke the Hermes
 server before it was fixed, and it is worth re-checking after any change to
 that file: the symptom is not a noisy log, it is a server the client reports as
@@ -2830,10 +2835,10 @@ open, and so must a test. And `mcp add`'s probe proves the server *starts and
 lists tools*; only an agent turn proves the tools reach the model.
 
 **Confirmed from a phone, 2026-09-01 07:24:27.** "Use the eureka_fetch tool to
-get https://example.com/" sent to Antiochus over Telegram came back with the
-Example Domain content, and CT 101's journal independently shows
-`Handshake established with node_485428e3` and `EUREKA-LOG generated for task
-antiochus-fetch` at that second.
+get https://example.com/" sent to the agent over Telegram came back with the
+Example Domain content, and Host A's journal independently shows
+`Handshake established with node_bbbbbbbb` and `EUREKA-LOG generated for task
+agent-fetch` at that second.
 
 That is the claim finally made by the thing it is a claim about. Every check
 before it used `openclaw agent`, which runs a turn through the Gateway and is
@@ -2851,8 +2856,8 @@ agent holds an old one and fails. See the discriminator above.
 The MCP server was driven over **raw stdio JSON-RPC**, which is the transport
 OpenClaw uses, with stdin held open -- closing it makes the server exit
 mid-call and look like a server fault. Every line the server wrote to stdout
-parsed as JSON-RPC while a live inference ran, and `[NODE node_485428e3]
-Handshake established with node_ef0a1f59` went to stderr where
+parsed as JSON-RPC while a live inference ran, and `[NODE node_bbbbbbbb]
+Handshake established with node_cccccccc` went to stderr where
 `_protocol_safe_stdout()` puts it. This is the check worth repeating after any
 change to that file: the symptom of getting it wrong is not a noisy log, it is
 a server the client reports as dead.
@@ -2860,10 +2865,10 @@ a server the client reports as dead.
     tools/list          eureka_fetch, eureka_inference, eureka_peer_status
     eureka_inference    "Reply with exactly the word: pong"
                         -> ok, verified, model qwen3:8b, completion "pong",
-                           done_reason "stop", responder node_ef0a1f59
+                           done_reason "stop", responder node_cccccccc
     eureka_fetch        https://example.com
                         -> ok, verified, 200, text/html, 559 bytes,
-                           responder node_a2ed8dc7
+                           responder node_aaaaaaaa
 
 Both peers in one process, each answering for the capability it serves, and the
 fetch identical to what it returned before the change.
@@ -2888,11 +2893,11 @@ captured for the whole session and searched for the prompt string: not present.
 And WSL's own audit log, read back over the protocol with an authenticated
 `POST /v1/logs`, shows the entries and nothing of what was asked:
 
-    {"capability": "inference", "peer": "node_485428e3",
-     "task_summary": "antiochus-inference", "result": "completed",
+    {"capability": "inference", "peer": "node_bbbbbbbb",
+     "task_summary": "agent-inference", "result": "completed",
      "outcome": "completed"}
-    {"capability": "inference", "peer": "node_485428e3",
-     "task_summary": "antiochus-inference", "result": "failed",
+    {"capability": "inference", "peer": "node_bbbbbbbb",
+     "task_summary": "agent-inference", "result": "failed",
      "outcome": "prompt_too_long"}
 
 Which is also the third row of the task-name table, observed rather than
@@ -2902,20 +2907,20 @@ not claim it was a fetch.
 ### What was proven, 2026-09-03: end to end from Telegram
 
 The raw-stdio run above proved the server. This is the capability reached the
-way it is actually used: a message to Antiochus in Telegram, answered by the
+way it is actually used: a message to the agent in Telegram, answered by the
 model on the connected peer.
 
-Asked a question with one right answer, Antiochus replied **"Paris"** and named
+Asked a question with one right answer, the agent replied **"Paris"** and named
 **qwen3:8b** as the model on the connected peer -- WSL's model, not one of its
 own and not a guess it could have made without leaving the host.
 
 Confirmed on the responder, in WSL's journal rather than in anything the caller
 said about itself:
 
-    Sep 03 22:24:25  Dispatching task: antiochus-inference (inference)
-    Sep 03 22:24:28  EUREKA-LOG generated for task antiochus-inference
+    Sep 03 22:24:25  Dispatching task: agent-inference (inference)
+    Sep 03 22:24:28  EUREKA-LOG generated for task agent-inference
 
-Three seconds between dispatch and log. The task name is the one CT 102
+Three seconds between dispatch and log. The task name is the one Host B
 configured, which is the task-name table's third row observed rather than
 asserted: WSL's audit log says an inference ran, under a name that does not
 claim it was a fetch. Both ends agree and neither is quoting the other.
@@ -2940,11 +2945,11 @@ Confirmed against the WSL peer on 2026-08-29: the grant and the executor have
 both been exercised over the wire, so nothing on this list is waiting on that
 any more. See "What the WSL peer proved".
 
-Antiochus is wired into OpenClaw as of 2026-09-01 and reachable from Telegram
+The agent is wired into OpenClaw as of 2026-09-01 and reachable from Telegram
 -- see "Reaching Eureka from Telegram". Since 2026-09-03 it reaches **two**
-peers from there, one per capability: CT 101 for `web-retrieval` through
+peers from there, one per capability: Host A for `web-retrieval` through
 `eureka_fetch`, WSL for `inference` through `eureka_inference`.
-`integrations/antiochus_client.py` remains the hand-driven path, and is still
+`integrations/assign_client.py` remains the hand-driven path, and is still
 the right thing to reach for when the question is whether the *node* works,
 since it exercises the protocol without the agent, the model or the MCP
 transport in the way.
@@ -2953,12 +2958,12 @@ Mutual TLS is evaluated and deliberately not planned; see the TLS section above
 for why.
 
 `inference` was added on 2026-09-02, **granted on 2026-09-03, to
-`ct102-openclaw` and to nobody else**, and reachable from a Telegram message on
+`agent-peer` and to nobody else**, and reachable from a Telegram message on
 the same day -- see "Granting inference to
-ct102-openclaw". For one day it sat where `web-retrieval` had sat on this host
-on 2026-09-01: advertised, runnable, permitted to no one. `eureka-node` is
+agent-peer". For one day it sat where `web-retrieval` had sat on this host
+on 2026-09-01: advertised, runnable, permitted to no one. `responder-node` is
 still in WSL's trust file with `"capabilities": []`, so an `/v1/assign` naming
-`inference` from CT 101 is refused before dispatch exactly as before.
+`inference` from Host A is refused before dispatch exactly as before.
 Advertising and granting remain two decisions; the second has now been taken
 once, for one peer.
 
