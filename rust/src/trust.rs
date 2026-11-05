@@ -322,6 +322,7 @@ impl TrustList {
             };
             let granted = normalise_capabilities(caps, &context).map_err(wrap)?;
             let mut unadvertised = Vec::new();
+            let mut can_enable = Vec::new();
             for capability in &granted {
                 if offered.contains(capability.as_str()) {
                     continue;
@@ -334,12 +335,14 @@ impl TrustList {
                     ));
                 } else {
                     unadvertised.push(r(capability));
+                    can_enable.extend(capability_switch(capability));
                 }
             }
             if !unadvertised.is_empty() {
                 return Err(wrap(TrustError(format!(
-                    "{context}: granted capability {} that this node does not advertise",
-                    unadvertised.join(", ")
+                    "{context}: granted capability {} that this node does not advertise. {}",
+                    unadvertised.join(", "),
+                    unadvertised_fix(name, &can_enable)
                 ))));
             }
             let key = normalise_public_key(key, &context).map_err(wrap)?;
@@ -347,6 +350,25 @@ impl TrustList {
         }
         Ok((list, warnings))
     }
+}
+
+/// The setting that makes this build advertise a capability, where there is one.
+fn capability_switch(capability: &str) -> Option<&'static str> {
+    match capability {
+        "room-turn" => Some("EUREKA_ROOM_TURN=1"),
+        "inference" => Some("EUREKA_INFERENCE=1"),
+        _ => None,
+    }
+}
+
+/// How to get past a grant this node does not advertise. Refusing to start stays right; this says what to do.
+fn unadvertised_fix(name: &str, switches: &[&str]) -> String {
+    let mut fixes = vec!["use a separate trust file for this daemon (EUREKA_TRUST_PATH=<new file>)".to_string()];
+    if !switches.is_empty() {
+        fixes.push(format!("turn the capability on if this node should serve it ({})", switches.join(" ")));
+    }
+    fixes.push(format!("revoke the peer, which is permanent for its key (eureka-daemon trust revoke {})", r(name)));
+    format!("To fix: {}.", fixes.join(", or "))
 }
 
 #[cfg(test)]

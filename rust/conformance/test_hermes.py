@@ -221,6 +221,18 @@ def test_the_set_command_form_and_disabled_mcp_servers_are_accepted(hermes, tmp_
     assert run_assign(node, daemon)[1]["result"]["status"] == "completed"
 
 
+def test_an_old_grant_stops_the_daemon_and_the_error_says_how_to_fix_it(start, tmp_path, hermes_home):
+    old = client_node("old")
+    with pytest.raises(RuntimeError, match="does not advertise") as refused:
+        start(peers=grant(old, "inference"),
+              env={"EUREKA_INFERENCE": "0", "EUREKA_ROOM_TURN_BACKEND": "hermes", "EUREKA_HERMES_BIN": FAKE, "HERMES_HOME": str(hermes_home),
+                   "FAKE_HERMES_CONFIG": settings(tmp_path, CHAT_ONLY)})
+    message = str(refused.value)
+    assert "granted capability 'inference'" in message
+    assert "EUREKA_TRUST_PATH=" in message and "EUREKA_INFERENCE=1" in message
+    assert f"eureka-daemon trust revoke '{old.node_id}'" in message
+
+
 def test_unreadable_hermes_settings_stop_the_daemon(start, tmp_path, hermes_home):
     with pytest.raises(RuntimeError, match="config get agent.disabled_toolsets failed: Error: config.yaml could not be parsed"):
         start(env={"EUREKA_ROOM_TURN_BACKEND": "hermes", "EUREKA_HERMES_BIN": FAKE, "HERMES_HOME": str(hermes_home),
