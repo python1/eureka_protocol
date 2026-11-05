@@ -1,0 +1,2 @@
+# Fixtures and vectors are compared byte for byte, and Windows checkouts default to CRLF.
+* text=auto eol=lf

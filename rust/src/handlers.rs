@@ -232,6 +232,22 @@ fn switch(name: &str) -> Result<bool, String> {
     }
 }
 
+/// Why OpenClaw and Hermes do not run in the native Windows build: room text can reach 48,000
+/// characters and OpenClaw takes it as an argument, past Windows' 32,767-character command line;
+/// npm installs these tools as `.cmd` wrappers, where arguments pass through cmd.exe's parsing; and
+/// process groups, which clean up after a turn, do not exist there. The Linux build under WSL has none of these limits.
+pub const NATIVE_WINDOWS_CLI_BACKENDS: [&str; 2] = ["openclaw", "hermes"];
+
+fn refuse_on_native_windows(backend: &str) -> Result<(), String> {
+    if cfg!(windows) && NATIVE_WINDOWS_CLI_BACKENDS.contains(&backend) {
+        return Err(format!(
+            "{BACKEND_ENV}={backend:?} is not available in the native Windows build. Run the Linux build of \
+             eureka-daemon inside WSL, next to {backend}, or use the ollama backend here. See rust/README.md, Build."
+        ));
+    }
+    Ok(())
+}
+
 fn find_program(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
     if name.contains('/') {
@@ -358,7 +374,7 @@ fn hermes_config(program: &Path, profile: &str, key: &str) -> Result<Value, Stri
     let output = match result.recv_timeout(Duration::from_secs(30)) {
         Ok(output) => output.map_err(|e| format!("reading Hermes setting {key}: {e}"))?,
         Err(_) => {
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            kill_process(pid);
             return Err(format!("hermes -p {profile} config get {key} did not answer in 30s"));
         }
     };
@@ -449,6 +465,7 @@ pub fn registry_from_environment() -> Result<Registry, String> {
     }
     if switch(ENABLE_ENV)? {
         let backend = std::env::var(BACKEND_ENV).unwrap_or_default().trim().to_lowercase();
+        refuse_on_native_windows(&backend)?;
         let (handler, deadline) = match backend.as_str() {
             "" | "ollama" => {
                 let model = std::env::var(MODEL_ENV).unwrap_or_default();
@@ -672,16 +689,37 @@ async fn ollama(endpoint: &Endpoint, body: &Value, timeout: f64, read: impl Fn(&
     }
 }
 
+#[cfg(unix)]
+fn kill_process(pid: i32) {
+    // SAFETY: kill on a child this daemon started; failure (already gone) is harmless.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: i32) {
+    // SAFETY: killpg on a process group this daemon created; failure (already gone) is harmless.
+    unsafe {
+        libc::killpg(pid, libc::SIGKILL);
+    }
+}
+
+// Native Windows refuses the agent CLI backends at startup (see NATIVE_WINDOWS_CLI_BACKENDS), so
+// nothing on Windows starts the processes these would stop.
+#[cfg(windows)]
+fn kill_process(_pid: i32) {}
+
+#[cfg(windows)]
+fn kill_process_group(_pid: i32) {}
+
 /// Kills an agent CLI's process group when the turn ends for any reason, timeout and deadline included.
 struct GroupKill(Option<i32>);
 
 impl Drop for GroupKill {
     fn drop(&mut self) {
         if let Some(pid) = self.0 {
-            // SAFETY: killpg on a process group this daemon created; failure (already gone) is harmless.
-            unsafe {
-                libc::killpg(pid, libc::SIGKILL);
-            }
+            kill_process_group(pid);
         }
     }
 }
@@ -839,8 +877,9 @@ async fn run_agent_cli(
         .stderr(Stdio::piped())
         .env("NO_COLOR", "1")
         .env("FORCE_COLOR", "0")
-        .kill_on_drop(true)
-        .process_group(0);
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -873,10 +912,7 @@ async fn run_agent_cli(
                     buf.truncate(AGENT_MAX_STDOUT_BYTES);
                     // Stop the agent now, so its stderr closes and nobody waits for an answer nobody will read.
                     if let Some(pid) = pid {
-                        // SAFETY: as in GroupKill.
-                        unsafe {
-                            libc::killpg(pid, libc::SIGKILL);
-                        }
+                        kill_process_group(pid);
                     }
                     return (buf, true);
                 }

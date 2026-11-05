@@ -11,6 +11,8 @@ mod isotime;
 mod node;
 mod pyjson;
 mod trust;
+#[cfg(windows)]
+mod winsec;
 #[cfg(test)]
 mod differential;
 #[cfg(test)]
@@ -27,7 +29,7 @@ use hyper_util::rt::TokioIo;
 const DEFAULT_HOST: &str = "127.0.0.1";
 const ORIGINS_ENV: &str = "EUREKA_CORS_ORIGINS";
 
-const USAGE: &str = "usage: eureka-daemon [-h] [--tls-port TLS_PORT] [--no-plain] [--tls] [--tls-dir TLS_DIR] [--host HOST] [--cors-origin ORIGIN] [port]";
+const USAGE: &str = "usage: eureka-daemon [-h] [-V] [--tls-port TLS_PORT] [--no-plain] [--tls] [--tls-dir TLS_DIR] [--host HOST] [--cors-origin ORIGIN] [port]";
 
 const HELP: &str = "Eureka Protocol daemon
 
@@ -36,6 +38,7 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
+  -V, --version         show the version and platform, and exit
   --tls-port TLS_PORT   also serve TLS on this port (not in this build; use the Python daemon)
   --no-plain            do not serve plaintext (requires --tls-port)
   --tls                 serve TLS on the main port and nothing else
@@ -57,6 +60,15 @@ environment:
 trust file:
   eureka-daemon trust add NAME PUBLIC_KEY [CAPABILITY ...]
   eureka-daemon trust list";
+
+/// `eureka-daemon 0.1.0 (macos aarch64)`, plus the commit when the build was given one, as CI's are.
+fn version_line() -> String {
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    match option_env!("EUREKA_BUILD_COMMIT").filter(|c| !c.is_empty()) {
+        Some(commit) => format!("eureka-daemon {} ({os} {arch}, {})", env!("CARGO_PKG_VERSION"), commit.get(..12).unwrap_or(commit)),
+        None => format!("eureka-daemon {} ({os} {arch})", env!("CARGO_PKG_VERSION")),
+    }
+}
 
 struct Arguments {
     port: u16,
@@ -132,7 +144,7 @@ fn normalise_origin(value: &str) -> Result<String, String> {
 
 /// The command line, as argparse reads server.py's: `--opt value`, `--opt=value`, unambiguous prefixes.
 fn parse_arguments() -> Arguments {
-    const OPTIONS: [(&str, bool); 7] = [
+    const OPTIONS: [(&str, bool); 8] = [
         ("--tls-port", true),
         ("--no-plain", false),
         ("--tls", false),
@@ -140,12 +152,17 @@ fn parse_arguments() -> Arguments {
         ("--host", true),
         ("--cors-origin", true),
         ("--help", false),
+        ("--version", false),
     ];
     let mut args = std::env::args().skip(1);
     let (mut port, mut host, mut origins, mut tls) = (None::<String>, DEFAULT_HOST.to_string(), Vec::new(), false);
     while let Some(arg) = args.next() {
         if arg == "-h" {
             println!("{USAGE}\n\n{HELP}");
+            std::process::exit(0);
+        }
+        if arg == "-V" {
+            println!("{}", version_line());
             std::process::exit(0);
         }
         if arg.starts_with("--") {
@@ -175,6 +192,10 @@ fn parse_arguments() -> Arguments {
             match option {
                 "--help" => {
                     println!("{USAGE}\n\n{HELP}");
+                    std::process::exit(0);
+                }
+                "--version" => {
+                    println!("{}", version_line());
                     std::process::exit(0);
                 }
                 "--host" => host = value.unwrap(),
@@ -265,6 +286,30 @@ fn trust_command(args: &[String]) -> ExitCode {
     }
 }
 
+/// Resolves when the operating system asks this process to stop.
+#[cfg(unix)]
+async fn shutdown_requested() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(windows)]
+async fn shutdown_requested() {
+    use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+    let mut stop = ctrl_break().expect("signal handler");
+    let mut close = ctrl_close().expect("signal handler");
+    let mut shutdown = ctrl_shutdown().expect("signal handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = stop.recv() => {}
+        _ = close.recv() => {}
+        _ = shutdown.recv() => {}
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -327,7 +372,8 @@ async fn main() -> ExitCode {
 
     let app = Arc::new(http::App { node: Mutex::new(node), registry, cors_origins: arguments.cors_origins });
 
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
+    let shutdown = shutdown_requested();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -338,8 +384,7 @@ async fn main() -> ExitCode {
                     let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
                 });
             }
-            _ = tokio::signal::ctrl_c() => break,
-            _ = terminate.recv() => break,
+            _ = &mut shutdown => break,
         }
     }
     println!("Shutting down");

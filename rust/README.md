@@ -25,6 +25,7 @@ use it unchanged. The Python daemon stays the reference implementation, and
 - **Command line.** `eureka-daemon [port] [--host H] [--cors-origin O ...]`.
   The port defaults to 8000 and `--host` to `127.0.0.1`. Options can be
   abbreviated as in argparse.
+  `eureka-daemon --version` is Rust only.
 - **HTTP.** The same routes, the same 64 KiB body cap (413 or 400), the same
   refusal bodies, 404/405/307, and CORS headers identical to Starlette's
   `CORSMiddleware`, preflights included.
@@ -65,6 +66,31 @@ self-contained as a Mac binary gets.
 `.cargo/config.toml` links with `rust-lld` and musl, both shipped with
 rustup, so no cross toolchain is needed. Swap in `aarch64-unknown-linux-musl`
 for ARM Linux.
+
+**Windows x64, native (on Windows, with Visual Studio's C++ build tools):**
+
+    cd rust
+    $env:RUSTFLAGS = "-C target-feature=+crt-static"
+    cargo build --release
+    # -> target\release\eureka-daemon.exe  (no Visual C++ runtime needed)
+
+On Windows:
+
+- **Files.** The key and trust file are in `%USERPROFILE%\.eureka`. They are
+  protected by a private access list instead of mode 0600: only your account
+  and SYSTEM. A key file that any account other than yours, SYSTEM or
+  Administrators can reach is refused at startup, with the command to fix it.
+  So is one on a drive without access lists, such as FAT or exFAT.
+- **Backends.** The `ollama` backend works natively. `openclaw` and `hermes`
+  stop at startup with a reason, and need the Linux build inside WSL. Room text
+  can reach 48,000 characters and OpenClaw takes it as an argument, past
+  Windows' 32,767-character command line. These tools also commonly install as
+  `.cmd` wrappers, where arguments pass through cmd.exe's parsing, and Windows
+  has no process groups to clean up after a turn.
+
+Every pull request that touches the daemon is built, tested and smoke-tested on
+macOS (arm64 and x64), Linux (x64 and arm64) and Windows x64 by
+`.github/workflows/rust-build.yml`. That workflow publishes nothing.
 
 ## Run
 
