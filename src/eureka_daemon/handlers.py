@@ -40,7 +40,7 @@ web-retrieval, and the SSRF problem
 pointed by somebody else, which is the classic server-side request forgery
 shape: the peer cannot reach the private network this daemon sits in, but the
 daemon can, so a granted peer that names `http://127.0.0.1:8443/` or
-`http://192.168.1.174:8000/` is asking this node to be its proxy into a network
+`http://192.168.0.12:8000/` is asking this node to be its proxy into a network
 it was never given.
 
 **The policy: only globally routable unicast addresses.** Loopback, private
@@ -48,7 +48,7 @@ ranges (10/8, 172.16/12, 192.168/16), link-local including 169.254.169.254,
 carrier-grade NAT space, multicast, reserved and unspecified addresses are all
 refused, in IPv4 and in IPv6, including IPv4-mapped IPv6 forms. `is_global` is
 the single predicate; the named ranges are what it excludes. The daemon's own
-API needs no special case: CT 101 answers on 192.168.1.180, which is private,
+API needs no special case: Host A answers on 192.168.0.11, which is private,
 and on loopback, which is refused for the same reason.
 
 **Enforced after resolution, not on the string.** `evil.example` resolving to
@@ -1008,8 +1008,8 @@ def default_registry(*, inference: Optional[bool] = None,
     is now enforced rather than merely intended: a daemon that advertises
     code-exec does not start.
 
-    **inference is per host, because Ollama is per host.** CT 101 has no
-    Ollama; WSL does. Registering it unconditionally would make CT 101
+    **inference is per host, because Ollama is per host.** Host A has no
+    Ollama; WSL does. Registering it unconditionally would make Host A
     advertise a capability it cannot serve, which is precisely the lie
     `validate_advertised` exists to prevent, only moved one level down where
     that check cannot see it -- the handler would exist, so the static check

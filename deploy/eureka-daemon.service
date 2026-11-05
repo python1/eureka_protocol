@@ -39,7 +39,7 @@ Environment=EUREKA_IDENTITY_PATH=/var/lib/eureka/identity.key
 Environment=EUREKA_TRUST_PATH=/var/lib/eureka/trust.json
 WorkingDirectory=/opt/eureka
 
-# TLS only. Plaintext on 8000 was dropped once wsl-hermes (node_ef0a1f59) was
+# TLS only. Plaintext on 8000 was dropped once wsl-peer (node_cccccccc) was
 # verified handshaking over 8443 in both directions -- in that order, because
 # doing it the other way round strands the peer: an HTTPS socket answers a
 # plain request with a handshake failure, not a manifest.

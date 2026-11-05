@@ -72,11 +72,11 @@ def reply(text, status="ok", aborted=False):
                                           "systemPromptReport": {"systemPrompt": {"chars": 40980}, "tools": {"entries": ["x"] * 50}}}}}, indent=2))
 
 
-text = f"Antiochus here (session {session}). You said: {last}"
+text = f"Agent here (session {session}). You said: {last}"
 if mode == "ok":
     reply(text)
 elif mode == "ansi":
-    reply(f"\x1b[1;32mAntiochus here (session {session}).\x1b[0m You said: {last}")
+    reply(f"\x1b[1;32mAgent here (session {session}).\x1b[0m You said: {last}")
 elif mode == "banner":
     sys.stdout.write(BANNER)
     reply(text)

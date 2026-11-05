@@ -65,7 +65,7 @@ def test_a_turn_runs_openclaw_agent_with_the_room_session_and_returns_stdout(cla
     output = answer["result"]["output"]
     assert answer["result"]["status"] == "completed"
     # Only the reply: none of the run metadata OpenClaw prints around it.
-    assert output == {"model": "openclaw", "text": "Antiochus here (session knights-circle). You said: And the path; rm -rf / $(whoami) `id`",
+    assert output == {"model": "openclaw", "text": "Agent here (session knights-circle). You said: And the path; rm -rf / $(whoami) `id`",
                       "chars": len(output["text"]), "truncated": False, "done_reason": "stop", "eval_count": 8}
     (call,) = calls(log)
     argv = call["argv"]
@@ -189,7 +189,7 @@ def test_the_session_id_is_configurable(claw):
 def test_a_banner_printed_before_the_result_is_not_part_of_the_reply(claw):
     node, daemon, _ = claw("banner")
     text = run_assign(node, daemon)[1]["result"]["output"]["text"]
-    assert text.startswith("Antiochus here") and "OpenClaw 2026.6.5" not in text and "shellfish" not in text and "\u2502" not in text
+    assert text.startswith("Agent here") and "OpenClaw 2026.6.5" not in text and "shellfish" not in text and "\u2502" not in text
 
 
 def test_colour_codes_are_removed(claw):

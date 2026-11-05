@@ -480,8 +480,8 @@ def test_wsl_hermes_flow_is_untouched(daemon):
 #
 # Everything above this line is about who may ask. These are about what
 # happens when the answer is yes -- a real fetch over a real socket, through
-# the whole gate, from a peer holding exactly the grant CT 101's trust file
-# gives wsl-hermes.
+# the whole gate, from a peer holding exactly the grant Host A's trust file
+# gives wsl-peer.
 # ---------------------------------------------------------------------------
 
 def web_daemon():
@@ -490,7 +490,7 @@ def web_daemon():
 
     The policy is the one difference from the deployed node: `allow_loopback`
     so the test's own origin server is reachable. Everything else -- the gate,
-    the registry, the handler, the signature -- is what runs on CT 101.
+    the registry, the handler, the signature -- is what runs on Host A.
     """
     registry = HandlerRegistry().register(
         "web-retrieval",
@@ -643,7 +643,7 @@ def test_the_daemons_own_api_cannot_be_fetched_through_a_grant():
                       grants=["web-retrieval"])
 
     for url in ("http://127.0.0.1:8443/v1/peers",
-                "http://192.168.1.180:8443/v1/manifest",
+                "http://192.168.0.11:8443/v1/manifest",
                 "http://localhost:8000/v1/logs"):
         answer = fetch_answer(daemon, peer, url)
         assert answer["result"]["reason"] == REASON_ADDRESS_NOT_ALLOWED
@@ -866,10 +866,10 @@ def test_a_peer_without_the_inference_grant_is_refused(ollama):
 
 def test_a_peer_with_no_grants_at_all_is_refused(ollama):
     """
-    Where CT 101 stands in WSL's trust file today: present, authenticating,
+    Where Host A stands in WSL's trust file today: present, authenticating,
     granted nothing.
 
-    It stood for ct102-openclaw too until 2026-09-03, when that peer was
+    It stood for agent-peer too until 2026-09-03, when that peer was
     granted `inference` -- so this is no longer "both responders", and the
     entry it now describes is the one that was deliberately left alone by that
     edit. The peer built here is synthetic either way; what the deployment
@@ -1003,7 +1003,7 @@ def test_a_timeout_comes_back_through_the_gate_as_a_timeout(ollama):
 def test_web_retrieval_is_unchanged_on_a_node_that_also_serves_inference(origin,
                                                                         ollama):
     """
-    WSL will advertise two capabilities and CT 101 one. The second must not
+    WSL will advertise two capabilities and Host A one. The second must not
     disturb the first: same grant, same result, same separation between them.
     """
     endpoint, _spy = ollama

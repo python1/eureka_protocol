@@ -1439,7 +1439,7 @@ mod tests {
         assert!(loopback_endpoint("http://127.0.0.1:11434/api/chat").is_ok());
         assert!(loopback_endpoint("http://[::1]:11434/api/chat").is_ok());
         assert!(loopback_endpoint("http://localhost:11434/api/chat").is_err());
-        assert!(loopback_endpoint("http://192.168.1.5:11434/api/chat").is_err());
+        assert!(loopback_endpoint("http://192.168.0.5:11434/api/chat").is_err());
         assert!(loopback_endpoint("https://127.0.0.1:11434/api/chat").is_err());
     }
 

@@ -17,6 +17,9 @@ not frozen, there is no specification apart from the code, and every exchange
 so far has had this implementation on both ends. Read
 [What this is not](#what-this-is-not) before you plan anything around it.
 
+**To seat your own agent in a Knights Circle room, see the
+[quickstart](docs/seat/quickstart.md).**
+
 ---
 
 ## The problem
@@ -301,7 +304,7 @@ Run this before you believe anything else on this page.
 
 ### 7. Ask the peer to do something
 
-`integrations/antiochus_client.py` issues a signed `/v1/assign` and verifies
+`integrations/assign_client.py` issues a signed `/v1/assign` and verifies
 the answer — that the gate accepted it, that the result carries a signature in
 the assign-result domain, and that the nonce inside the signed result is the
 nonce that was sent. A valid signature over somebody else's result is still
@@ -312,7 +315,7 @@ Run it with the venv interpreter, in the same shell as step 5 — it reads
 path is missing rather than minting a fresh identity that no peer trusts:
 
 ```bash
-./venv/bin/python eureka_protocol/integrations/antiochus_client.py \
+./venv/bin/python eureka_protocol/integrations/assign_client.py \
     --peer https://<A_ADDRESS>:8443 https://example.com
 ```
 
@@ -625,8 +628,8 @@ arguing carefully is not the same as being right.
 ## Operating it
 
 [DEPLOYMENT.md](DEPLOYMENT.md) is the operator runbook for the deployment this
-was built on — three nodes across a Proxmox container, a WSL host, and a
-client. It is written as a working log rather than a tutorial, and it records
+was built on — three nodes across a container, a WSL host, and a client,
+with its names and addresses replaced by placeholders. It is written as a working log rather than a tutorial, and it records
 what was actually run, what it produced, and what broke:
 
 * systemd units, hardening, service accounts, crash-loop guards
@@ -665,7 +668,7 @@ src/eureka_daemon/
   address_book.py   bounded address table with expiry
 integrations/
   eureka_mcp_server.py   the MCP seam: eureka_fetch, eureka_inference, eureka_peer_status
-  antiochus_client.py    the same protocol path as a CLI, with no agent in the way
+  assign_client.py    the same protocol path as a CLI, with no agent in the way
 deploy/             systemd units and the WSL preflight
 vectors/            shared signature vectors, and the script that makes them
 tests/              683 tests

@@ -12,19 +12,18 @@
 # anything was checked; it is only meaningful next to an identical exchange
 # that gets refused for the one reason that should refuse it.
 #
-# Defaults to CT 101's TLS listener -- the responder moved there from CT 102
-# (192.168.1.174) on 2026-08-28 keeping the same identity. Over https the
+# Defaults to a TLS listener on this machine. Over https the
 # peer's certificate is pinned against the trust file -- there is no
 # certificate authority anywhere in this protocol, so there is nothing to
 # chain to and nothing to install.
 #
-#   ./demo.sh                                 # TLS to CT 101
-#   ./demo.sh https://192.168.1.180:8443      # explicit peer
+#   ./demo.sh                                 # TLS to this machine
+#   ./demo.sh https://192.168.0.11:8443      # explicit peer
 #
 # Exits non-zero unless BOTH scenarios came out as expected.
 set -euo pipefail
 
-PEER="${1:-https://192.168.1.180:8443}"
+PEER="${1:-https://127.0.0.1:8443}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARENT="$(cd "$HERE/.." && pwd)"
 
@@ -63,7 +62,7 @@ from eureka_protocol.src.eureka_daemon.handlers import default_registry
 # This was hardcoded ["fast-inference"], a capability that has never existed
 # anywhere in this protocol, and it made the trusted scenario UNRUNNABLE on any
 # host whose trust file grants anything: a grant is validated against the
-# advertised list at load, so CT 101 -- which has granted web-retrieval since
+# advertised list at load, so Host A -- which has granted web-retrieval since
 # 2026-08-28 -- could not construct the node at all. It died with TrustError
 # ("granted capability 'web-retrieval' that this node does not advertise")
 # before reaching the peer, on every run, against every peer.
@@ -79,7 +78,7 @@ from eureka_protocol.src.eureka_daemon.handlers import default_registry
 # EUREKA_INFERENCE=1 in the environment or this node will advertise less than
 # the trust file grants and die with the same TrustError described above. It is
 # left inherited rather than forced on, because forcing it would have demo.sh
-# claim inference on CT 101, which has no Ollama.
+# claim inference on Host A, which has no Ollama.
 ADVERTISED = sorted(default_registry().names())
 
 # https gets require_tls: this node will not fall back to speaking in the clear

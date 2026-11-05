@@ -326,7 +326,7 @@ def create_app(node_engine: EurekaNode) -> FastAPI:
 # telling a granted peer yes and handing it nothing.
 #
 # default_registry() reads the environment for the one capability that depends
-# on the host rather than on the code: inference needs an Ollama, CT 101 has
+# on the host rather than on the code: inference needs an Ollama, Host A has
 # none, and WSL does. That read happens here, at import, which is early enough
 # that an unrecognised EUREKA_INFERENCE stops the daemon before it binds.
 node_engine = EurekaNode.with_persistent_identity(handlers=default_registry())

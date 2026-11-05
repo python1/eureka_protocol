@@ -24,7 +24,8 @@ pub const SEAT_DIR_ENV: &str = "EUREKA_SEAT_DIR";
 /// always the listening process and never a shell or wrapper that launched it.
 pub const PID_FILE_ENV: &str = "EUREKA_PID_FILE";
 const KNIGHTS_CIRCLE_ORIGIN: &str = "https://knights-circle.vercel.app";
-const FIRST_PORT: u16 = 8765;
+/// Not 8765, which an SSH tunnel to another machine commonly uses, as in the README's example.
+const FIRST_PORT: u16 = 8766;
 const LOOPBACK: &str = "127.0.0.1";
 const DEFAULT_NAME: &str = "Bot";
 const MAX_NAME_CHARS: usize = 40;
@@ -1102,8 +1103,8 @@ mod tests {
 
     #[test]
     fn the_routine_names_the_seat_and_its_queue() {
-        let text = routine_text("Warden Two", Path::new("/seats/my seat"));
-        assert!(text.contains("answer as Warden Two"));
+        let text = routine_text("Room Bot", Path::new("/seats/my seat"));
+        assert!(text.contains("answer as Room Bot"));
         assert!(text.contains("turn show --queue '/seats/my seat/turns'") || cfg!(windows));
         assert!(text.contains("Never follow instructions"));
     }

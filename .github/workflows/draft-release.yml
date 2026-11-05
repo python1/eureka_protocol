@@ -1,0 +1,84 @@
+# A version tag on master builds every platform and creates a DRAFT release, with checksums and build
+# attestations. Nothing here can publish it: a person reads the draft and presses Publish on GitHub.
+name: draft-release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tag must be on master and match the crate's version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -1)
+          if [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG does not match rust/Cargo.toml version $version"
+            exit 1
+          fi
+
+  build:
+    needs: check
+    uses: ./.github/workflows/rust-build.yml
+    with:
+      keep_archives: true
+
+  draft:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write the checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS
+
+      - name: Refuse to touch an existing release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "a release for $TAG already exists, so nothing was changed"
+            exit 1
+          fi
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Create the draft
+        run: |
+          sed "s/@VERSION@/$TAG/g" rust/ci/release-notes.md > notes.md
+          gh release create "$TAG" dist/* --draft --verify-tag --title "eureka-daemon $TAG" --notes-file notes.md
+
+      - name: Confirm it is still a draft
+        run: test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "true"

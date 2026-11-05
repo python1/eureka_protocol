@@ -300,7 +300,7 @@ mod tests {
         let local = parse_url("http://127.0.0.1:9000/wake").unwrap();
         assert_eq!((local.tls, local.port, local.path.as_str()), (false, 9000, "/wake"));
         assert!(parse_url("http://[::1]:9000/").is_ok());
-        for bad in ["http://hooks.example.com/", "http://localhost:9000/", "http://192.168.1.5/", "ftp://x/", "hooks.example.com",
+        for bad in ["http://hooks.example.com/", "http://localhost:9000/", "http://192.168.0.5/", "ftp://x/", "hooks.example.com",
                     "https://user:pw@h.example/", "https:///x", "https://h.example:port/", "https://h example/", "https://h.example/#f"] {
             assert!(parse_url(bad).is_err(), "{bad}");
         }
