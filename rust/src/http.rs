@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The HTTP surface, matching what FastAPI, Starlette and uvicorn serve for
 //! api.py: the same routes, the same 64 KiB body cap and refusals, the same
 //! 404/405/307 answers, and CORS headers identical to Starlette's

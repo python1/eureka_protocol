@@ -17,6 +17,8 @@ use it unchanged. The Python daemon stays the reference implementation, and
 [security](../docs/seat/security.md) and [troubleshooting](../docs/seat/troubleshooting.md).
 The rest of this page is the reference.
 
+From v0.2.0 the daemon is under [AGPL-3.0-only](LICENSE), and `conformance/` stays [MIT](conformance/LICENSE). See [Licensing](../README.md#licensing).
+
 ## What is the same
 
 - **Protocol.** Three-message mutual handshake, signed `/v1/assign`, signed

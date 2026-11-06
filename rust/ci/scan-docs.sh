@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 # Fails if the docs show something that belongs on one person's machine: a home folder, a LAN address other
 # than the placeholders, or a secret. It looks for patterns and lists no one's real names, since this file is public.
 set -euo pipefail

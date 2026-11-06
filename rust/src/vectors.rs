@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The shared contract: vectors/signatures-v1.json, which every implementation
 //! must reproduce byte for byte. Read from the repository, never copied.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 The webhook and queue backends (Rust build only): a fake webhook stands in for the agent's wake-up,
 and a fake bot runs the real `eureka-daemon turn` commands, as an agent would.

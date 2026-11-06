@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Timestamps as the Python daemon writes and reads them.
 //!
 //! Writing is `datetime.now(timezone.utc).isoformat()`. Reading is

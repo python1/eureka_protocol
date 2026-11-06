@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The turn queue: how a room turn reaches an agent that can run a local command, and how its
 //! reply comes back. The daemon writes one turn into a private directory and waits; the agent runs
 //! `eureka-daemon turn show` and `eureka-daemon turn answer`, and needs no other access.

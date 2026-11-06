@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 # Puts a built binary, its licence and third-party notices in one archive, then proves the archive holds a binary that runs.
 # usage: package.sh TARGET OUT_DIR
 set -euo pipefail
@@ -15,7 +16,7 @@ staging=$(mktemp -d)
 check=$(mktemp -d)
 trap 'rm -rf "$staging" "$check"' EXIT
 
-cp "$root/rust/target/$target/release/$binary" "$root/LICENSE" "$root/rust/THIRD_PARTY_LICENSES.txt" "$staging/"
+cp "$root/rust/target/$target/release/$binary" "$root/rust/LICENSE" "$root/rust/THIRD_PARTY_LICENSES.txt" "$staging/"
 case "$target" in
   *windows*)
     archive="$out/eureka-daemon-$target.zip"
@@ -29,7 +30,7 @@ case "$target" in
     ;;
 esac
 
-test -s "$check/LICENSE"
+grep -q "AGPL-3.0-only" "$check/LICENSE"
 test -s "$check/THIRD_PARTY_LICENSES.txt"
 "$check/$binary" --version
 echo "packaged $archive"

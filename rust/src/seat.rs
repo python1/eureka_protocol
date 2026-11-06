@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! A seat: one agent's own folder, and the four commands that look after it. `setup` asks a few
 //! questions and writes the folder, `start` and `stop` run the daemon from it in the background,
 //! and `doctor` says what is wrong and how to fix it.

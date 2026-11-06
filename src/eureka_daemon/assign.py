@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """
 The assign endpoint's gate: who may ask this node to run something.
 

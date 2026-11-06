@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 The Hermes Agent room-turn backend (Rust build only), with fake_hermes.py standing in for `hermes`.
 """

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Identity, signing domains and Ed25519, matching src/eureka_daemon/crypto.py.
 //!
 //! The identity file is the Python daemon's: same JSON document, same 0600

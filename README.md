@@ -683,6 +683,17 @@ suite, and `mcp` — commented out — for `integrations/eureka_mcp_server.py`
 alone, which the daemon never imports. Run the suite with `python -m pytest`
 from the repository root.
 
-## License
+## Licensing
 
-MIT — see [LICENSE](LICENSE).
+From v0.2.0, this repository has two licences:
+
+| Part | Licence |
+|---|---|
+| The daemon implementations: `rust/` except `rust/conformance/`, and the Python daemon in `src/` | [AGPL-3.0-only](rust/LICENSE), copyright Paul Charydczak |
+| Everything else: the protocol as this README and `docs/` describe it, the test vectors in `vectors/`, the conformance tests in `rust/conformance/` and `tests/`, and the client examples in `integrations/`, `demo.sh` and `simulate_mesh.py` | [MIT](LICENSE) |
+
+**v0.1.0 and everything published before this change remain MIT.**
+
+- **Why the split:** anyone can build their own implementation of the protocol, under any licence. If you change the daemon and let others use it over a network, you must offer them its source, as the AGPL requires.
+- **Client examples and the AGPL:** the examples, `tests/` and `demo.sh` import the Python daemon's modules from `src/`. They stay MIT, but running them also runs that AGPL code.
+- **Third-party code:** it keeps its own licences. For the Rust build, see [`rust/THIRD_PARTY_LICENSES.txt`](rust/THIRD_PARTY_LICENSES.txt).

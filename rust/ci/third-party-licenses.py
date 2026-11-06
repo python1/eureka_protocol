@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """
 Writes rust/THIRD_PARTY_LICENSES.txt: the licence and notice files of every crate that can be
 linked into eureka-daemon, on any target, taken from the crates' own sources. Licence texts that

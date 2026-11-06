@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The trust file, read exactly as src/eureka_daemon/trust.py reads it.
 //!
 //! Versions 1-3, the same entry shapes per version, revocations applied

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """
 Browser access: which web pages may read this daemon's answers.
 

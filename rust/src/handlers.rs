@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! What this node can be asked to do, and the code that does it.
 //!
 //! `room-turn` answers one turn of a Knights Circle room, through the local

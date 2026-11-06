@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 The OpenClaw room-turn backend (Rust build only), with fake_openclaw.py standing in for `openclaw`.
 """

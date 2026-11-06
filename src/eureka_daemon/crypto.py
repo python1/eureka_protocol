@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 import os
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ed25519

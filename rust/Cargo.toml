@@ -1,10 +1,10 @@
 [package]
 name = "eureka-daemon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 description = "A drop-in Rust build of the Eureka Protocol daemon: one binary, no Python."
-license = "MIT"
+license = "AGPL-3.0-only"
 publish = false
 
 [[bin]]

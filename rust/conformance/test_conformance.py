@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 The protocol tests, black-box, against both daemons (see conftest.py).
 

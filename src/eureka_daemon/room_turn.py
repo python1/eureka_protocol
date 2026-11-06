@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """
 room-turn: take one turn in a Knights Circle room, answered by the local Ollama.
 
