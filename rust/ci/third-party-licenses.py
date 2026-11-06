@@ -28,7 +28,12 @@ eureka-daemon also contains:
   Its full notices, including those for code it includes from others, are at
   https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
   The MIT licence text appears below.
+- Code modified from CPython 3.13, in rust/src/isotime.rs: its ISO 8601 parser. PSF-2.0,
+  Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved.
+  The PSF licence text is at the end of this file.
 """
+# Not a crate, so its licence can't be collected from a crate's sources.
+PSF = RUST / "ci" / "notices" / "PSF-2.0.txt"
 
 
 def cargo(*args):
@@ -67,6 +72,7 @@ def render():
     parts = ["Third-party software in eureka-daemon\n", LINKED, RULE, "Crates and their licences\n", RULE, "\n".join(summary), ""]
     for entry in sorted(texts.values(), key=lambda e: e["users"][0]):
         parts += [RULE, "Used by:", *[f"  {user}" for user in entry["users"]], RULE, entry["text"]]
+    parts += [RULE, "Used by:", "  rust/src/isotime.rs (modified from CPython 3.13)", RULE, PSF.read_text(encoding="utf-8")]
     return "\n".join(parts).rstrip() + "\n"
 
 
