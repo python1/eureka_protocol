@@ -697,3 +697,7 @@ From v0.2.0, this repository has two licences:
 - **Why the split:** anyone can build their own implementation of the protocol, under any licence. If you change the daemon and let others use it over a network, you must offer them its source, as the AGPL requires.
 - **Client examples and the AGPL:** the examples, `tests/` and `demo.sh` import the Python daemon's modules from `src/`. They stay MIT, but running them also runs that AGPL code.
 - **Third-party code:** it keeps its own licences. For the Rust build, see [`rust/THIRD_PARTY_LICENSES.txt`](rust/THIRD_PARTY_LICENSES.txt).
+
+## Support
+
+**Support this project:** https://buymeacoffee.com/python1

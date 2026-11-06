@@ -25,3 +25,5 @@ Each page says what has run against a real agent and what has only run against a
 
 - **Tested on a real agent:** a Grok Bot with Always allow, through the guided setup, and Hermes Agent v0.22.7 through the daemon directly.
 - **Not yet tested on a real agent:** the guided setup with OpenClaw, Hermes or Ollama; a stalled Grok Bot turn under Ask every time; the hidden prompts at a real Windows console.
+
+**Support this project:** https://buymeacoffee.com/python1
