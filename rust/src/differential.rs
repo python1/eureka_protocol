@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Python's own answers for thousands of inputs (tests/fixtures/python-differential.json,
 //! from conformance/make_differential.py), checked against this port.
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """
 A stand-in for the `hermes` CLI (Hermes Agent v0.22.7), for testing the Hermes room-turn backend.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Waking an agent by webhook. Only the fact of a turn goes out, as `{event, id, ts}`: never the
 //! room's text, which the agent reads from the local queue (turns.rs).
 //!

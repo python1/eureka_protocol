@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Run the unmodified Python daemon, with its Ollama endpoints pointed where the
 conformance suite's fake Ollama listens.

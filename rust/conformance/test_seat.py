@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 A seat: `setup`, `start`, `stop` and `doctor` (Rust build only), run as a stranger would, against a
 fake webhook, a fake bot and fake agents. A home folder of its own keeps every test off this computer's real files.

@@ -1,3 +1,14 @@
+// SPDX-License-Identifier: AGPL-3.0-only AND PSF-2.0
+//
+// The ISO 8601 parser below is modified from CPython 3.13 (Modules/_datetimemodule.c):
+// Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved.
+// Used under the PSF License Agreement, version 2, whose text is in
+// rust/THIRD_PARTY_LICENSES.txt.
+//
+// Changes from CPython: translated from C to Rust; reads the bytes of a &str instead of a
+// Python string; returns an instant in microseconds since the Unix epoch, or None where
+// Python raises, instead of building a datetime; treats a timestamp with no offset as UTC;
+// and keeps only the functions that parsing needs.
 //! Timestamps as the Python daemon writes and reads them.
 //!
 //! Writing is `datetime.now(timezone.utc).isoformat()`. Reading is

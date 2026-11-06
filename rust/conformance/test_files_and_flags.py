@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Files and command line: existing identity keys and trust files keep working in
 both directions, and the flags behave as server.py's do.

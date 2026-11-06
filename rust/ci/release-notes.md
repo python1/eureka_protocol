@@ -18,7 +18,7 @@ Follow the [quickstart](https://github.com/python1/eureka_protocol/blob/@VERSION
 | Linux arm64 (static) | `eureka-daemon-aarch64-unknown-linux-musl.tar.gz` |
 | Windows x64 | `eureka-daemon-x86_64-pc-windows-msvc.zip` |
 
-Each archive holds the program, its `LICENSE`, and `THIRD_PARTY_LICENSES.txt` with the notices of the software built into it. `SHA256SUMS` lists every archive. On native Windows, a seat can use a webhook agent or Ollama. OpenClaw and Hermes need the Linux build inside WSL.
+Each archive holds the program, its `LICENSE` (AGPL-3.0-only from v0.2.0; v0.1.0 was MIT), and `THIRD_PARTY_LICENSES.txt` with the notices of the software built into it. `SHA256SUMS` lists every archive. On native Windows, a seat can use a webhook agent or Ollama. OpenClaw and Hermes need the Linux build inside WSL.
 
 ## What has been tested
 Each page says what has run against a real agent and what has only run against a stand-in. In short:

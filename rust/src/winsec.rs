@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! Windows' equivalent of the 0600 and 0700 modes used for secrets on Unix: access lists.
 //!
 //! A new secret gets a private list (this user and SYSTEM, nothing inherited), set before any

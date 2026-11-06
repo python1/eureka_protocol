@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! JSON exactly as the Python daemon reads and writes it.
 //!
 //! Signatures are computed over `json.dumps(payload, sort_keys=True,

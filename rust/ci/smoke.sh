@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
 # Runs a built eureka-daemon the way a stranger would, on the machine that built it:
 #   rust/ci/smoke.sh path/to/eureka-daemon
 # Everything lives in a temporary home and on a port the system picks.

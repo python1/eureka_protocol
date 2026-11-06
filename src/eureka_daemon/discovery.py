@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """
 Peer discovery over a private mesh: learning *where* peers are, never *who*.
 

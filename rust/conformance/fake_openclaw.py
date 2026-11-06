@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """
 A stand-in for the `openclaw` CLI, for testing the OpenClaw room-turn backend.
 

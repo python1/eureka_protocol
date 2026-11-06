@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Regenerate rust/tests/fixtures/python-differential.json: what Python itself
 makes of thousands of inputs the Rust port has to agree with.

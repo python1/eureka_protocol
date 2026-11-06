@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Black-box conformance: the same tests, over real sockets, against both daemons.
 

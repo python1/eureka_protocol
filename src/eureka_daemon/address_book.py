@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """
 The address table: where peers might be, held under a hard bound.
 

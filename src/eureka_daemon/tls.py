@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """
 TLS that carries the node's existing identity instead of inventing a second one.
 

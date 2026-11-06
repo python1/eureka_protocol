@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """
 One gate for every request that must come from a peer we have authenticated.
 

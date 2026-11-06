@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 //! The protocol: the three-message handshake, the signed-request gate, assign,
 //! the authenticated reads and the audit log.
 //!
