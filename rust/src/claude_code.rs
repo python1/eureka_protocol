@@ -659,7 +659,8 @@ mod tests {
         .collect();
         let env = env(Path::new("/seat/claude-code"), &inherited);
         let get = |key: &str| env.iter().filter(|(k, _)| k == key).map(|(_, v)| v.as_str()).collect::<Vec<_>>();
-        assert_eq!(get("CLAUDE_CONFIG_DIR"), ["/seat/claude-code/config"]);
+        let config = config_dir(Path::new("/seat/claude-code")).display().to_string();
+        assert_eq!(get("CLAUDE_CONFIG_DIR"), [config.as_str()]);
         assert_eq!(get("PATH"), ["/usr/bin"]);
         assert_eq!(get("LC_ALL"), ["en_US.UTF-8"]);
         assert_eq!(get("HTTPS_PROXY"), ["http://proxy:3128"]);
