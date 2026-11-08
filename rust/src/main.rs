@@ -5,6 +5,7 @@
 //! command line, environment, identity and trust files, wire protocol and
 //! answers. See rust/README.md for what is and is not in this build.
 
+mod claude_code;
 mod crypto;
 mod handlers;
 mod http;

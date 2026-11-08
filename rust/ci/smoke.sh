@@ -20,7 +20,7 @@ fail() { echo "smoke: $*" >&2; [ -f "$log" ] && cat "$log" >&2; exit 1; }
 windows=
 case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) windows=1 ;; esac
 if [ -n "$windows" ]; then export USERPROFILE="$(cygpath -w "$home")"; else export HOME="$home"; fi
-unset EUREKA_IDENTITY_PATH EUREKA_TRUST_PATH EUREKA_ROOM_TURN EUREKA_ROOM_TURN_BACKEND
+unset EUREKA_IDENTITY_PATH EUREKA_TRUST_PATH EUREKA_ROOM_TURN EUREKA_ROOM_TURN_BACKEND EUREKA_CLAUDE_BIN EUREKA_CLAUDE_HOME
 
 echo "== version"
 version=$("$binary" --version | tr -d '\r')
@@ -78,7 +78,7 @@ stop
 
 if [ -n "$windows" ]; then
   echo "== native Windows refuses the agent CLI backends"
-  for backend in openclaw hermes; do
+  for backend in openclaw hermes claude-code; do
     if out=$(EUREKA_ROOM_TURN=1 EUREKA_ROOM_TURN_BACKEND=$backend "$binary" 0 2>&1); then fail "$backend started"; fi
     case "$out" in *WSL*) ;; *) fail "$backend refusal does not mention WSL: $out" ;; esac
   done
@@ -102,5 +102,32 @@ tr -d '\r' <"$log" | grep -q 'ok    daemon: running' || fail "doctor did not see
 if curl --silent --max-time 5 "$seat_url/v1/manifest" >/dev/null; then fail "the seat still answers after stop"; fi
 "$binary" start --dir "$seat" >"$log" 2>&1 || fail "restart failed"
 "$binary" stop --dir "$seat" >"$log" 2>&1 || fail "second stop failed"
+
+if [ -z "$windows" ]; then
+  echo "== a Claude Code seat, with a stand-in for claude"
+  # It answers the two questions the seat asks before it starts: the version, and the login.
+  fake="$home/bin/claude"
+  mkdir -p "$home/bin"
+  cat >"$fake" <<'FAKE'
+#!/bin/sh
+case "$1" in
+  --version) echo '2.1.319 (Claude Code)' ;;
+  auth) printf '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"pro","configDirectory":"%s"}\n' "$CLAUDE_CONFIG_DIR" ;;
+  *) exit 2 ;;
+esac
+FAKE
+  chmod +x "$fake"
+  claude_seat="$home/claude seat"
+  printf '5\n\n\n%s\n' "$room_key" | EUREKA_CLAUDE_BIN="$fake" "$binary" setup --dir "$claude_seat" >"$log" 2>&1 || fail "Claude Code setup failed"
+  tr -d '\r' <"$log" | grep -q 'Name: *Claude$' || fail "the Claude Code seat is not named Claude by default"
+  [ -d "$claude_seat/claude-code/config" ] && [ -d "$claude_seat/claude-code/room" ] || fail "setup did not make the seat's Claude Code folders"
+  [ ! -e "$home/.claude" ] || fail "setup touched ~/.claude"
+  "$binary" start --dir "$claude_seat" >"$log" 2>&1 || fail "the Claude Code seat did not start"
+  tr -d '\r' <"$log" | grep -q 'logged in with a Claude pro plan' || fail "start did not check the login"
+  ANTHROPIC_API_KEY=not-a-key "$binary" doctor --dir "$claude_seat" >"$log" 2>&1 || fail "doctor found a problem with the Claude Code seat"
+  tr -d '\r' <"$log" | grep -q 'ok    Claude Code: Claude Code 2.1.319, logged in with a Claude pro plan' || fail "doctor did not pass Claude Code"
+  tr -d '\r' <"$log" | grep -q 'ANTHROPIC_API_KEY is set here; room turns never pass it on' || fail "doctor did not name the dropped API key"
+  "$binary" stop --dir "$claude_seat" >"$log" 2>&1 || fail "the Claude Code seat did not stop"
+fi
 
 echo "smoke: ok"
