@@ -28,6 +28,8 @@ http-body-util = "0.1"
 bytes = "1"
 ed25519-dalek = "2"
 sha2 = "0.10"
+# Passkey (WebAuthn ES256) approvals of a plan: P-256 ECDSA, pure Rust.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 getrandom = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 indexmap = "2"
