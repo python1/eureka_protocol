@@ -112,11 +112,25 @@ and shows that the turn started chat only and answered.
 
 ## What has been tested
 
+- **Real Claude Code v2.1.319 on a Mac, logged in with a Claude Pro subscription, through the
+  guided setup:**
+  - `setup` option 5 made the seat `Claude`. Its own `claude auth login` showed a `claude.ai`
+    login with the configuration folder inside the seat's folder.
+  - `doctor --wake` found no problems: the test turn started chat only and answered in 2 seconds.
+    `start` reported the Pro plan login.
+  - Knights Circle's *Check* proved the pinned key.
+  - A full 12-turn room, with Claude Code as Lead and a local Ollama model as Critic, finished
+    12 of 12 turns, with every reply signed and the right grant lines.
+  - Asked in the room to run `ls ~`, it answered in words only, saying it had no tool or file
+    access, and listed no files.
+  - The daemon logged no errors and no `not_chat_only`. Your own `~/.claude` history and project
+    list were unchanged. The seat's turn folder stayed empty, and no transcripts were saved.
 - **Real Claude Code v2.1.319 on macOS, not logged in:** the exact command line, settings and
   environment a turn uses. Claude Code reported no tools, MCP servers, skills or commands, with
   only its built-in telemetry and privacy plugins. It printed that report before asking the model
   anything. The not-logged-in result is the recorded fixture the tests use.
-- **A stand-in for `claude` only:** a real logged-in turn's reply, timeouts, the process group
-  being killed, the output cap, the per-turn check stopping a session with a tool, a failing exit,
-  the room's reasons, and the guided setup, start, doctor and stop.
-- **Not yet tried:** a logged-in turn on a real subscription, in a real room.
+- **A stand-in for `claude` only:** timeouts and the process group being killed, the output cap,
+  the per-turn check stopping a session with a tool, a failing exit, and the room's reasons other
+  than a normal reply.
+- **Not yet tried on real Claude Code:** a turn passing `EUREKA_CLAUDE_TIMEOUT`, a usage limit, an
+  expired login, Linux, and WSL.

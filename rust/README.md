@@ -140,12 +140,15 @@ routine and Execution on this computer set to Always allow, on a Mac, at commit 
   objective-only grant, at a cost of $0.
 - `stop`, `start` and `stop` again ran cleanly, with no "address already in use".
 
+Claude Code v2.1.319 with a Claude Pro subscription, on a Mac, also went through the guided
+`setup`, `doctor --wake`, `start` and a full 12-turn room. See *The Claude Code backend* below.
+
 **Not yet tested on a real agent:**
 
 - A stalled turn under Ask every time, and `doctor`'s message for a paused routine. These
   have run only against a fake webhook and bot.
-- These four commands with a real OpenClaw, Hermes, Ollama or logged-in Claude Code. They
-  have run against fake agents on macOS. On the other platforms, CI runs them with Ollama absent.
+- These four commands with a real OpenClaw, Hermes or Ollama. They have run against fake
+  agents on macOS. On the other platforms, CI runs them with Ollama absent.
 - Native Windows at a real console, where the hidden prompts use a different mechanism.
 
 **`setup`** asks which agent sits here (Grok Bot, OpenClaw, Hermes, Ollama or Claude Code),
@@ -584,11 +587,22 @@ passed, when the gate refuses, or when the turn is abandoned. The reply is cappe
 room reply. A failed run's error category gives the room `not_logged_in`, `usage_limit` or
 `claude_unavailable`.
 
-**What has been tested.** Claude Code v2.1.319 on macOS, not logged in: the exact command
-line, settings and environment give a `system/init` with no tools, MCP servers, skills or
+**What has been tested on real Claude Code.** v2.1.319 on a Mac with a Claude Pro
+subscription, through the guided seat:
+
+- The seat's own `claude auth login` was a `claude.ai` login in the seat's folder.
+- `doctor --wake` started chat only and answered in 2 seconds.
+- *Check* proved the pinned key.
+- A 12-turn room, with an Ollama model as the other member, finished 12 of 12 with every reply signed.
+- Asked to run `ls ~`, it answered in words and listed nothing.
+- The log had no errors or `not_chat_only`. The user's `~/.claude` history and projects were
+  unchanged, the turn folder stayed empty, and no transcripts were saved.
+
+Logged out, the same command line gives a `system/init` with no tools, MCP servers, skills or
 commands, before any model request. That run's output is `tests/fixtures/claude-not-logged-in.jsonl`.
-Everything else has run only against a stand-in `claude` in the unit tests and `ci/smoke.sh`.
-A logged-in turn on a real subscription hasn't been tried yet.
+
+A turn passing `EUREKA_CLAUDE_TIMEOUT`, the output cap and a session with a tool have run only
+against a stand-in `claude`, in the unit tests and `ci/smoke.sh`. Linux and WSL haven't been tried.
 
 ### The webhook and queue backends
 

@@ -24,7 +24,7 @@ Each archive holds the program, its `LICENSE` (AGPL-3.0-only from v0.2.0; v0.1.0
 ## What has been tested
 Each page says what has run against a real agent and what has only run against a stand-in. In short:
 
-- **Tested on a real agent:** a Grok Bot with Always allow, through the guided setup, and Hermes Agent v0.22.7 through the daemon directly.
-- **Not yet tested on a real agent:** the guided setup with OpenClaw, Hermes or Ollama; a logged-in Claude Code turn; a stalled Grok Bot turn under Ask every time; the hidden prompts at a real Windows console.
+- **Tested on a real agent:** a Grok Bot with Always allow, through the guided setup; Claude Code v2.1.319 with a Claude Pro subscription on a Mac, through the guided setup and a full 12-turn room; and Hermes Agent v0.22.7 through the daemon directly.
+- **Not yet tested on a real agent:** the guided setup with OpenClaw, Hermes or Ollama; Claude Code on Linux or WSL; a stalled Grok Bot turn under Ask every time; the hidden prompts at a real Windows console.
 
 **Support this project:** https://buymeacoffee.com/python1
