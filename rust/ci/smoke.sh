@@ -118,7 +118,8 @@ esac
 FAKE
   chmod +x "$fake"
   claude_seat="$home/claude seat"
-  printf '5\n\n\n%s\n' "$room_key" | EUREKA_CLAUDE_BIN="$fake" "$binary" setup --dir "$claude_seat" >"$log" 2>&1 || fail "Claude Code setup failed"
+  printf '5\n\n\n%s\n\n' "$room_key" | EUREKA_CLAUDE_BIN="$fake" "$binary" setup --dir "$claude_seat" >"$log" 2>&1 || fail "Claude Code setup failed"
+  tr -d '\r' <"$log" | grep -q 'No project: this seat stays chat only.' || fail "setup did not keep the seat chat only by default"
   tr -d '\r' <"$log" | grep -q 'Name: *Claude$' || fail "the Claude Code seat is not named Claude by default"
   [ -d "$claude_seat/claude-code/config" ] && [ -d "$claude_seat/claude-code/room" ] || fail "setup did not make the seat's Claude Code folders"
   [ ! -e "$home/.claude" ] || fail "setup touched ~/.claude"
@@ -128,6 +129,20 @@ FAKE
   tr -d '\r' <"$log" | grep -q 'ok    Claude Code: Claude Code 2.1.319, logged in with a Claude pro plan' || fail "doctor did not pass Claude Code"
   tr -d '\r' <"$log" | grep -q 'ANTHROPIC_API_KEY is set here; room turns never pass it on' || fail "doctor did not name the dropped API key"
   "$binary" stop --dir "$claude_seat" >"$log" 2>&1 || fail "the Claude Code seat did not stop"
+
+  echo "== a Claude Code seat with a project for approved plans"
+  project="$home/site"
+  mkdir -p "$project" && (cd "$project" && git init -q && echo hi > a.txt && git add a.txt && git -c user.name=t -c user.email=t@t commit -qm init) || fail "cannot make a test repository"
+  plan_seat="$home/plan seat"
+  printf '5\n\n\n%s\n%s\n\n' "$room_key" "$project" | EUREKA_CLAUDE_BIN="$fake" "$binary" setup --dir "$plan_seat" >"$log" 2>&1 || fail "setup with a project failed"
+  tr -d '\r' <"$log" | grep -q 'for room turns and approved plans' || fail "setup did not grant the room approved plans"
+  grep -q '"project_name": "site"' "$plan_seat/seat.json" || fail "setup did not save the project"
+  grep -q 'plan-run' "$plan_seat/trust.json" || fail "the trust file has no plan-run grant"
+  "$binary" start --dir "$plan_seat" >"$log" 2>&1 || fail "the seat with a project did not start"
+  tr -d '\r' <"$plan_seat/daemon.log" | grep -q 'offers: plan-run, plan-status, room-turn' || fail "the seat does not offer approved plans"
+  tr -d '\r' <"$plan_seat/daemon.log" | grep -q 'approver none yet' || fail "the seat did not say no approver is pinned"
+  "$binary" stop --dir "$plan_seat" >"$log" 2>&1 || fail "the seat with a project did not stop"
+  [ -z "$(cd "$project" && git status --porcelain)" ] || fail "starting the seat changed the project"
 fi
 
 # The approver passkey: pinned, shown, refused twice, removed. Every platform; the test key from the vectors.

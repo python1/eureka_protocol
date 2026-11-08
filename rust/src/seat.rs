@@ -108,6 +108,8 @@ struct Seat {
     program: Option<String>,
     /// The OpenClaw agent, Hermes profile or Ollama model.
     setting: Option<String>,
+    /// Claude Code only: the project approved plans may change, as (name, absolute path).
+    project: Option<(String, String)>,
 }
 
 fn identity_path(dir: &Path) -> PathBuf {
@@ -153,6 +155,10 @@ impl Seat {
         if let Some(setting) = &self.setting {
             fields.insert("setting".into(), Value::str(setting.clone()));
         }
+        if let Some((name, path)) = &self.project {
+            fields.insert("project_name".into(), Value::str(name.clone()));
+            fields.insert("project_path".into(), Value::str(path.clone()));
+        }
         let text = pyjson::indented(&Value::Object(fields)) + "\n";
         let path = config_path(&self.dir);
         crypto::write_private_file(&path, text.as_bytes()).map_err(|e| format!("cannot write {}: {e}", path.display()))
@@ -171,7 +177,12 @@ impl Seat {
         let backend = text_field("backend").and_then(|id| Backend::from_id(&id)).ok_or_else(|| broken("names no known backend"))?;
         let name = text_field("name").filter(|n| clean_name(n).is_ok()).ok_or_else(|| broken("has no usable seat name"))?;
         let port = fields.get("port").and_then(Value::as_number).filter(|p| (1.0..=65535.0).contains(p)).ok_or_else(|| broken("has no usable port"))? as u16;
-        Ok(Seat { dir: dir.to_path_buf(), backend, name, port, program: text_field("program"), setting: text_field("setting") })
+        let project = match (text_field("project_name"), text_field("project_path")) {
+            (Some(name), Some(path)) if crate::plan::valid_project_name(&name) && backend == Backend::ClaudeCode => Some((name, path)),
+            (None, None) => None,
+            _ => return Err(broken("has an unusable project")),
+        };
+        Ok(Seat { dir: dir.to_path_buf(), backend, name, port, program: text_field("program"), setting: text_field("setting"), project })
     }
 }
 
@@ -598,6 +609,47 @@ fn setup_claude_code(seat: &mut Seat) -> Result<(), String> {
     Ok(())
 }
 
+/// Approved plans: the one project folder the owner's approved plans may change, or none.
+fn setup_project(dir: &Path, kept: Option<(String, String)>) -> Result<Option<(String, String)>, String> {
+    println!("\n{PLAN_GUIDANCE}");
+    let default = kept.as_ref().map(|(_, path)| path.clone()).unwrap_or_default();
+    let path = ask_until(
+        || ask("Project folder for approved plans (a git repository; press Enter for none)", &default),
+        |raw| {
+            let raw = raw.trim();
+            if raw.is_empty() || raw.eq_ignore_ascii_case("none") {
+                return Ok(None);
+            }
+            crate::plan_run::check_project(&crypto::expand_user(raw), dir).map(Some)
+        },
+    )?;
+    let Some(path) = path else {
+        println!("  No project: this seat stays chat only.");
+        return Ok(None);
+    };
+    let suggested = kept.filter(|(_, old)| Path::new(old) == path).map(|(name, _)| name).unwrap_or_else(|| project_name_for(&path));
+    let name = ask_until(
+        || ask("Project name, which plans use to name it", &suggested),
+        |raw| if crate::plan::valid_project_name(raw.trim()) { Ok(raw.trim().to_string()) } else { Err("Use lower-case letters, digits, - and _ (up to 32).".to_string()) },
+    )?;
+    println!("  Approved plans may change {} (as {name:?}), in a private copy first.", path.display());
+    println!("  Before a plan can run, pin your passkey from Knights Circle:  {} approver add CREDENTIAL_ID PUBLIC_KEY{}", program_shown(), dir_flag(dir));
+    Ok(Some((name, path.display().to_string())))
+}
+
+/// A folder's name as a project name: lower case, other characters as `-`.
+fn project_name_for(path: &Path) -> String {
+    let base = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let name: String = base.chars().map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' { c } else { '-' }).collect();
+    let name = name.trim_matches('-').chars().take(32).collect::<String>();
+    if crate::plan::valid_project_name(&name) { name } else { "project".into() }
+}
+
+const PLAN_GUIDANCE: &str = "Approved plans (optional): a Claude Code seat can also carry out a plan the room's Lead posts, \
+but only after you approve it with your passkey in Knights Circle. It works on a private copy of one git repository, \
+with file tools only (no shell or web), and may change only the files the plan lists. Your folder isn't changed: \
+the result is a diff for you to review.";
+
 fn setup_ollama(seat: &mut Seat) -> Result<(), String> {
     seat.setting = Some(ask("Ollama model", handlers::DEFAULT_ROOM_MODEL)?);
     Ok(())
@@ -676,7 +728,7 @@ fn setup(dir: PathBuf) -> Result<(), String> {
 
     println!("In Knights Circle ({KNIGHTS_CIRCLE_ORIGIN}), open Advanced: bring your own bot, then Show room key.");
     let trust_file = trust_path(&dir);
-    let known: Vec<String> = ["room-turn", "inference", "web-retrieval"].map(String::from).to_vec();
+    let known: Vec<String> = ["room-turn", "inference", "web-retrieval", "plan-run", "plan-status"].map(String::from).to_vec();
     let (mut trust, _) = TrustList::load_or_empty(&trust_file, &known).map_err(|e| e.to_string())?;
     let (room_name, room_key) = ask_until(|| ask("Room key", ""), |raw| {
         let bytes = crypto::from_hex(raw).filter(|b| b.len() == 32).ok_or("That is not a room key, which is 64 hexadecimal characters.".to_string())?;
@@ -686,12 +738,23 @@ fn setup(dir: PathBuf) -> Result<(), String> {
     trust.save(&trust_file).map_err(|e| format!("cannot write {}: {e}", trust_file.display()))?;
     println!("  Trusted {room_name} for room turns only.");
 
-    let mut seat = Seat { dir: dir.clone(), backend, name, port, program: None, setting: None };
+    let mut seat = Seat { dir: dir.clone(), backend, name, port, program: None, setting: None, project: None };
     match backend {
         Backend::GrokBot => setup_grok_bot(&seat)?,
         Backend::OpenClaw | Backend::Hermes => setup_agent_cli(&mut seat)?,
         Backend::Ollama => setup_ollama(&mut seat)?,
-        Backend::ClaudeCode => setup_claude_code(&mut seat)?,
+        Backend::ClaudeCode => {
+            setup_claude_code(&mut seat)?;
+            let kept = existing.as_ref().and_then(|old| old.project.clone());
+            seat.project = setup_project(&dir, kept)?;
+        }
+    }
+    if seat.project.is_some() {
+        let mut grants = vec![handlers::ROOM_TURN.to_string()];
+        grants.extend(crate::plan_run::CAPABILITIES.map(String::from));
+        trust.add_peer(&room_name, &room_key, &grants).map_err(|e| e.to_string())?;
+        trust.save(&trust_file).map_err(|e| format!("cannot write {}: {e}", trust_file.display()))?;
+        println!("  Trusted {room_name} for room turns and approved plans.");
     }
     seat.save()?;
     if let Some(problem) = backend_problem(&seat) {
@@ -723,6 +786,8 @@ fn daemon_command(seat: &Seat) -> Result<Command, String> {
         .stdout(output)
         .stderr(errors)
         .env_remove("EUREKA_CORS_ORIGINS")
+        .env_remove(crate::plan_run::PROJECT_ENV)
+        .env_remove(crate::plan_run::PROJECT_NAME_ENV)
         .env(crypto::IDENTITY_PATH_ENV_VAR, identity_path(&seat.dir))
         .env(crate::trust::TRUST_PATH_ENV_VAR, trust_path(&seat.dir))
         .env(turns::TURN_DIR_ENV, turn_dir(&seat.dir))
@@ -751,6 +816,9 @@ fn daemon_command(seat: &Seat) -> Result<Command, String> {
                 .env(crate::claude_code::BIN_ENV, program)
                 .env(crate::claude_code::HOME_ENV, claude_home(&seat.dir))
                 .env(crate::claude_code::NAME_ENV, &seat.name);
+            if let Some((name, path)) = &seat.project {
+                command.env(crate::plan_run::PROJECT_ENV, path).env(crate::plan_run::PROJECT_NAME_ENV, name).env(SEAT_DIR_ENV, &seat.dir);
+            }
         }
     }
     detach(&mut command);

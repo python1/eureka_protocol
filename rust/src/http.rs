@@ -22,6 +22,8 @@ pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 pub struct App {
     pub node: Mutex<Node>,
     pub registry: Registry,
+    /// Approved plans, when this seat has a project.
+    pub plans: Option<std::sync::Arc<crate::plan_run::PlanRunner>>,
     pub cors_origins: Vec<String>,
 }
 
@@ -194,7 +196,13 @@ async fn route(app: Arc<App>, req: Request<Incoming>) -> Reply {
                 match decision {
                     AssignDecision::Refused(answer) => json(StatusCode::OK, &answer),
                     AssignDecision::Dispatch { capability, task_name, nonce, peer_id, payload } => {
-                        let outcome = app.registry.run(&capability, payload).await;
+                        let outcome = match &app.plans {
+                            Some(plans) if crate::plan_run::CAPABILITIES.contains(&capability.as_str()) => {
+                                let seat_id = app.node.lock().unwrap().node_id.clone();
+                                plans.handle(&capability, payload, &peer_id, &seat_id).await
+                            }
+                            _ => app.registry.run(&capability, payload).await,
+                        };
                         let answer = app.node.lock().unwrap().finish_assign(&capability, &task_name, &nonce, &peer_id, outcome);
                         render_or(StatusCode::OK, answer, || Node::assign_rejected(REASON_MALFORMED))
                     }

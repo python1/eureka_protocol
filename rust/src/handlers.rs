@@ -1008,7 +1008,7 @@ pub(crate) fn kill_process(pid: i32) {
 }
 
 #[cfg(unix)]
-fn kill_process_group(pid: i32) {
+pub(crate) fn kill_process_group(pid: i32) {
     // SAFETY: killpg on a process group this daemon created; failure (already gone) is harmless.
     unsafe {
         libc::killpg(pid, libc::SIGKILL);
@@ -1021,10 +1021,10 @@ fn kill_process_group(pid: i32) {
 pub(crate) fn kill_process(_pid: i32) {}
 
 #[cfg(windows)]
-fn kill_process_group(_pid: i32) {}
+pub(crate) fn kill_process_group(_pid: i32) {}
 
 /// Kills an agent CLI's process group when the turn ends for any reason, timeout and deadline included.
-struct GroupKill(Option<i32>);
+pub(crate) struct GroupKill(pub(crate) Option<i32>);
 
 impl Drop for GroupKill {
     fn drop(&mut self) {
