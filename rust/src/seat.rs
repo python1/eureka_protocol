@@ -196,7 +196,7 @@ fn default_seat_dir() -> PathBuf {
     crypto::default_eureka_dir().join("seat")
 }
 
-fn resolve_seat_dir(flag: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn resolve_seat_dir(flag: Option<&str>) -> Result<PathBuf, String> {
     let chosen = match (flag, std::env::var(SEAT_DIR_ENV)) {
         (Some(dir), _) => crypto::expand_user(dir),
         (None, Ok(dir)) if !dir.trim().is_empty() => crypto::expand_user(dir.trim()),

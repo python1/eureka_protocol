@@ -5,12 +5,14 @@
 //! command line, environment, identity and trust files, wire protocol and
 //! answers. See rust/README.md for what is and is not in this build.
 
+mod approval;
 mod claude_code;
 mod crypto;
 mod handlers;
 mod http;
 mod isotime;
 mod node;
+mod plan;
 mod pyjson;
 mod seat;
 mod trust;
@@ -69,6 +71,7 @@ a seat, the guided way to run this (folder: --dir, default ~/.eureka/seat):
   eureka-daemon start [--dir DIR]
   eureka-daemon stop [--dir DIR]
   eureka-daemon doctor [--dir DIR] [--wake]
+  eureka-daemon approver add|show|remove [--dir DIR]   the passkey that approves plans
 
 trust file:
   eureka-daemon trust add NAME PUBLIC_KEY [CAPABILITY ...]
@@ -330,6 +333,93 @@ fn trust_command(args: &[String]) -> ExitCode {
     }
 }
 
+const APPROVER_USAGE: &str = "usage: eureka-daemon approver add CREDENTIAL_ID PUBLIC_KEY [--origin ORIGIN] [--dir DIR]
+       eureka-daemon approver show [--dir DIR]
+       eureka-daemon approver remove [--dir DIR]
+
+Pins the passkey that may approve plans for this seat (one per seat). Copy the
+credential id and public key from Knights Circle when it creates the passkey,
+and check that the fingerprint printed here is the one Knights Circle shows.
+ORIGIN defaults to https://knights-circle.vercel.app.
+
+Run this only at the seat's own computer: the daemon never accepts an approver
+over the network. Approved plans don't run yet; this release only pins the key.";
+
+fn approver_command(args: &[String]) -> ExitCode {
+    let (mut dir, mut origin, mut words) = (None, approval::DEFAULT_ORIGIN.to_string(), Vec::new());
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--dir" | "--origin" => match rest.next() {
+                Some(value) if arg == "--dir" => dir = Some(value.as_str()),
+                Some(value) => origin = value.clone(),
+                None => {
+                    eprintln!("{APPROVER_USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
+            "-h" | "--help" => {
+                println!("{APPROVER_USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            _ => words.push(arg.as_str()),
+        }
+    }
+    let fail = |why: &str| {
+        eprintln!("eureka-daemon approver: {why}");
+        ExitCode::from(1)
+    };
+    let dir = match seat::resolve_seat_dir(dir) {
+        Ok(dir) => dir,
+        Err(why) => return fail(&why),
+    };
+    let pinned = match approval::Approver::load(&dir) {
+        Ok(pinned) => pinned,
+        Err(why) => return fail(&why),
+    };
+    match words.as_slice() {
+        ["add", credential_id, public_key] => {
+            if let Some(old) = pinned {
+                return fail(&format!("this seat already has an approver ({}); `eureka-daemon approver remove` it first", old.fingerprint()));
+            }
+            let approver = match approval::Approver::new(credential_id, public_key, &origin) {
+                Ok(approver) => approver,
+                Err(why) => return fail(&why),
+            };
+            if let Err(e) = approver.save(&dir) {
+                return fail(&format!("cannot write {}: {e}", approval::Approver::path(&dir).display()));
+            }
+            println!("Pinned the approver passkey for {}", dir.display());
+            println!("  fingerprint  {}", approver.fingerprint());
+            println!("  origin       {}", approver.origin);
+            println!("Check that Knights Circle shows the same fingerprint. If it doesn't, run `eureka-daemon approver remove` now.");
+            ExitCode::SUCCESS
+        }
+        ["show"] => {
+            match pinned {
+                Some(a) => println!("approver  {}  {}  ({})", a.fingerprint(), a.origin, approval::Approver::path(&dir).display()),
+                None => println!("no approver pinned for {}", dir.display()),
+            }
+            ExitCode::SUCCESS
+        }
+        ["remove"] => {
+            let Some(old) = pinned else {
+                println!("no approver pinned for {}", dir.display());
+                return ExitCode::SUCCESS;
+            };
+            if let Err(e) = std::fs::remove_file(approval::Approver::path(&dir)) {
+                return fail(&format!("cannot remove {}: {e}", approval::Approver::path(&dir).display()));
+            }
+            println!("Removed the approver {}. No plan can be approved for this seat until you add one.", old.fingerprint());
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("{APPROVER_USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Resolves when the operating system asks this process to stop.
 #[cfg(unix)]
 async fn shutdown_requested() {
@@ -359,6 +449,9 @@ async fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().is_some_and(|a| a == "trust") {
         return trust_command(&raw[1..]);
+    }
+    if raw.first().is_some_and(|a| a == "approver") {
+        return approver_command(&raw[1..]);
     }
     if raw.first().is_some_and(|a| a == "turn") {
         return turns::command(&raw[1..]);

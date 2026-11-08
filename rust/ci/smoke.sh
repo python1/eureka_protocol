@@ -130,4 +130,17 @@ FAKE
   "$binary" stop --dir "$claude_seat" >"$log" 2>&1 || fail "the Claude Code seat did not stop"
 fi
 
+# The approver passkey: pinned, shown, refused twice, removed. Every platform; the test key from the vectors.
+vectors="$(dirname "$0")/../../vectors/plans-v1.json"
+credential=$(sed -n 's/^ *"credential_id": "\([A-Za-z0-9_-]*\)",$/\1/p' "$vectors" | head -1)
+public_key=$(sed -n 's/^ *"public_key": "\([A-Za-z0-9_-]*\)",$/\1/p' "$vectors" | head -1)
+fingerprint=$(sed -n 's/^ *"fingerprint": "\([0-9a-f ]*\)"$/\1/p' "$vectors" | head -1)
+approver_seat="$home/approver seat"
+"$binary" approver add "$credential" "$public_key" --dir "$approver_seat" >"$log" 2>&1 || fail "approver add failed"
+tr -d '\r' <"$log" | grep -q "fingerprint  $fingerprint" || fail "approver add did not print the vectors' fingerprint"
+"$binary" approver add "$credential" "$public_key" --dir "$approver_seat" >"$log" 2>&1 && fail "a second approver was accepted"
+"$binary" approver show --dir "$approver_seat" >"$log" 2>&1 && tr -d '\r' <"$log" | grep -q "$fingerprint" || fail "approver show"
+"$binary" approver remove --dir "$approver_seat" >"$log" 2>&1 || fail "approver remove failed"
+[ ! -e "$approver_seat/approver.json" ] || fail "approver remove left the file"
+
 echo "smoke: ok"
