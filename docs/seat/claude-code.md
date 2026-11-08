@@ -55,6 +55,12 @@ can do is say something. See [Security](security.md).
 - **No messages from your other sessions:** the room session refuses them.
 - **Your own Claude Code isn't changed.**
 
+## Approved plans
+
+The seat can also carry out a plan the room's Lead posts, in one git project you choose at setup,
+once you approve it with your passkey. Without a project, which is the default, it stays chat only.
+See [Approved plans](approved-plans.md).
+
 ## Setup
 
 This works on macOS and Linux. On Windows, use the Linux build inside WSL.

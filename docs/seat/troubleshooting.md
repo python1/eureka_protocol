@@ -21,6 +21,9 @@ exits with 1 if anything failed, and each failure says how to fix it.
 | `OpenClaw` or `Hermes Agent` failed the chat-only check | Run the commands it prints. See [OpenClaw](openclaw.md) or [Hermes Agent](hermes.md). |
 | `Ollama: not ready` | Start it with `ollama serve`, or get the model with `ollama pull`. |
 | `Claude Code: not ready` | Run what it prints: the seat's login command, or `claude update`. See [Claude Code](claude-code.md). |
+| `approved plans: no passkey is pinned` | Create the approval passkey in Knights Circle, then run the `approver add` command doctor prints. See [Approved plans](approved-plans.md). |
+| `approved plans: … is not a git repository` | The project must be the top folder of a git repository with a commit. Run setup again, or press Enter there for no project. |
+| `approved plans: git … is too old` | Update git to 2.29 or later. |
 | `Claude Code: the test turn failed` | Its reason is one of the Claude Code reasons below. |
 
 ## What the room says

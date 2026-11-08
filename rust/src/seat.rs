@@ -995,9 +995,12 @@ fn check_identity(dir: &Path, report: &mut Report) -> Option<Identity> {
     }
 }
 
-fn check_trust(dir: &Path, report: &mut Report) {
-    let path = trust_path(dir);
-    let advertised = vec![handlers::ROOM_TURN.to_string()];
+fn check_trust(seat: &Seat, report: &mut Report) {
+    let path = trust_path(&seat.dir);
+    let mut advertised = vec![handlers::ROOM_TURN.to_string()];
+    if seat.project.is_some() {
+        advertised.extend(crate::plan_run::CAPABILITIES.map(String::from));
+    }
     match TrustList::load(&path, &advertised) {
         Ok((trust, warnings)) => {
             for warning in warnings {
@@ -1008,6 +1011,15 @@ fn check_trust(dir: &Path, report: &mut Report) {
                 report.fail("trust file: no room may use this seat", "Run setup again and give it the room key.");
             } else {
                 report.ok(&format!("trust file: room turns allowed for {}", rooms.join(", ")));
+            }
+            if seat.project.is_some() {
+                let granted = |caps: &[String], c: &str| caps.iter().any(|g| g == c);
+                for (name, _, caps) in trust.names() {
+                    let missing: Vec<&str> = crate::plan_run::CAPABILITIES.iter().copied().filter(|c| !granted(&caps, c)).collect();
+                    if granted(&caps, crate::plan_run::PLAN_RUN) && !missing.is_empty() {
+                        report.note(&format!("trust file: {name} may run plans but not {}; run setup again to grant them", missing.join(", ")));
+                    }
+                }
             }
         }
         // A stale grant lands here: the seat serves room turns only, so the daemon would refuse to start.
@@ -1148,6 +1160,9 @@ async fn check_claude_code(seat: &Seat, wake: bool, report: &mut Report) -> Resu
     for influence in cc::outside_influences(&home) {
         report.note(&format!("Claude Code: {influence}"));
     }
+    if let Some((name, path)) = &seat.project {
+        check_plans(seat, name, Path::new(path), &home, report).await;
+    }
     let terminal = std::io::stdin().is_terminal();
     let wake = wake || (terminal && ask_yes_no("        Run one test turn through Claude Code? This uses a little of your Claude plan's usage.", false)?);
     if !wake {
@@ -1175,12 +1190,39 @@ async fn check_claude_code(seat: &Seat, wake: bool, report: &mut Report) -> Resu
     Ok(())
 }
 
+/// Approved plans: the project, the pinned passkey, git, and a test copy made as a run makes it.
+async fn check_plans(seat: &Seat, name: &str, project: &Path, home: &Path, report: &mut Report) {
+    let plan = crate::plan_run::check_project(project, &seat.dir);
+    match &plan {
+        Ok(path) => report.ok(&format!("approved plans: project {name:?} is the git repository {}", path.display())),
+        Err(problem) => report.fail(&format!("approved plans: {problem}"), "Run setup again and choose the project's folder, or press Enter there for none."),
+    }
+    match crate::approval::Approver::load(&seat.dir) {
+        Ok(Some(approver)) => report.ok(&format!("approved plans: the passkey {} ({}) approves plans", approver.fingerprint(), approver.origin)),
+        Ok(None) => report.fail(
+            "approved plans: no passkey is pinned, so no plan can be approved",
+            &format!("In Knights Circle, create the approval passkey, then run: {} approver add CREDENTIAL_ID PUBLIC_KEY{}", program_shown(), dir_flag(&seat.dir)),
+        ),
+        Err(problem) => report.fail(&format!("approved plans: {problem}"), &format!("Remove it and add the passkey again: {} approver remove{}", program_shown(), dir_flag(&seat.dir))),
+    }
+    match crate::plan_run::git_problem() {
+        None => report.ok("approved plans: git is recent enough"),
+        Some(problem) => report.fail(&format!("approved plans: {problem}"), "Install or update git."),
+    }
+    if let Ok(path) = plan {
+        match crate::plan_run::test_copy(&path, home).await {
+            Ok(commit) => report.ok(&format!("approved plans: a test copy at {} has no git folder in its tree, and was deleted", &commit[..commit.len().min(12)])),
+            Err(problem) => report.fail(&format!("approved plans: a test copy failed: {problem}"), "Check that the project is a working git repository."),
+        }
+    }
+}
+
 async fn doctor(dir: PathBuf, wake: bool) -> Result<bool, String> {
     let seat = Seat::load(&dir)?;
     println!("Checking the seat {:?} ({}) in {}", seat.name, seat.backend.title(), dir.display());
     let mut report = Report::default();
     let identity = check_identity(&dir, &mut report);
-    check_trust(&dir, &mut report);
+    check_trust(&seat, &mut report);
     check_port(&seat, identity.as_ref(), &mut report);
     let what = seat.setting.as_deref().unwrap_or_default();
     match seat.backend {
