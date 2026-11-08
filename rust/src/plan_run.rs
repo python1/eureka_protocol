@@ -39,7 +39,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const PLAN_RUN: &str = "plan-run";
 pub const PLAN_STATUS: &str = "plan-status";
-pub const CAPABILITIES: [&str; 2] = [PLAN_RUN, PLAN_STATUS];
+pub const PLAN_APPLY: &str = "plan-apply";
+pub const PLAN_DISCARD: &str = "plan-discard";
+pub const CAPABILITIES: [&str; 4] = [PLAN_APPLY, PLAN_DISCARD, PLAN_RUN, PLAN_STATUS];
+/// Git 2.29 is the first with `fetch --no-write-fetch-head`.
+pub const MIN_GIT: (u64, u64) = (2, 29);
 pub const PROJECT_ENV: &str = "EUREKA_PLAN_PROJECT";
 pub const PROJECT_NAME_ENV: &str = "EUREKA_PLAN_PROJECT_NAME";
 pub const TIMEOUT_ENV: &str = "EUREKA_PLAN_TIMEOUT";
@@ -66,6 +70,9 @@ pub const REASON_WRONG_PROJECT: &str = "wrong_project";
 pub const REASON_BUSY: &str = "busy";
 pub const REASON_MALFORMED: &str = "malformed";
 pub const REASON_UNKNOWN_RUN: &str = "unknown_run";
+pub const REASON_NOT_READY: &str = "not_ready";
+pub const REASON_PROJECT_MOVED: &str = "project_moved";
+pub const REASON_APPLY_CONFLICT: &str = "apply_conflict";
 
 /// The statuses a run can have.
 pub const RUNNING: &str = "running";
@@ -77,6 +84,9 @@ pub const TOO_LARGE: &str = "too_large";
 pub const TIMEOUT: &str = "timeout";
 pub const MAX_TURNS_REACHED: &str = "max_turns";
 pub const SETUP_FAILED: &str = "setup_failed";
+pub const APPLYING: &str = "applying";
+pub const APPLIED: &str = "applied";
+pub const DISCARDED: &str = "discarded";
 
 /// The project an approved plan may change: a git repository, named at setup.
 #[derive(Clone, Debug)]
@@ -88,6 +98,7 @@ pub struct Project {
 /// A run, as `plan-status` reports it.
 struct Run {
     requester_id: String,
+    title: String,
     plan_hash: String,
     approval_id: String,
     room_id: String,
@@ -110,6 +121,9 @@ struct Report {
     summary: String,
     denials: Vec<String>,
     seconds: u64,
+    /// Once applied: the branch made in the project, and its commit.
+    branch: Option<String>,
+    commit: Option<String>,
 }
 
 #[derive(Default)]
@@ -295,6 +309,8 @@ impl PlanRunner {
     pub async fn handle(self: &Arc<Self>, capability: &str, payload: Value, requester_id: &str, seat_id: &str) -> HandlerResult {
         match capability {
             PLAN_RUN => self.start(payload, requester_id, seat_id),
+            PLAN_APPLY => self.apply(payload, requester_id, seat_id).await,
+            PLAN_DISCARD => self.discard(&payload, requester_id),
             _ => self.status(&payload, requester_id),
         }
     }
@@ -344,6 +360,7 @@ impl PlanRunner {
             run_id.clone(),
             Run {
                 requester_id: requester_id.to_string(),
+                title: plan.title.clone(),
                 plan_hash: plan.hash.clone(),
                 approval_id: checked.approval.approval_id.clone(),
                 room_id: room_id.clone(),
@@ -419,6 +436,10 @@ impl PlanRunner {
             out.insert("summary".into(), Value::str(report.summary.as_str()));
             out.insert("denials".into(), Value::Array(report.denials.iter().map(|d| Value::str(d.as_str())).collect()));
             out.insert("duration_seconds".into(), Value::int(report.seconds as i64));
+            if let (Some(branch), Some(commit)) = (&report.branch, &report.commit) {
+                out.insert("branch".into(), Value::str(branch.as_str()));
+                out.insert("commit".into(), Value::str(commit.as_str()));
+            }
         }
         completed(Value::Object(out))
     }
@@ -482,21 +503,7 @@ impl PlanRunner {
 
     async fn carry_out(&self, run_id: &str, plan: &Plan, dir: &Path) -> Result<Report, (&'static str, String, Option<Report>)> {
         let setup = |e: String| (SETUP_FAILED, e, None);
-        crate::crypto::create_private_dir(dir).map_err(|e| setup(format!("cannot create the run folder: {e}")))?;
-        let (git_dir, work) = (dir.join("git"), dir.join("repo"));
-        let project = self.project.path.display().to_string();
-        git(&[
-            "clone".into(), "--quiet".into(), "--no-hardlinks".into(), "--template=".into(),
-            format!("--separate-git-dir={}", git_dir.display()), "--".into(), project, work.display().to_string(),
-        ])
-        .await
-        .map_err(setup)?;
-        // The git folder is reached only through --git-dir: the tree Claude Code works in has none.
-        std::fs::remove_file(work.join(".git")).map_err(|e| setup(format!("cannot detach the copy's git folder: {e}")))?;
-        git(&in_clone(&git_dir, &work, &["config", "core.symlinks", "false"])).await.map_err(setup)?;
-        git(&in_clone(&git_dir, &work, &["remote", "remove", "origin"])).await.map_err(setup)?;
-        let base = String::from_utf8_lossy(&git(&in_clone(&git_dir, &work, &["rev-parse", "HEAD"])).await.map_err(setup)?).trim().to_string();
-        let work = std::fs::canonicalize(&work).map_err(|e| setup(e.to_string()))?;
+        let (git_dir, work, base) = make_copy(&self.project.path, dir).await.map_err(setup)?;
         let mut report = Report { base_commit: base, ..Report::default() };
 
         let session = self.session(run_id, plan, &work).await;
@@ -607,6 +614,188 @@ fn static_code(code: &str) -> &'static str {
         "usage_limit" => "usage_limit",
         "claude_unavailable" => "claude_unavailable",
         _ => crate::handlers::REASON_UPSTREAM_ERROR,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The copy, and applying its diff
+
+/// Clone the project's last commit into `dir`: the tree in `dir/repo`, with no git folder in it,
+/// and the git folder in `dir/git`, reached only with `--git-dir`. Returns both and the commit.
+pub async fn make_copy(project: &Path, dir: &Path) -> Result<(PathBuf, PathBuf, String), String> {
+    crate::crypto::create_private_dir(dir).map_err(|e| format!("cannot create the run folder: {e}"))?;
+    let (git_dir, work) = (dir.join("git"), dir.join("repo"));
+    git(&[
+        "clone".into(), "--quiet".into(), "--no-hardlinks".into(), "--template=".into(),
+        format!("--separate-git-dir={}", git_dir.display()), "--".into(), project.display().to_string(), work.display().to_string(),
+    ])
+    .await?;
+    std::fs::remove_file(work.join(".git")).map_err(|e| format!("cannot detach the copy's git folder: {e}"))?;
+    git(&in_clone(&git_dir, &work, &["config", "core.symlinks", "false"])).await?;
+    git(&in_clone(&git_dir, &work, &["remote", "remove", "origin"])).await?;
+    let base = String::from_utf8_lossy(&git(&in_clone(&git_dir, &work, &["rev-parse", "HEAD"])).await?).trim().to_string();
+    let work = std::fs::canonicalize(&work).map_err(|e| e.to_string())?;
+    Ok((git_dir, work, base))
+}
+
+/// The staged diff, exactly as the run's diff check made it, so its hash can be checked again.
+async fn staged_diff(git_dir: &Path, work: &Path) -> Result<Vec<u8>, String> {
+    git(&in_clone(git_dir, work, &["diff", "--cached", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--full-index", "HEAD"])).await
+}
+
+/// The branch an applied plan goes on: `eureka/plan-` and the plan's short code.
+pub fn branch_for(plan_hash: &str) -> String {
+    format!("eureka/plan-{}", &plan_hash[..8])
+}
+
+/// `git --version`, if it is too old for applying, or missing.
+pub fn git_problem() -> Option<String> {
+    let version = match git_sync(&["--version"]) {
+        Ok(v) => v,
+        Err(e) => return Some(format!("git isn't usable: {e}")),
+    };
+    let numbers: Vec<u64> = version.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).take(2).filter_map(|n| n.parse().ok()).collect();
+    match numbers.as_slice() {
+        [major, minor] if (*major, *minor) >= MIN_GIT => None,
+        _ => Some(format!("{version} is too old; approved plans need git {}.{} or later", MIN_GIT.0, MIN_GIT.1)),
+    }
+}
+
+/// A test copy, as a run makes it, for doctor: made, checked and deleted.
+pub async fn test_copy(project: &Path, claude_home: &Path) -> Result<String, String> {
+    let dir = claude_home.join("runs").join(format!("doctor-{}", crate::crypto::token_hex16()));
+    let result = async {
+        let (_, work, base) = make_copy(project, &dir).await?;
+        if std::fs::symlink_metadata(work.join(".git")).is_ok() {
+            return Err("the copy's tree has a .git in it".to_string());
+        }
+        Ok(base)
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+impl PlanRunner {
+    /// Put a finished run's diff on a new branch in the project, after the owner's second passkey
+    /// approval, of this run, this diff and this base commit. The project's checkout, working
+    /// tree and other branches are never touched: the branch is fetched in from the copy.
+    async fn apply(self: &Arc<Self>, payload: Value, requester_id: &str, seat_id: &str) -> HandlerResult {
+        let Some(fields) = payload.as_object() else { return failed(REASON_MALFORMED) };
+        let (Some(Value::Str(run_id)), Some(approval), Some(assertion), Some(Value::Str(room_id))) =
+            (fields.get("run_id"), fields.get("approval"), fields.get("assertion"), fields.get("room_id"))
+        else {
+            return failed(REASON_MALFORMED);
+        };
+        let dir = runs_dir(&self.seat).join(run_id);
+        // As for a run: the checks and spending the approval happen under one lock.
+        let (plan_hash, title, target) = {
+            let mut state = self.state.lock().unwrap();
+            let Some(run) = state.runs.get_mut(run_id).filter(|run| run.requester_id == requester_id) else {
+                return failed(REASON_UNKNOWN_RUN);
+            };
+            let ready = run.status == DIFF_READY && dir.is_dir();
+            let (Some(report), true) = (&run.report, ready) else {
+                return failed(&format!("{REASON_NOT_READY}: the run is {}, not a diff waiting to be applied", if ready { "missing its report" } else { run.status }));
+            };
+            let Some(diff_hash) = report.diff_hash.clone() else { return failed(REASON_NOT_READY) };
+            let target = approval::ApplyTarget { run_id: run_id.clone(), diff_hash, base_commit: report.base_commit.clone() };
+            let approver = match Approver::load(&self.seat_dir) {
+                Ok(Some(approver)) => approver,
+                _ => return failed(&format!("{}: no passkey is pinned for this seat (eureka-daemon approver add)", approval::REASON_NO_APPROVER)),
+            };
+            let expected = Expected { seat_id, requester_id, room_id, plan_hash: &run.plan_hash, apply: Some(&target) };
+            let checked = approval::check(&approver, approval, assertion, &expected, unix_now())
+                .and_then(|checked| ApprovalStore::new(&self.seat_dir).consume(&checked, unix_now()));
+            if let Err(refusal) = checked {
+                println!("[PLAN] refused to apply run {run_id}: {} ({})", refusal.reason, refusal.detail);
+                return failed(&format!("{}: {}", refusal.reason, refusal.detail));
+            }
+            println!("[PLAN] run {run_id}: applying, approved by passkey {}", approver.fingerprint());
+            run.status = APPLYING;
+            (run.plan_hash.clone(), run.title.clone(), target)
+        };
+        let outcome = self.put_on_branch(&dir, &plan_hash, &title, &target).await;
+        let mut state = self.state.lock().unwrap();
+        let Some(run) = state.runs.get_mut(run_id) else { return failed(REASON_UNKNOWN_RUN) };
+        match outcome {
+            Ok((branch, commit)) => {
+                println!("[PLAN] run {run_id}: applied as {branch} at {commit}");
+                run.status = APPLIED;
+                run.detail = None;
+                if let Some(report) = run.report.as_mut() {
+                    report.branch = Some(branch.clone());
+                    report.commit = Some(commit.clone());
+                }
+                drop(state);
+                let _ = std::fs::remove_dir_all(&dir);
+                completed(Value::Object(Map::from_iter([
+                    ("run_id".to_string(), Value::str(run_id.as_str())),
+                    ("status".to_string(), Value::str(APPLIED)),
+                    ("branch".to_string(), Value::str(branch)),
+                    ("commit".to_string(), Value::str(commit)),
+                ])))
+            }
+            Err((reason, why)) => {
+                println!("[PLAN] run {run_id}: not applied: {reason} ({why})");
+                // The diff is still there; applying it again needs a new approval.
+                run.status = DIFF_READY;
+                run.detail = Some(format!("{reason}: {why}"));
+                failed(&format!("{reason}: {why}"))
+            }
+        }
+    }
+
+    async fn put_on_branch(&self, dir: &Path, plan_hash: &str, title: &str, target: &approval::ApplyTarget) -> Result<(String, String), (&'static str, String)> {
+        let (git_dir, work) = (dir.join("git"), dir.join("repo"));
+        let project = self.project.path.display().to_string();
+        let broke = |e: String| (SETUP_FAILED, e);
+        let head = git(&["-C".into(), project.clone(), "rev-parse".into(), "HEAD".into()]).await.map_err(broke)?;
+        let head = String::from_utf8_lossy(&head).trim().to_string();
+        if head != target.base_commit {
+            return Err((REASON_PROJECT_MOVED, format!("the project is now at {}, not {}, the commit the plan ran on; run the plan again", &head[..head.len().min(12)], &target.base_commit[..12])));
+        }
+        let branch = branch_for(plan_hash);
+        let exists = git(&["-C".into(), project.clone(), "rev-parse".into(), "--verify".into(), "--quiet".into(), format!("refs/heads/{branch}")]).await.is_ok();
+        if exists {
+            return Err((REASON_APPLY_CONFLICT, format!("the project already has a branch {branch}; delete or rename it, then apply again")));
+        }
+        // Nothing ran in the copy since the diff was checked, but its hash is what was approved.
+        let diff = staged_diff(&git_dir, &work).await.map_err(broke)?;
+        if crate::crypto::to_hex(&Sha256::digest(&diff)) != target.diff_hash {
+            return Err((approval::REASON_PLAN_MISMATCH, "the copy's diff is not the one approved".into()));
+        }
+        let code = &plan_hash[..8];
+        let message = format!("{title}\n\nApproved plan {code}, carried out by Claude Code in a copy of this project.\n\nPlan: {plan_hash}\nRun: {}\nDiff: {}\n", target.run_id, target.diff_hash);
+        let author = [("-c".to_string(), "user.name=Eureka approved plan".to_string()), ("-c".to_string(), format!("user.email=plan-{code}@eureka.invalid"))];
+        let mut commit = vec![format!("--git-dir={}", git_dir.display()), format!("--work-tree={}", work.display())];
+        commit.extend(author.iter().flat_map(|(a, b)| [a.clone(), b.clone()]));
+        commit.extend(["-c".into(), "commit.gpgSign=false".into(), "commit".into(), "--quiet".into(), "--no-verify".into(), "-m".into(), message]);
+        git(&commit).await.map_err(broke)?;
+        let sha = String::from_utf8_lossy(&git(&in_clone(&git_dir, &work, &["rev-parse", "HEAD"])).await.map_err(broke)?).trim().to_string();
+        git(&[
+            "-C".into(), project, "fetch".into(), "--quiet".into(), "--no-tags".into(), "--no-write-fetch-head".into(),
+            git_dir.display().to_string(), format!("HEAD:refs/heads/{branch}"),
+        ])
+        .await
+        .map_err(|e| (REASON_APPLY_CONFLICT, e))?;
+        Ok((branch, sha))
+    }
+
+    /// Throw a waiting diff away. Only the room key that started the run can.
+    fn discard(&self, payload: &Value, requester_id: &str) -> HandlerResult {
+        let Some(Value::Str(run_id)) = payload.as_object().and_then(|f| f.get("run_id")) else { return failed(REASON_MALFORMED) };
+        let mut state = self.state.lock().unwrap();
+        let Some(run) = state.runs.get_mut(run_id).filter(|run| run.requester_id == requester_id) else {
+            return failed(REASON_UNKNOWN_RUN);
+        };
+        if run.status != DIFF_READY {
+            return failed(&format!("{REASON_NOT_READY}: the run is {}", run.status));
+        }
+        run.status = DISCARDED;
+        let _ = std::fs::remove_dir_all(runs_dir(&self.seat).join(run_id));
+        println!("[PLAN] run {run_id}: discarded");
+        completed(Value::Object(Map::from_iter([("run_id".to_string(), Value::str(run_id.as_str())), ("status".to_string(), Value::str(DISCARDED))])))
     }
 }
 
@@ -864,7 +1053,7 @@ async fn diff_check(plan: &Plan, git_dir: &Path, work: &Path) -> Result<Option<(
         };
         files.push((path.to_string(), added, removed));
     }
-    let diff = git(&in_clone(git_dir, work, &["diff", "--cached", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--full-index", "HEAD"])).await.map_err(failed_git)?;
+    let diff = staged_diff(git_dir, work).await.map_err(failed_git)?;
     if diff.len() > MAX_DIFF_BYTES {
         return Err((TOO_LARGE, format!("the diff is {} KB; the limit is {} KB", diff.len() / 1024, MAX_DIFF_BYTES / 1024)));
     }
@@ -894,6 +1083,9 @@ pub fn from_environment(host_is_loopback: bool) -> Result<Option<PlanRunner>, St
     let name = std::env::var(PROJECT_NAME_ENV).unwrap_or_default().trim().to_string();
     if !crate::plan::valid_project_name(&name) {
         return Err(format!("{PROJECT_NAME_ENV}={name:?}: use lower-case letters, digits, - and _ (up to 32)"));
+    }
+    if let Some(problem) = git_problem() {
+        return Err(problem);
     }
     let seat_dir = crate::seat::resolve_seat_dir(None)?;
     let path = check_project(Path::new(&raw), &seat_dir)?;

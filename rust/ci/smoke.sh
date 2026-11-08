@@ -139,10 +139,21 @@ FAKE
   grep -q '"project_name": "site"' "$plan_seat/seat.json" || fail "setup did not save the project"
   grep -q 'plan-run' "$plan_seat/trust.json" || fail "the trust file has no plan-run grant"
   "$binary" start --dir "$plan_seat" >"$log" 2>&1 || fail "the seat with a project did not start"
-  tr -d '\r' <"$plan_seat/daemon.log" | grep -q 'offers: plan-run, plan-status, room-turn' || fail "the seat does not offer approved plans"
+  tr -d '\r' <"$plan_seat/daemon.log" | grep -q 'offers: plan-apply, plan-discard, plan-run, plan-status, room-turn' || fail "the seat does not offer approved plans"
   tr -d '\r' <"$plan_seat/daemon.log" | grep -q 'approver none yet' || fail "the seat did not say no approver is pinned"
   "$binary" stop --dir "$plan_seat" >"$log" 2>&1 || fail "the seat with a project did not stop"
-  [ -z "$(cd "$project" && git status --porcelain)" ] || fail "starting the seat changed the project"
+  "$binary" doctor --dir "$plan_seat" >"$log" 2>&1 && fail "doctor passed a project seat with no passkey pinned"
+  tr -d '\r' <"$log" | grep -q 'no passkey is pinned, so no plan can be approved' || fail "doctor did not say no passkey is pinned"
+  tr -d '\r' <"$log" | grep -q 'ok    approved plans: project "site" is the git repository' || fail "doctor did not check the project"
+  tr -d '\r' <"$log" | grep -q 'ok    approved plans: a test copy at .* has no git folder in its tree' || fail "doctor did not make a test copy"
+  plans_vectors="$(cd "$(dirname "$0")/../.." && pwd)/vectors/plans-v1.json"
+  plan_credential=$(sed -n 's/^ *"credential_id": "\([A-Za-z0-9_-]*\)",$/\1/p' "$plans_vectors" | head -1)
+  plan_key=$(sed -n 's/^ *"public_key": "\([A-Za-z0-9_-]*\)",$/\1/p' "$plans_vectors" | head -1)
+  "$binary" approver add "$plan_credential" "$plan_key" --dir "$plan_seat" >"$log" 2>&1 || fail "approver add failed for the project seat"
+  "$binary" doctor --dir "$plan_seat" >"$log" 2>&1 || fail "doctor found a problem with the project seat and a passkey"
+  tr -d '\r' <"$log" | grep -q 'ok    approved plans: the passkey .* approves plans' || fail "doctor did not see the pinned passkey"
+  [ -z "$(ls -A "$plan_seat/claude-code/runs")" ] || fail "doctor left a test copy behind"
+  [ -z "$(cd "$project" && git status --porcelain)" ] || fail "starting the seat or doctor changed the project"
 fi
 
 # The approver passkey: pinned, shown, refused twice, removed. Every platform; the test key from the vectors.

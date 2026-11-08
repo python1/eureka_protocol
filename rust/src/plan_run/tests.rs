@@ -75,33 +75,54 @@ fn plan_value(edit: &[&str]) -> Value {
     .unwrap()
 }
 
-/// A plan-run payload: the plan, and the owner's approval of `approved` (usually the same plan).
-fn payload_for(plan: &Value, approved: &Value, signer: &SigningKey) -> Value {
-    let hash = crate::plan::plan_hash(approved);
-    let now = unix_now();
-    let approval = pyjson::loads_str(&format!(
-        r#"{{"kind":"run","plan_hash":"{hash}","seat_id":"{SEAT}","requester_id":"{REQUESTER}","room_id":"{ROOM}","approval_id":"{}","issued_at":{},"expires_at":{}}}"#,
-        crate::crypto::token_hex16(),
-        now - 5,
-        now + 300
-    ))
-    .unwrap();
-    let client = format!(r#"{{"type":"webauthn.get","challenge":"{}","origin":"{}","crossOrigin":false}}"#, b64url_encode(&challenge(&approval)), approval::DEFAULT_ORIGIN);
+/// The owner's passkey assertion over an approval, as a browser makes it.
+fn assertion_for(approval: &Value, signer: &SigningKey) -> Value {
+    let client = format!(r#"{{"type":"webauthn.get","challenge":"{}","origin":"{}","crossOrigin":false}}"#, b64url_encode(&challenge(approval)), approval::DEFAULT_ORIGIN);
     let mut auth = Sha256::digest(b"knights-circle.vercel.app").to_vec();
     auth.extend_from_slice(&[0x05, 0, 0, 0, 0]);
     let mut signed = auth.clone();
     signed.extend_from_slice(&Sha256::digest(client.as_bytes()));
     let signature: Signature = signer.sign(&signed);
-    let assertion = Map::from_iter([
+    Value::Object(Map::from_iter([
         ("credential_id".to_string(), Value::str(b64url_encode(b"owner-passkey"))),
         ("authenticator_data".to_string(), Value::str(b64url_encode(&auth))),
         ("client_data_json".to_string(), Value::str(b64url_encode(client.as_bytes()))),
         ("signature".to_string(), Value::str(b64url_encode(signature.to_der().as_bytes()))),
-    ]);
+    ]))
+}
+
+/// An approval's fields, fresh: a new id, issued just now.
+fn approval_json(kind: &str, plan_hash: &str, extra: &str) -> Value {
+    let now = unix_now();
+    pyjson::loads_str(&format!(
+        r#"{{"kind":"{kind}","plan_hash":"{plan_hash}","seat_id":"{SEAT}","requester_id":"{REQUESTER}","room_id":"{ROOM}","approval_id":"{}","issued_at":{},"expires_at":{}{extra}}}"#,
+        crate::crypto::token_hex16(),
+        now - 5,
+        now + 300
+    ))
+    .unwrap()
+}
+
+/// A plan-run payload: the plan, and the owner's approval of `approved` (usually the same plan).
+fn payload_for(plan: &Value, approved: &Value, signer: &SigningKey) -> Value {
+    let approval = approval_json("run", &crate::plan::plan_hash(approved), "");
+    let assertion = assertion_for(&approval, signer);
     Value::Object(Map::from_iter([
         ("plan".to_string(), plan.clone()),
         ("approval".to_string(), approval),
-        ("assertion".to_string(), Value::Object(assertion)),
+        ("assertion".to_string(), assertion),
+        ("room_id".to_string(), Value::str(ROOM)),
+    ]))
+}
+
+/// A plan-apply payload, approving `run_id`, `diff_hash` and `base` for `plan_hash`.
+fn apply_payload(run_id: &str, plan_hash: &str, diff_hash: &str, base: &str, signer: &SigningKey) -> Value {
+    let approval = approval_json("apply", plan_hash, &format!(r#","run_id":"{run_id}","diff_hash":"{diff_hash}","base_commit":"{base}""#));
+    let assertion = assertion_for(&approval, signer);
+    Value::Object(Map::from_iter([
+        ("run_id".to_string(), Value::str(run_id)),
+        ("approval".to_string(), approval),
+        ("assertion".to_string(), assertion),
         ("room_id".to_string(), Value::str(ROOM)),
     ]))
 }
@@ -432,5 +453,178 @@ async fn real_claude_logged_out_passes_the_start_check() {
     let run_id = start(&real, payload(&plan_value(&["src/app.js"]))).await.unwrap();
     let out = finished(&real, &run_id).await;
     assert_eq!(status_of(&out), "not_logged_in", "{out:?}");
+    project_untouched(&f);
+}
+
+// ---------------------------------------------------------------------------
+// Applying and discarding
+
+const EDIT_APP: &str = "echo 'document.body.classList.add(\"dark\");' >> src/app.js";
+
+/// A finished run with a diff waiting: its status, and the approval fields it needs.
+async fn ready(f: &Fixture) -> (String, String, String, String) {
+    let run_id = start(f, payload(&plan_value(&["src/app.js"]))).await.unwrap();
+    let out = finished(f, &run_id).await;
+    assert_eq!(status_of(&out), DIFF_READY, "{out:?}");
+    let s = |k: &str| out[k].as_str().unwrap().to_string();
+    (run_id, s("plan_hash"), s("diff_hash"), s("base_commit"))
+}
+
+async fn apply(f: &Fixture, payload: Value) -> HandlerResult {
+    f.runner.handle(PLAN_APPLY, payload, REQUESTER, SEAT).await
+}
+
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git").args(args).current_dir(dir).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn an_approved_diff_lands_on_a_new_branch_without_touching_the_checkout() {
+    let f = fixture(&[INIT, EDIT_APP, RESULT].join("\n"), 20);
+    sh(&f.project, "echo 'work in progress' > notes.txt");
+    let (head, branch_before) = (git_out(&f.project, &["rev-parse", "HEAD"]), git_out(&f.project, &["symbolic-ref", "HEAD"]));
+    let (run_id, plan_hash, diff_hash, base) = ready(&f).await;
+    assert_eq!(base, head);
+
+    let result = apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &key(b"owner"))).await;
+    assert_eq!(result.status, crate::handlers::STATUS_COMPLETED, "{}", result.reason);
+    let out = result.output.as_object().unwrap();
+    let branch = format!("eureka/plan-{}", &plan_hash[..8]);
+    assert!(out["branch"].is_str(&branch));
+    let commit = out["commit"].as_str().unwrap();
+
+    // The branch is in the project, with exactly the approved change on top of the base commit.
+    assert_eq!(git_out(&f.project, &["rev-parse", &format!("refs/heads/{branch}")]), commit);
+    assert_eq!(git_out(&f.project, &["rev-parse", &format!("{commit}^")]), base);
+    let shown = git_out(&f.project, &["show", "--format=%an <%ae>%n%s", commit]);
+    assert!(shown.starts_with(&format!("Eureka approved plan <plan-{}@eureka.invalid>\nDark mode", &plan_hash[..8])), "{shown}");
+    assert!(shown.contains("+document.body.classList.add(\"dark\");"));
+    // The checkout, its branch and the working tree, untracked work included, are as they were.
+    assert_eq!(git_out(&f.project, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_out(&f.project, &["symbolic-ref", "HEAD"]), branch_before);
+    assert_eq!(git_out(&f.project, &["status", "--porcelain"]), "?? notes.txt");
+    assert_eq!(std::fs::read_to_string(f.project.join("src/app.js")).unwrap(), "console.log('app');\n");
+    assert!(!f.project.join(".git/FETCH_HEAD").exists());
+
+    // The status says so; the copy is gone; it can't be applied or discarded again.
+    let status = status(&f, &run_id, 0, REQUESTER).await;
+    let status = status.output.as_object().unwrap();
+    assert!(status["status"].is_str(APPLIED) && status["branch"].is_str(&branch));
+    assert!(!f.root.join("seat/claude-code/runs").join(&run_id).exists());
+    let again = apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &key(b"owner"))).await;
+    assert!(again.reason.starts_with(REASON_NOT_READY), "{}", again.reason);
+}
+
+#[tokio::test]
+async fn only_a_fresh_owner_approval_of_this_exact_diff_applies_it() {
+    let f = fixture(&[INIT, EDIT_APP, RESULT].join("\n"), 20);
+    let (run_id, plan_hash, diff_hash, base) = ready(&f).await;
+    let owner = key(b"owner");
+    let refused = |r: HandlerResult| {
+        assert_ne!(r.status, crate::handlers::STATUS_COMPLETED, "it applied");
+        r.reason
+    };
+    let no_branch = || git_out(&f.project, &["branch", "--list", "eureka/*"]).is_empty();
+
+    // Forged: someone else's passkey.
+    assert!(refused(apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &key(b"someone else"))).await).starts_with("bad_approval"));
+    // Mismatched: another diff, another base commit, another run, another plan.
+    let other = "e5".repeat(32);
+    assert!(refused(apply(&f, apply_payload(&run_id, &plan_hash, &other, &base, &owner)).await).starts_with("plan_mismatch"));
+    assert!(refused(apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &"c0".repeat(20), &owner)).await).starts_with("plan_mismatch"));
+    let Value::Object(mut wrong_run) = apply_payload(&"ab".repeat(16), &plan_hash, &diff_hash, &base, &owner) else { unreachable!() };
+    wrong_run.insert("run_id".into(), Value::str(run_id.as_str()));
+    assert!(refused(apply(&f, Value::Object(wrong_run)).await).starts_with("plan_mismatch"));
+    assert!(refused(apply(&f, apply_payload(&run_id, &"4".repeat(64), &diff_hash, &base, &owner)).await).starts_with("plan_mismatch"));
+    // The run's own approval, used again to apply.
+    let Value::Object(mut run_approval) = payload(&plan_value(&["src/app.js"])) else { unreachable!() };
+    run_approval.insert("run_id".into(), Value::str(run_id.as_str()));
+    assert!(refused(apply(&f, Value::Object(run_approval)).await).starts_with("bad_approval"));
+    // Sent by another room key.
+    let other_key = f.runner.handle(PLAN_APPLY, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &owner), "node_ffffffff", SEAT).await;
+    assert_eq!(refused(other_key), REASON_UNKNOWN_RUN);
+    assert!(no_branch(), "a refused approval made a branch");
+    assert!(status(&f, &run_id, 0, REQUESTER).await.output.as_object().unwrap()["status"].is_str(DIFF_READY));
+
+    // The owner's approval applies once. Sent again, it is refused: the run is no longer waiting
+    // (a replay while it still waits is refused as `replayed`; see the next test).
+    let good = apply_payload(&run_id, &plan_hash, &diff_hash, &base, &owner);
+    assert_eq!(apply(&f, good.clone()).await.status, crate::handlers::STATUS_COMPLETED);
+    assert!(refused(apply(&f, good).await).starts_with(REASON_NOT_READY));
+}
+
+#[tokio::test]
+async fn a_replayed_apply_approval_is_refused_even_for_another_run() {
+    let f = fixture(&[INIT, EDIT_APP, RESULT].join("\n"), 20);
+    let (run_id, plan_hash, diff_hash, base) = ready(&f).await;
+    let good = apply_payload(&run_id, &plan_hash, &diff_hash, &base, &key(b"owner"));
+    // Spent by a refusal for a moved project: the same approval can't be tried again later.
+    sh(&f.project, "echo more >> README.md && git -c user.name=t -c user.email=t@t commit -qam more");
+    assert!(apply(&f, good.clone()).await.reason.starts_with(REASON_PROJECT_MOVED));
+    sh(&f.project, "git reset -q --hard HEAD^");
+    assert!(apply(&f, good).await.reason.starts_with("replayed"));
+    // A fresh approval still works once the project is back at the base commit.
+    assert_eq!(apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &key(b"owner"))).await.status, crate::handlers::STATUS_COMPLETED);
+}
+
+#[tokio::test]
+async fn a_moved_project_or_an_existing_branch_is_refused_and_the_diff_kept() {
+    let f = fixture(&[INIT, EDIT_APP, RESULT].join("\n"), 20);
+    let (run_id, plan_hash, diff_hash, base) = ready(&f).await;
+    let owner = key(b"owner");
+    sh(&f.project, "echo more >> README.md && git -c user.name=t -c user.email=t@t commit -qam more");
+    let moved = git_out(&f.project, &["rev-parse", "HEAD"]);
+    assert!(apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &owner)).await.reason.starts_with(REASON_PROJECT_MOVED));
+    assert_eq!(git_out(&f.project, &["rev-parse", "HEAD"]), moved);
+    sh(&f.project, "git reset -q --hard HEAD^");
+
+    let branch = format!("eureka/plan-{}", &plan_hash[..8]);
+    sh(&f.project, &format!("git branch {branch}"));
+    assert!(apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &owner)).await.reason.starts_with(REASON_APPLY_CONFLICT));
+    assert_eq!(git_out(&f.project, &["rev-parse", &branch]), base, "the existing branch was changed");
+    let out = status(&f, &run_id, 0, REQUESTER).await;
+    let out = out.output.as_object().unwrap();
+    assert!(out["status"].is_str(DIFF_READY) && out["detail"].as_str().unwrap().starts_with(REASON_APPLY_CONFLICT));
+    project_untouched(&f);
+}
+
+#[tokio::test]
+async fn a_copy_changed_after_its_diff_was_checked_is_not_applied() {
+    let f = fixture(&[INIT, EDIT_APP, RESULT].join("\n"), 20);
+    let (run_id, plan_hash, diff_hash, base) = ready(&f).await;
+    let copy = f.root.join("seat/claude-code/runs").join(&run_id).join("repo");
+    sh(&copy, "echo sneaky >> src/app.js && git --git-dir=../git --work-tree=. add src/app.js");
+    let result = apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &key(b"owner"))).await;
+    assert!(result.reason.starts_with("plan_mismatch"), "{}", result.reason);
+    assert!(git_out(&f.project, &["branch", "--list", "eureka/*"]).is_empty());
+}
+
+#[tokio::test]
+async fn a_discarded_diff_is_gone_and_can_not_be_applied() {
+    let f = fixture(&[INIT, EDIT_APP, RESULT].join("\n"), 20);
+    let (run_id, plan_hash, diff_hash, base) = ready(&f).await;
+    let discard = |requester: &'static str| {
+        let query = pyjson::loads_str(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap();
+        let runner = f.runner.clone();
+        async move { runner.handle(PLAN_DISCARD, query, requester, SEAT).await }
+    };
+    assert_eq!(discard("node_ffffffff").await.reason, REASON_UNKNOWN_RUN);
+    assert_eq!(discard(REQUESTER).await.status, crate::handlers::STATUS_COMPLETED);
+    assert!(!f.root.join("seat/claude-code/runs").join(&run_id).exists());
+    assert!(status(&f, &run_id, 0, REQUESTER).await.output.as_object().unwrap()["status"].is_str(DISCARDED));
+    assert!(discard(REQUESTER).await.reason.starts_with(REASON_NOT_READY));
+    assert!(apply(&f, apply_payload(&run_id, &plan_hash, &diff_hash, &base, &key(b"owner"))).await.reason.starts_with(REASON_NOT_READY));
+    project_untouched(&f);
+}
+
+#[tokio::test]
+async fn doctors_test_copy_has_no_git_folder_and_is_deleted() {
+    let f = fixture("", 20);
+    let home = f.root.join("seat/claude-code");
+    let commit = test_copy(&f.project, &home).await.unwrap();
+    assert_eq!(commit, git_out(&f.project, &["rev-parse", "HEAD"]));
+    assert_eq!(std::fs::read_dir(home.join("runs")).unwrap().count(), 0);
+    assert!(git_problem().is_none());
     project_untouched(&f);
 }
