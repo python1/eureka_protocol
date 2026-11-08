@@ -13,6 +13,7 @@ mod http;
 mod isotime;
 mod node;
 mod plan;
+mod plan_run;
 mod pyjson;
 mod seat;
 mod trust;
@@ -269,7 +270,7 @@ the file, and `trust add` will not bring it back.
 Restart the daemon afterwards: it reads the file at startup.";
 
 /// Every capability either build knows, so editing the file never rejects a grant the other build serves.
-const KNOWN_CAPABILITIES: [&str; 3] = ["room-turn", "inference", "web-retrieval"];
+const KNOWN_CAPABILITIES: [&str; 5] = ["room-turn", "inference", "web-retrieval", "plan-run", "plan-status"];
 
 fn trust_command(args: &[String]) -> ExitCode {
     let path = trust::resolve_trust_path();
@@ -285,7 +286,7 @@ fn trust_command(args: &[String]) -> ExitCode {
     match args {
         [verb, name, key, caps @ ..] if verb == "add" => {
             if let Some(unknown) = caps.iter().find(|c| !KNOWN_CAPABILITIES.contains(&c.trim())) {
-                return fail(&format!("unknown capability {unknown:?}; use room-turn, inference or web-retrieval"));
+                return fail(&format!("unknown capability {unknown:?}; use room-turn, inference, web-retrieval, plan-run or plan-status"));
             }
             if let Err(e) = list.add_peer(name, key, caps) {
                 return fail(&e);
@@ -343,7 +344,7 @@ and check that the fingerprint printed here is the one Knights Circle shows.
 ORIGIN defaults to https://knights-circle.vercel.app.
 
 Run this only at the seat's own computer: the daemon never accepts an approver
-over the network. Approved plans don't run yet; this release only pins the key.";
+over the network. Plans run only for a Claude Code seat with a project (see setup).";
 
 fn approver_command(args: &[String]) -> ExitCode {
     let (mut dir, mut origin, mut words) = (None, approval::DEFAULT_ORIGIN.to_string(), Vec::new());
@@ -476,7 +477,18 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let capabilities = registry.names();
+    let plans = match plan_run::from_environment(is_loopback_host(&arguments.host)) {
+        Ok(plans) => plans.map(Arc::new),
+        Err(e) => {
+            eprintln!("eureka-daemon: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut capabilities = registry.names();
+    if plans.is_some() {
+        capabilities.extend(plan_run::CAPABILITIES.map(String::from));
+        capabilities.sort();
+    }
     let trust_path = trust::resolve_trust_path();
     let trust = match trust::TrustList::load_or_empty(&trust_path, &capabilities) {
         Ok((trust, warnings)) => {
@@ -519,9 +531,12 @@ async fn main() -> ExitCode {
     for line in registry.describe() {
         println!("  {line}");
     }
+    if let Some(plans) = &plans {
+        println!("  {}", plans.describe());
+    }
     println!("  trusted peers: {} ({} revoked) from {}", node.trust.len(), node.trust.revoked_count(), trust_path.display());
 
-    let app = Arc::new(http::App { node: Mutex::new(node), registry, cors_origins: arguments.cors_origins });
+    let app = Arc::new(http::App { node: Mutex::new(node), registry, plans, cors_origins: arguments.cors_origins });
 
     let shutdown = shutdown_requested();
     tokio::pin!(shutdown);

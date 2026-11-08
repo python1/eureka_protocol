@@ -199,7 +199,7 @@ pub fn inherited_env() -> Vec<(String, String)> {
     std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect()
 }
 
-fn names(value: Option<&Value>, key: Option<&str>) -> Option<Vec<String>> {
+pub(crate) fn names(value: Option<&Value>, key: Option<&str>) -> Option<Vec<String>> {
     let items = value?.as_array()?;
     Some(
         items
@@ -215,8 +215,25 @@ fn names(value: Option<&Value>, key: Option<&str>) -> Option<Vec<String>> {
 /// What makes a session more than chat, from its `system/init` event. Empty means chat only.
 /// `agents` lists subagent types even with no tools; with no Agent tool none can start, so it is not checked.
 pub fn init_problems(init: &pyjson::Map) -> Vec<String> {
+    init_problems_with_tools(init, &[])
+}
+
+/// The same check, for a session that must have exactly `tools` (an approved plan's file tools)
+/// and nothing else. A room turn's session has none.
+pub fn init_problems_with_tools(init: &pyjson::Map, tools: &[&str]) -> Vec<String> {
     let mut problems = Vec::new();
-    for (field, what) in [("tools", "tools"), ("skills", "skills"), ("slash_commands", "commands")] {
+    let mut wanted: Vec<&str> = tools.to_vec();
+    wanted.sort_unstable();
+    match names(init.get("tools"), None) {
+        None => problems.push("it did not list its tools".to_string()),
+        Some(mut found) => {
+            found.sort();
+            if found != wanted {
+                problems.push(format!("tools: {}", found.join(", ")));
+            }
+        }
+    }
+    for (field, what) in [("skills", "skills"), ("slash_commands", "commands")] {
         match names(init.get(field), None) {
             None => problems.push(format!("it did not list its {what}")),
             Some(found) if !found.is_empty() => problems.push(format!("{what}: {}", found.join(", "))),
@@ -255,7 +272,7 @@ pub fn init_problems(init: &pyjson::Map) -> Vec<String> {
     problems
 }
 
-fn event(line: &str) -> Option<pyjson::Map> {
+pub(crate) fn event(line: &str) -> Option<pyjson::Map> {
     if !line.trim_start().starts_with('{') {
         return None;
     }
@@ -265,7 +282,7 @@ fn event(line: &str) -> Option<pyjson::Map> {
     }
 }
 
-fn is_init(event: &pyjson::Map) -> bool {
+pub(crate) fn is_init(event: &pyjson::Map) -> bool {
     event.get("type").is_some_and(|t| t.is_str("system")) && event.get("subtype").is_some_and(|s| s.is_str("init"))
 }
 
@@ -297,7 +314,7 @@ fn failure(log: impl Into<String>, room: &'static str) -> Failure {
 
 /// The room's reason for a failed run, from the error category Claude Code gives (on the API error
 /// message or a retry event), or else from the result text.
-fn classify(category: Option<&str>, text: &str) -> &'static str {
+pub(crate) fn classify(category: Option<&str>, text: &str) -> &'static str {
     match category {
         Some("authentication_failed" | "oauth_org_not_allowed") => return REASON_NOT_LOGGED_IN,
         Some("rate_limit" | "billing_error") => return REASON_USAGE_LIMIT,

@@ -10,7 +10,6 @@
 //! apply, this run, diff and base commit); it is in its time window, at most 10 minutes long; and
 //! its id has never been used. The id is written to disk before anything runs, so a restart
 //! doesn't make an approval usable again. `vectors/plans-v1.json` is the shared contract.
-#![allow(dead_code)] // The runner (approved plans, PR 2) is the first caller outside the tests.
 
 use crate::crypto::{self, domain_separated_bytes, to_hex};
 use crate::pyjson::{self, object, Value};
@@ -39,7 +38,7 @@ const RUN_KEYS: [&str; 8] = ["approval_id", "expires_at", "issued_at", "kind", "
 const APPLY_KEYS: [&str; 3] = ["base_commit", "diff_hash", "run_id"];
 /// The DER SubjectPublicKeyInfo header of an uncompressed P-256 key, as a browser's
 /// `getPublicKey()` returns it: id-ecPublicKey, prime256v1, a 66-byte bit string.
-const P256_SPKI_PREFIX: [u8; 26] = [
+pub(crate) const P256_SPKI_PREFIX: [u8; 26] = [
     0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01,
     0x07, 0x03, 0x42, 0x00,
 ];

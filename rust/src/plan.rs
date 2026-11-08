@@ -8,7 +8,6 @@
 //! whether it is well formed and which files it names. Its `edit` patterns are relative paths
 //! inside the seat's project, and the ones that could reach outside it, or into git's own
 //! files, are refused.
-#![allow(dead_code)] // The runner (approved plans, PR 2) is the first caller outside the tests.
 
 use crate::crypto::{domain_separated_bytes, to_hex};
 use crate::pyjson::{canonical, py_len, Value};
@@ -30,6 +29,7 @@ pub const MAX_PLAN_CHARS: usize = 8000;
 /// A well-formed plan, with its hash.
 #[derive(Clone, Debug)]
 pub struct Plan {
+    #[allow(dead_code)] // Kept with the plan it checked; the tests and the apply step read it.
     pub value: Value,
     pub title: String,
     pub project: String,
@@ -65,7 +65,7 @@ pub fn plan_hash(value: &Value) -> String {
 /// Characters a plan may never hold: control characters (C0, DEL, C1), line and paragraph
 /// separators, and the bidirectional controls that can make text read differently from what it
 /// is. What the owner reads must be what was hashed.
-fn hidden_char(c: char) -> bool {
+pub fn hidden_char(c: char) -> bool {
     c.is_control() || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
@@ -102,7 +102,7 @@ pub fn valid_project_name(name: &str) -> bool {
 
 /// Path segments a plan may not name in any letter case: git's own folder, and the files that
 /// let a checkout run filters or fetch other repositories.
-const GIT_NAMES: [&str; 3] = [".git", ".gitattributes", ".gitmodules"];
+pub const GIT_NAMES: [&str; 3] = [".git", ".gitattributes", ".gitmodules"];
 
 /// One `edit` entry: a relative path inside the project, `/`-separated, in which `*` and `?`
 /// match within one segment and a `**` segment matches any number of segments. ASCII only.
@@ -216,6 +216,7 @@ impl Plan {
     }
 
     /// Check a plan from its JSON text (the body of the `eureka-plan` block).
+    #[cfg_attr(not(test), allow(dead_code))] // Plans arrive parsed; the shared vectors use the text.
     pub fn parse(json: &str) -> Result<Plan, PlanError> {
         match crate::pyjson::loads_str(json) {
             Ok(value) => Plan::from_value(&value),
