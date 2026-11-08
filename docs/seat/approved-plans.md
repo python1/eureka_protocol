@@ -61,6 +61,16 @@ keep secrets in a project you use with approved plans.
 (default 600). Approved plans are offered only on this computer's loopback address, and not in
 the native Windows build. Use WSL there.
 
+### No Touch ID? Other ways to approve
+
+The seat accepts only approvals where the passkey verified you, with a PIN, a password or a fingerprint. Touch ID does that. If your computer has no Touch ID, or the passkey prompt fails, you can use:
+
+- **This device's PIN or password:** Windows Hello, or your Mac's login password if Touch ID isn't set up.
+- **Your phone:** in the passkey prompt choose *Use a phone or tablet* (or *Other options*), scan the QR code with the phone and approve there. Bluetooth must be on for both. The passkey then lives on the phone, which you use for every approval.
+- **A security key**, such as a YubiKey, with a PIN set. A key without a PIN can't verify you, so the seat refuses its approvals (`bad_approval`).
+
+Whichever you choose, pin that passkey with `approver add` as above. A browser without passkey support can't approve plans: use a current Chrome, Edge, Safari or Firefox.
+
 ## A plan, start to finish
 
 1. **The plan.** The Lead posts an `eureka-plan` block:
