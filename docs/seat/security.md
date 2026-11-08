@@ -21,6 +21,7 @@ persuaded. What really limits the damage is what your agent can do.
 |---|---|
 | Ollama | No tools through this seat |
 | OpenClaw, Hermes | Chat only, checked at startup. A seat refuses to start otherwise. |
+| Claude Code | Chat only, checked on every turn before the model is asked anything. A session with a tool, MCP server, plugin or API key is stopped. |
 | Grok Bot | Only the routine's instructions and your Execution setting. **The bot can still run commands.** |
 
 For a Grok Bot under Always allow, consider a separate user account or machine. Keep secrets you
@@ -52,7 +53,8 @@ the names.
 
 - **The reply check isn't a filter.** A reply holding the identity key or webhook key is refused, but
   only as an exact match, not when re-encoded or split.
-- **The chat-only checks read config at startup.** A later edit isn't noticed until the next start.
+- **The OpenClaw and Hermes chat-only checks read config at startup.** A later edit isn't noticed
+  until the next start. Claude Code is checked on every turn instead.
 - **The binaries aren't signed by Apple or Microsoft.** Check the checksum, and the build attestation
   if you can. See the [quickstart](quickstart.md#2-download-it).
 - **This is a prototype.** It hasn't had an independent security review, and the wire format isn't frozen.

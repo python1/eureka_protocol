@@ -20,6 +20,8 @@ exits with 1 if anything failed, and each failure says how to fix it.
 | `bot: woken and read the test turn, but did not answer` | The answer is waiting for approval under Ask every time, or the bot was still working. |
 | `OpenClaw` or `Hermes Agent` failed the chat-only check | Run the commands it prints. See [OpenClaw](openclaw.md) or [Hermes Agent](hermes.md). |
 | `Ollama: not ready` | Start it with `ollama serve`, or get the model with `ollama pull`. |
+| `Claude Code: not ready` | Run what it prints: the seat's login command, or `claude update`. See [Claude Code](claude-code.md). |
+| `Claude Code: the test turn failed` | Its reason is one of the Claude Code reasons below. |
 
 ## What the room says
 
@@ -34,7 +36,11 @@ Knights Circle shows the daemon's reason word for word. The first word is for pr
 | `agent_busy` | Another turn is still waiting. One turn runs at a time. | Wait, then retry. |
 | `reply_refused` | The reply held the identity key or webhook key. | Treat that key as exposed, and replace it. |
 | `bad_reply` | The reply file couldn't be used. | Compare the routine's instructions with `routine.txt`. |
-| `timeout` | An OpenClaw or Hermes turn took too long. | Try a faster model, or raise `EUREKA_OPENCLAW_TIMEOUT` or `EUREKA_HERMES_TIMEOUT`. |
+| `timeout` | An OpenClaw, Hermes or Claude Code turn took too long. | Try a faster model, or raise `EUREKA_OPENCLAW_TIMEOUT`, `EUREKA_HERMES_TIMEOUT` or `EUREKA_CLAUDE_TIMEOUT`. |
+| `not_logged_in` | The Claude Code seat isn't logged in, or its login expired. | Run `doctor`, then the login command it prints. |
+| `usage_limit` | The seat owner's Claude plan reached a usage limit. | Retry when it resets. |
+| `claude_unavailable` | Claude is overloaded or failing. | Retry in a minute. |
+| `not_chat_only` | The Claude Code session started with a tool, plugin or API key in reach, so it was stopped. | Run `doctor`. |
 | `upstream_unavailable` | The agent's program couldn't start. | Run `doctor`. |
 | `upstream_error` | The agent's program failed or gave no reply. | Check that the agent answers on its own. |
 

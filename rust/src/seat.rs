@@ -45,7 +45,8 @@ A seat is one agent's own folder: EUREKA_SEAT_DIR, or --dir, default ~/.eureka/s
   start   runs the daemon in the background, from the seat
   stop    stops that daemon
   doctor  checks the seat and says how to fix what is wrong. --wake also wakes a
-          Grok Bot to see if it answers, which uses one routine run";
+          Grok Bot to see if it answers, which uses one routine run, or runs one
+          test turn through Claude Code, which uses a little of your Claude plan";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Backend {
@@ -53,6 +54,7 @@ enum Backend {
     OpenClaw,
     Hermes,
     Ollama,
+    ClaudeCode,
 }
 
 impl Backend {
@@ -62,11 +64,20 @@ impl Backend {
             Backend::OpenClaw => "openclaw",
             Backend::Hermes => "hermes",
             Backend::Ollama => "ollama",
+            Backend::ClaudeCode => "claude-code",
         }
     }
 
     fn from_id(id: &str) -> Option<Backend> {
-        [Backend::GrokBot, Backend::OpenClaw, Backend::Hermes, Backend::Ollama].into_iter().find(|b| b.id() == id)
+        [Backend::GrokBot, Backend::OpenClaw, Backend::Hermes, Backend::Ollama, Backend::ClaudeCode].into_iter().find(|b| b.id() == id)
+    }
+
+    /// The seat name setup suggests: how the agent is known in the room.
+    fn default_name(self) -> &'static str {
+        match self {
+            Backend::ClaudeCode => crate::claude_code::DEFAULT_NAME,
+            _ => DEFAULT_NAME,
+        }
     }
 
     fn title(self) -> &'static str {
@@ -75,6 +86,7 @@ impl Backend {
             Backend::OpenClaw => "OpenClaw",
             Backend::Hermes => "Hermes Agent",
             Backend::Ollama => "Ollama",
+            Backend::ClaudeCode => "Claude Code",
         }
     }
 
@@ -92,7 +104,7 @@ struct Seat {
     backend: Backend,
     name: String,
     port: u16,
-    /// The OpenClaw or Hermes executable, found at setup.
+    /// The OpenClaw, Hermes or Claude Code executable, found at setup.
     program: Option<String>,
     /// The OpenClaw agent, Hermes profile or Ollama model.
     setting: Option<String>,
@@ -121,6 +133,10 @@ fn log_path(dir: &Path) -> PathBuf {
 }
 fn routine_path(dir: &Path) -> PathBuf {
     dir.join("routine.txt")
+}
+/// The seat's own Claude Code folder: its configuration (and login) in `config/`, and `room/`, where turns run.
+fn claude_home(dir: &Path) -> PathBuf {
+    dir.join("claude-code")
 }
 
 impl Seat {
@@ -347,7 +363,8 @@ fn backend_choice(raw: &str) -> Result<Backend, String> {
         "2" | "openclaw" => Ok(Backend::OpenClaw),
         "3" | "hermes" => Ok(Backend::Hermes),
         "4" | "ollama" => Ok(Backend::Ollama),
-        _ => Err("Type 1, 2, 3 or 4.".into()),
+        "5" | "claude" | "claude code" | "claude-code" => Ok(Backend::ClaudeCode),
+        _ => Err("Type 1, 2, 3, 4 or 5.".into()),
     }
 }
 
@@ -557,6 +574,30 @@ fn setup_agent_cli(seat: &mut Seat) -> Result<(), String> {
     Ok(())
 }
 
+/// What someone choosing Claude Code needs to know: whose account it uses, and what it can do.
+const CLAUDE_CODE_GUIDANCE: &str = "
+Claude Code takes the seat with your own Claude subscription (Pro or Max), on this computer.
+  It runs chat only: no tools, files, web, MCP servers, plugins or hooks, checked on every turn.
+  It has a login and settings of its own in this seat's folder, apart from your own Claude Code.
+  Each room turn uses your Claude plan's usage. It is for your own seat only: don't share the
+  seat's folder or its login. See Anthropic's terms: https://www.anthropic.com/legal/consumer-terms
+  and https://code.claude.com/docs/en/legal-and-compliance
+";
+
+fn setup_claude_code(seat: &mut Seat) -> Result<(), String> {
+    handlers::refuse_on_native_windows(seat.backend.daemon_backend())?;
+    let env = crate::claude_code::BIN_ENV;
+    let wanted = std::env::var(env).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "claude".to_string());
+    let program = handlers::find_program(wanted.trim()).ok_or_else(|| {
+        format!("cannot find {:?}. Install Claude Code (https://code.claude.com/docs/en/setup), or set {env} to its path, and run setup again.", wanted.trim())
+    })?;
+    seat.program = Some(std::path::absolute(&program).unwrap_or(program).display().to_string());
+    let home = claude_home(&seat.dir);
+    crate::claude_code::prepare_home(&home)?;
+    println!("  Claude Code's folder for this seat: {}", home.display());
+    Ok(())
+}
+
 fn setup_ollama(seat: &mut Seat) -> Result<(), String> {
     seat.setting = Some(ask("Ollama model", handlers::DEFAULT_ROOM_MODEL)?);
     Ok(())
@@ -569,6 +610,7 @@ fn backend_problem(seat: &Seat) -> Option<String> {
         Backend::OpenClaw => handlers::openclaw_lockdown_problem(Path::new(seat.program.as_deref()?), seat.setting.as_deref()),
         Backend::Hermes => handlers::check_hermes_seat(Path::new(seat.program.as_deref()?), seat.setting.as_deref()?).err(),
         Backend::Ollama => ollama_problem(seat.setting.as_deref()?),
+        Backend::ClaudeCode => crate::claude_code::check_seat(Path::new(seat.program.as_deref()?), &claude_home(&seat.dir)).err(),
     }
 }
 
@@ -600,12 +642,19 @@ fn setup(dir: PathBuf) -> Result<(), String> {
             return Ok(());
         }
     }
-    println!("Which agent sits in this seat?\n  1. Grok Bot, woken by a webhook\n  2. OpenClaw\n  3. Hermes Agent\n  4. Ollama, a local model with no tools\n");
-    let backend = ask_until(|| ask("Choose 1 to 4", "1"), backend_choice)?;
+    println!("Which agent sits in this seat?\n  1. Grok Bot, woken by a webhook\n  2. OpenClaw\n  3. Hermes Agent\n  4. Ollama, a local model with no tools\n  5. Claude Code, with your own Claude subscription, chat only\n");
+    let backend = ask_until(|| ask("Choose 1 to 5", "1"), backend_choice)?;
     if backend == Backend::GrokBot {
         print_grok_bot_guidance();
     }
-    let default_name = existing.as_ref().map_or(DEFAULT_NAME, |seat| seat.name.as_str());
+    if backend == Backend::ClaudeCode {
+        println!("{CLAUDE_CODE_GUIDANCE}");
+    }
+    // A name the user chose is kept; the old agent's default name gives way to the new one's.
+    let default_name = match &existing {
+        Some(seat) if seat.backend == backend || seat.name != seat.backend.default_name() => seat.name.as_str(),
+        _ => backend.default_name(),
+    };
     let name = ask_until(|| ask("Seat name, which is how the agent is known in the room", default_name), clean_name)?;
     let kept_port = existing.as_ref().map(|seat| seat.port).into_iter();
     let suggested = kept_port.chain(FIRST_PORT..FIRST_PORT + 100).find(|p| port_state(*p, None) == PortState::Free).unwrap_or(FIRST_PORT);
@@ -642,6 +691,7 @@ fn setup(dir: PathBuf) -> Result<(), String> {
         Backend::GrokBot => setup_grok_bot(&seat)?,
         Backend::OpenClaw | Backend::Hermes => setup_agent_cli(&mut seat)?,
         Backend::Ollama => setup_ollama(&mut seat)?,
+        Backend::ClaudeCode => setup_claude_code(&mut seat)?,
     }
     seat.save()?;
     if let Some(problem) = backend_problem(&seat) {
@@ -694,6 +744,13 @@ fn daemon_command(seat: &Seat) -> Result<Command, String> {
         }
         Backend::Ollama => {
             command.env(handlers::MODEL_ENV, setting);
+        }
+        // EUREKA_CLAUDE_MODEL and EUREKA_CLAUDE_TIMEOUT, when set where `start` runs, pass through.
+        Backend::ClaudeCode => {
+            command
+                .env(crate::claude_code::BIN_ENV, program)
+                .env(crate::claude_code::HOME_ENV, claude_home(&seat.dir))
+                .env(crate::claude_code::NAME_ENV, &seat.name);
         }
     }
     detach(&mut command);
@@ -1001,6 +1058,55 @@ async fn check_bot_answers(seat: &Seat, hook: &Webhook, report: &mut Report) {
     }
 }
 
+/// The seat's Claude Code: found, recent enough, logged in with a subscription in the seat's own
+/// folder, and (on request) one real test turn that must start chat only and answer.
+async fn check_claude_code(seat: &Seat, wake: bool, report: &mut Report) -> Result<(), String> {
+    use crate::claude_code as cc;
+    let home = claude_home(&seat.dir);
+    let Some(program) = seat.program.as_deref() else {
+        report.fail("Claude Code: the seat does not say where claude is", "Run setup again.");
+        return Ok(());
+    };
+    match cc::check_seat(Path::new(program), &home) {
+        Ok(found) => report.ok(&format!("Claude Code: {found}, configuration in {}", cc::config_dir(&home).display())),
+        Err(problem) => {
+            report.fail("Claude Code: not ready, so the seat will not start", &problem);
+            return Ok(());
+        }
+    }
+    for name in cc::dropped_credentials() {
+        report.note(&format!("Claude Code: {name} is set here; room turns never pass it on, so they always use the seat's own login"));
+    }
+    for influence in cc::outside_influences(&home) {
+        report.note(&format!("Claude Code: {influence}"));
+    }
+    let terminal = std::io::stdin().is_terminal();
+    let wake = wake || (terminal && ask_yes_no("        Run one test turn through Claude Code? This uses a little of your Claude plan's usage.", false)?);
+    if !wake {
+        report.note(&format!("Claude Code: no test turn run, since that uses your plan. To run one: {} doctor{} --wake", program_shown(), dir_flag(&seat.dir)));
+        return Ok(());
+    }
+    let test = cc::ClaudeSeat {
+        program: PathBuf::from(program),
+        home,
+        name: seat.name.clone(),
+        model: std::env::var(cc::MODEL_ENV).ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty() && cc::valid_model(m)),
+        timeout: Duration::from_secs(cc::DEFAULT_TIMEOUT_SECONDS),
+    };
+    println!("        Running one test turn, for up to {} seconds...", test.timeout.as_secs());
+    let started = Instant::now();
+    let result = handlers::claude_test_turn(&test).await;
+    let seconds = started.elapsed().as_secs();
+    if result.status == handlers::STATUS_COMPLETED {
+        let text = result.output.as_object().and_then(|o| o.get("text")).and_then(Value::as_str).unwrap_or("");
+        let shown: String = text.chars().take(80).collect();
+        report.ok(&format!("Claude Code: the test turn started chat only and answered in {seconds} seconds: {shown:?}"));
+    } else {
+        report.fail(&format!("Claude Code: the test turn failed after {seconds} seconds: {}", result.reason), "The daemon's lines above say more.");
+    }
+    Ok(())
+}
+
 async fn doctor(dir: PathBuf, wake: bool) -> Result<bool, String> {
     let seat = Seat::load(&dir)?;
     println!("Checking the seat {:?} ({}) in {}", seat.name, seat.backend.title(), dir.display());
@@ -1029,6 +1135,7 @@ async fn doctor(dir: PathBuf, wake: bool) -> Result<bool, String> {
             None => report.ok(&format!("Ollama: answering, and it has the model {what:?}")),
             Some(problem) => report.fail("Ollama: not ready", &problem),
         },
+        Backend::ClaudeCode => check_claude_code(&seat, wake, &mut report).await?,
     }
     if seat.backend == Backend::Hermes {
         if let (Some(program), Some(profile)) = (&seat.program, &seat.setting) {
@@ -1114,6 +1221,12 @@ mod tests {
     fn backends_are_chosen_by_number_or_name() {
         assert!(backend_choice("1") == Ok(Backend::GrokBot));
         assert!(backend_choice(" Hermes ") == Ok(Backend::Hermes));
-        assert!(backend_choice("5").is_err());
+        assert!(backend_choice("5") == Ok(Backend::ClaudeCode));
+        assert!(backend_choice("Claude Code") == Ok(Backend::ClaudeCode));
+        assert!(backend_choice("6").is_err());
+        assert_eq!(Backend::ClaudeCode.default_name(), "Claude");
+        assert_eq!(Backend::Hermes.default_name(), "Bot");
+        assert!(Backend::from_id("claude-code") == Some(Backend::ClaudeCode));
+        assert_eq!(Backend::ClaudeCode.daemon_backend(), "claude-code");
     }
 }

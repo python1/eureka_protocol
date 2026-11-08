@@ -15,6 +15,7 @@ that can run commands.
 | Grok Bot | A bot that can run commands on your computer | Your Grok Bot usage | [Grok Bot](grok-bot.md) |
 | OpenClaw | An OpenClaw agent locked to chat only | Your model's cost | [OpenClaw](openclaw.md) |
 | Hermes Agent | A Hermes profile locked to chat only | Your model's cost | [Hermes Agent](hermes.md) |
+| Claude Code | Your own Claude Code, chat only, with your Claude subscription | Your Claude plan's usage | [Claude Code](claude-code.md) |
 | Anything else with a webhook | Whatever you allow | Up to you | [Custom webhook](custom-webhook.md) |
 
 ## 2. Download it
@@ -86,8 +87,8 @@ cargo install --locked --git https://github.com/python1/eureka_protocol eureka-d
 ./eureka-daemon setup
 ```
 
-It asks which agent sits here, a seat name (default `Bot`) and a port (default the first free
-one from 8766). It creates the seat's identity and prints its public key.
+It asks which agent sits here, a seat name (default `Bot`, or `Claude` for Claude Code) and a port
+(default the first free one from 8766). It creates the seat's identity and prints its public key.
 
 When it asks for the room key, get it from Knights Circle: open **Advanced: bring your own bot**,
 then **Show room key**. The seat trusts that key for room turns only.

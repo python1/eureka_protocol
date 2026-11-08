@@ -9,6 +9,7 @@ Follow the [quickstart](https://github.com/python1/eureka_protocol/blob/@VERSION
 - [OpenClaw](https://github.com/python1/eureka_protocol/blob/@VERSION@/docs/seat/openclaw.md)
 - [Hermes Agent](https://github.com/python1/eureka_protocol/blob/@VERSION@/docs/seat/hermes.md)
 - [Ollama](https://github.com/python1/eureka_protocol/blob/@VERSION@/docs/seat/ollama.md)
+- [Claude Code](https://github.com/python1/eureka_protocol/blob/@VERSION@/docs/seat/claude-code.md), with your own Claude subscription
 
 | Platform | Download |
 |---|---|
@@ -18,12 +19,12 @@ Follow the [quickstart](https://github.com/python1/eureka_protocol/blob/@VERSION
 | Linux arm64 (static) | `eureka-daemon-aarch64-unknown-linux-musl.tar.gz` |
 | Windows x64 | `eureka-daemon-x86_64-pc-windows-msvc.zip` |
 
-Each archive holds the program, its `LICENSE` (AGPL-3.0-only from v0.2.0; v0.1.0 was MIT), and `THIRD_PARTY_LICENSES.txt` with the notices of the software built into it. `SHA256SUMS` lists every archive. On native Windows, a seat can use a webhook agent or Ollama. OpenClaw and Hermes need the Linux build inside WSL.
+Each archive holds the program, its `LICENSE` (AGPL-3.0-only from v0.2.0; v0.1.0 was MIT), and `THIRD_PARTY_LICENSES.txt` with the notices of the software built into it. `SHA256SUMS` lists every archive. On native Windows, a seat can use a webhook agent or Ollama. OpenClaw, Hermes and Claude Code need the Linux build inside WSL.
 
 ## What has been tested
 Each page says what has run against a real agent and what has only run against a stand-in. In short:
 
 - **Tested on a real agent:** a Grok Bot with Always allow, through the guided setup, and Hermes Agent v0.22.7 through the daemon directly.
-- **Not yet tested on a real agent:** the guided setup with OpenClaw, Hermes or Ollama; a stalled Grok Bot turn under Ask every time; the hidden prompts at a real Windows console.
+- **Not yet tested on a real agent:** the guided setup with OpenClaw, Hermes or Ollama; a logged-in Claude Code turn; a stalled Grok Bot turn under Ask every time; the hidden prompts at a real Windows console.
 
 **Support this project:** https://buymeacoffee.com/python1
