@@ -513,6 +513,9 @@ impl PlanRunner {
         };
         report.summary = clean_text(result.get("result").and_then(Value::as_str).unwrap_or(""), SUMMARY_CHARS);
         report.denials = denials(&result, &work);
+        for call in denied_calls_for_log(&result, &work) {
+            println!("[PLAN] run {run_id}: Claude Code denied {call}");
+        }
         let is_error = !matches!(result.get("is_error"), Some(Value::Bool(false)));
         let subtype = result.get("subtype").and_then(Value::as_str).unwrap_or("?").to_string();
         if subtype == "error_max_turns" {
@@ -586,6 +589,10 @@ impl PlanRunner {
                         Seen::Nothing => {}
                         Seen::Progress(text) => self.progress(run_id, text),
                         Seen::Stop(status, why) => return Err((status, why)),
+                        Seen::Refused(call, why) => {
+                            println!("[PLAN] run {run_id}: refused {call} ({why})");
+                            return Err((OUTSIDE_PLAN, why));
+                        }
                     }
                 }
                 if scanned > 0 {
@@ -882,6 +889,8 @@ enum Seen {
     Nothing,
     Progress(String),
     Stop(&'static str, String),
+    /// A tool call the daemon refused: the call as the seat's log shows it, and why.
+    Refused(String, String),
 }
 
 /// A path the session named, relative to the copy, if it is inside it: absolute, with no `.` or
@@ -946,7 +955,7 @@ impl Watch {
                 for block in blocks.iter().filter_map(Value::as_object).filter(|b| b.get("type").is_some_and(|t| t.is_str("tool_use"))) {
                     match tool_call(block, plan, roots) {
                         Ok(text) => seen = Seen::Progress(text),
-                        Err(why) => return Seen::Stop(OUTSIDE_PLAN, why),
+                        Err(why) => return Seen::Refused(call_for_log(block.get("name"), block.get("input"), roots), why),
                     }
                 }
                 seen
@@ -984,6 +993,31 @@ fn tool_call(block: &Map, plan: &Plan, roots: &[PathBuf]) -> Result<String, Stri
         },
         other => Err(format!("it called {}, which a run doesn't have", shown(other))),
     }
+}
+
+/// How long a tool name or path may be in the seat's log.
+const LOG_FIELD_CHARS: usize = 300;
+
+/// One tool call for the seat's own log: the tool's name and the path it named, if any:
+/// relative to the copy when inside it, in full when outside (only the owner reads this log). Never the file contents,
+/// the edit or the command: only `file_path` or `path` is taken from the input. Hidden and
+/// control characters are dropped, so a name can't forge a log line.
+fn call_for_log(name: Option<&Value>, input: Option<&Value>, roots: &[PathBuf]) -> String {
+    let field = |text: &str| -> String { text.chars().filter(|&c| !hidden_char(c)).take(LOG_FIELD_CHARS).collect() };
+    let name = name.and_then(Value::as_str).map(field).filter(|n| !n.is_empty()).unwrap_or_else(|| "a tool".into());
+    let path = input.and_then(Value::as_object).and_then(|i| i.get("file_path").or(i.get("path"))).and_then(Value::as_str).map(|p| field(&relative(p, roots).unwrap_or_else(|| p.to_string())));
+    match path {
+        Some(path) if !path.is_empty() => format!("{name} {path}"),
+        _ => name,
+    }
+}
+
+/// The calls Claude Code itself refused, for the seat's log.
+fn denied_calls_for_log(result: &Map, work: &Path) -> Vec<String> {
+    let roots = [work.to_path_buf()];
+    result.get("permission_denials").and_then(Value::as_array).map(|list| {
+        list.iter().filter_map(Value::as_object).map(|d| call_for_log(d.get("tool_name"), d.get("tool_input"), &roots)).collect()
+    }).unwrap_or_default()
 }
 
 /// The calls Claude Code itself refused, as `tool path` lines.

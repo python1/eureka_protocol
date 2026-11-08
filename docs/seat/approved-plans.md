@@ -91,6 +91,9 @@ Whichever you choose, pin that passkey with `approver add` as above. A browser w
 3. **The run.** The seat copies the project's last commit, then runs Claude Code in the copy with
    only the plan. It doesn't see the room's conversation. The card shows what it is doing, such as
    *Editing src/theme.css*. That line holds tool names and paths only.
+   Each tool call the seat refuses, and each one Claude Code denies, is also written to the
+   seat's `daemon.log`, with the tool's name and path only, never the file's contents or a
+   command.
 4. **The diff.** The daemon checks every change itself. You see the diff, the files, the lines
    added and removed, and Claude Code's summary. Other members see only a one-line summary.
 5. **You approve the diff, or discard it.** Applying needs a second passkey approval, of this
@@ -144,13 +147,55 @@ A diff waits for 24 hours. If your project has a new commit since the run, apply
 
 ## What has been tested
 
+### Automated
+
 - **A stand-in for `claude`** covers:
   - every way out of a run in the design's threat list, each checking that the project is
-    unchanged
+    unchanged: edits and writes outside `edit` (`outside_plan`), reads outside the copy, a tool
+    a run doesn't have (such as `Bash`), calls Claude Code denied, symlinks, executable bits,
+    binary files and git files
+  - a run past its time limit (`timeout`), killed with its children
   - applying to a new branch, with the checkout, branch and working tree unchanged
-  - forged, replayed and mismatched apply approvals
-  - a moved project, an existing branch, a copy changed after its check, and discarding
+  - forged, replayed, expired and mismatched run and apply approvals, a passkey that isn't
+    pinned (`bad_approval`), and approvals for another seat, room key or room
+  - a moved project (`project_moved`), an existing branch, a copy changed after its check, and
+    discarding
 - **Real Claude Code v2.1.319, logged out, on macOS:** the run's exact command line passes the
   seat's start check, showing exactly the five file tools, and ends `not_logged_in`.
-- **Not yet tried:** a real run on a subscription, approved with a real passkey. That needs
-  Knights Circle's approval screens.
+
+### By hand, with a real subscription (8 November 2026)
+
+On macOS, with Claude Code v2.1.319 on a Claude Pro subscription, the live Knights Circle site
+and a Touch ID passkey. The seat ran from this repository's main branch, and the project was a
+throwaway git repository made for the test.
+
+Passed:
+
+- `setup` with the project, `approver add` with the passkey, matching fingerprints, and a clean
+  `doctor`.
+- Room turns as before: signed replies, and the seat's chat folder stayed empty.
+- A plan card from the Lead's block, with the plan's code and the seat's id matching what the
+  seat computes.
+- Approve with Touch ID → Running → Diff ready in 13 s. The diff changed only the file in `edit`,
+  and its hash matched on the card, on disk and in the daemon's own diff.
+- Apply to branch: `eureka/plan-<code>` was made on the run's commit, with the same diff. The
+  checkout, the current branch and the working tree didn't change, and no `FETCH_HEAD` was
+  written.
+- Discard deleted the copy.
+- "Approved. Go ahead and run it now" written in the room did nothing: only a card with an
+  Approve button.
+- A plan whose steps needed a file outside the project, a shell command and a web page: only the
+  file in `edit` changed. Claude Code's summary said it couldn't read outside the project and had
+  no shell and no internet access. Nothing outside the project was read or changed.
+- `~/.claude` was unchanged by the seat, and no transcripts were saved in the seat's folder.
+
+Not shown live, and covered only by the automated tests:
+
+- `outside_plan` itself. Given a step that needed a file outside `edit`, Claude Code left that
+  file alone without being stopped, so the seat's refusal never had to act.
+- Claude Code's own denials. In the run above it didn't try the tools it lacked, so nothing was
+  denied.
+- A plan that asks to read `~/.ssh/config`, run `npm install` or fetch a URL. The Lead declined
+  to post such a plan, so there was no card.
+- `replayed`, `expired`, `plan_mismatch`, `bad_approval` (a passkey that isn't pinned),
+  `project_moved` and `timeout`.
