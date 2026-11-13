@@ -183,7 +183,7 @@ A diff waits for 24 hours. If your project has a new commit since the run, apply
   - `plan-info`: no names unless sharing is on; then only names tracked at the last commit (not
     staged, uncommitted or git files, and no contents), capped at 300 names or 8 KB. Setup,
     `doctor`, and setup run again on a seat that already runs plans, in the release smoke test.
-    Not yet tried with a real room.
+    Tried with a real room on 13 November (below).
 - **Real Claude Code v2.1.319, logged out, on macOS:** the run's exact command line passes the
   seat's start check, showing exactly the five file tools, and ends `not_logged_in`.
 
@@ -223,3 +223,39 @@ Not shown live, and covered only by the automated tests:
   to post such a plan, so there was no card.
 - `replayed`, `expired`, `plan_mismatch`, `bad_approval` (a passkey that isn't pinned),
   `project_moved` and `timeout`.
+
+### By hand: file names for the Lead (13 November 2026)
+
+On macOS, with Claude Code v2.1.323 on a Claude Pro subscription, the live Knights Circle site
+(with `plan-info`, the Lead's full transcript and replaced plan cards) and the same Touch ID
+passkey. The seat ran from this repository's main branch, on the same throwaway project. A Grok
+Bot seat was the Critic.
+
+Passed:
+
+- `setup` run again on the seat that already ran plans, answering yes to sharing file names. No
+  trust error. Its identity, passkey and trusted room were kept, and `plan-info` was granted.
+  `doctor` was clean and said the Lead may see 5 file names. `start` offered `plan-info`.
+- **An ordinary objective gave a plan card by itself,** on the Lead's first turn, with real paths
+  from the seat's list in `edit`: `index.html`, `src/app.js`, `src/theme.css` and `README.md`.
+  Nobody typed a file list. Before the approval, Knights Circle asked the seat only `plan-info`,
+  never `plan-run`.
+- The Lead got the full transcript by default.
+- Approve with Touch ID → Diff ready in 30 s: 4 files, +125 −1. The diff's hash matched on the
+  card and on the branch. Apply put it on `eureka/plan-<code>`, on the project's last commit,
+  with the checkout and working tree unchanged and no `FETCH_HEAD`.
+- Decisions the Lead wrote after posting the card weren't carried out: the seat runs only the
+  plan on the card, as designed.
+- The seat's chat folder stayed empty, no transcripts were saved, and `~/.claude` was unchanged
+  by the seat.
+
+Noticed: Claude Code now copies the account's skills into the seat's own configuration folder.
+Every session still started with no skills loaded, which the seat checks on each session's first
+line, so they were never used.
+
+Not shown live:
+
+- **Replaced by a newer plan.** The Lead posted one plan and didn't repost it, so no card was
+  replaced. Covered by the automated tests and a check in a headless browser.
+- **Sharing off.** "Ask the owner which files to change" was shown only against a real daemon in
+  a headless browser, not with a real Lead.
