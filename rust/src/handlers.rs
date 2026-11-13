@@ -201,6 +201,7 @@ pub enum Handler {
     OpenClawRoomTurn { program: PathBuf, agent: Option<String>, session: String, timeout: Duration },
     HermesRoomTurn { program: PathBuf, profile: String, session: Option<String>, timeout: Duration },
     ClaudeRoomTurn(ClaudeSeat),
+    CodexRoomTurn(crate::codex::CodexSeat),
     QueueRoomTurn(QueueBackend),
     Inference { endpoint: Endpoint, model: String },
 }
@@ -244,6 +245,7 @@ impl Registry {
                     };
                     format!("{name} via Hermes Agent ({} -p {profile} chat, {session}, {}s limit)", program.display(), timeout.as_secs())
                 }
+                Handler::CodexRoomTurn(_) => format!("{name} via Codex CLI (ephemeral room turn)"),
                 Handler::ClaudeRoomTurn(seat) => format!(
                     "{name} via Claude Code ({}, chat only, as {:?}, configuration {}, {}{}s limit)",
                     seat.program.display(),
@@ -303,7 +305,7 @@ fn switch(name: &str) -> Result<bool, String> {
 /// 48,000 characters and OpenClaw takes it as an argument, past Windows' 32,767-character command line;
 /// npm installs these tools as `.cmd` wrappers, where arguments pass through cmd.exe's parsing; and
 /// process groups, which clean up after a turn, do not exist there. The Linux build under WSL has none of these limits.
-pub const NATIVE_WINDOWS_CLI_BACKENDS: [&str; 3] = ["openclaw", "hermes", "claude-code"];
+pub const NATIVE_WINDOWS_CLI_BACKENDS: [&str; 4] = ["openclaw", "hermes", "claude-code", "codex"];
 
 pub fn refuse_on_native_windows(backend: &str) -> Result<(), String> {
     if cfg!(windows) && NATIVE_WINDOWS_CLI_BACKENDS.contains(&backend) {
@@ -756,6 +758,13 @@ pub fn registry_from_environment() -> Result<Registry, String> {
                 warn_about_hermes_run_budget(&program, &profile, timeout);
                 (Handler::HermesRoomTurn { program, profile, session, timeout: Duration::from_secs(timeout) }, timeout as f64 + 30.0)
             }
+            "codex" => {
+                let program = std::env::var_os(crate::codex::BIN).ok_or("Codex executable missing; run seat setup")?;
+                let home = std::env::var_os(crate::codex::HOME).ok_or("Codex seat home missing; run seat setup")?;
+                let seat = crate::codex::CodexSeat::new(Path::new(&program), Path::new(&home))?;
+                seat.check_login()?;
+                (Handler::CodexRoomTurn(seat), crate::codex::TIMEOUT_SECS as f64)
+            }
             "claude-code" => {
                 let seat = claude_code::seat_from_environment()?;
                 let found = claude_code::check_seat(&seat.program, &seat.home)?;
@@ -787,7 +796,7 @@ pub fn registry_from_environment() -> Result<Registry, String> {
                     deadline,
                 )
             }
-            other => return Err(format!("{BACKEND_ENV}={other:?}: use ollama, openclaw, hermes, claude-code, webhook or queue")),
+            other => return Err(format!("{BACKEND_ENV}={other:?}: use ollama, openclaw, hermes, codex, claude-code, webhook or queue")),
         };
         handlers.push((ROOM_TURN.to_string(), Arc::new(handler), deadline));
     }
@@ -911,6 +920,11 @@ impl Handler {
                     return failed(REASON_TOO_LONG);
                 }
                 run_agent_cli("hermes", program, &hermes_args(profile, session.as_deref()), Some(agent_message(&messages, &crate::crypto::token_hex16())), *timeout, hermes_reply).await
+            }
+            Handler::CodexRoomTurn(seat) => {
+                let Some(messages) = room_messages(&payload) else { return failed(REASON_INVALID_PAYLOAD) };
+                if messages.iter().map(|(_, c)| py_len(c)).sum::<usize>() > MAX_TOTAL_CHARS { return failed(REASON_TOO_LONG); }
+                run_codex(seat, agent_message(&messages, &crate::crypto::token_hex16())).await
             }
             Handler::ClaudeRoomTurn(seat) => {
                 let Some(messages) = room_messages(&payload) else { return failed(REASON_INVALID_PAYLOAD) };
@@ -1518,6 +1532,44 @@ fn agent_completed(label: &str, reply: AgentReply) -> HandlerResult {
         ("done_reason", reply.stop_reason.map(Value::str).unwrap_or(Value::Null)),
         ("eval_count", reply.output_tokens.unwrap_or(Value::Null)),
     ]))
+}
+
+pub async fn run_codex(seat: &crate::codex::CodexSeat, message: String) -> HandlerResult {
+    let timeout = Duration::from_secs(crate::codex::TIMEOUT_SECS);
+    let guarded = async {
+        if let Err(why) = seat.check_version() {
+            println!("[HANDLER] {why}");
+            return failed(REASON_UPSTREAM_ERROR);
+        }
+        let Ok(guard) = crate::codex_guard::Guard::bind().await else { return failed(REASON_UPSTREAM_ERROR) };
+        let mut env = seat.environment();
+        env.push(("EUREKA_CODEX_TURN_SECRET".into(), guard.secret.clone()));
+        let args = crate::codex::args(&guard.base);
+        let room = seat.home.join("room");
+        let run = run_cli(CliRun { label: "codex", program: &seat.program, args: &args, stdin: Some(message),
+            timeout, env: Some(env), cwd: Some(&room), gate: None });
+        tokio::pin!(run);
+        let output = tokio::select! {
+            output = &mut run => output,
+            result = guard.serve(&seat.home) => {
+                if let Err(why) = result {
+                    println!("[HANDLER] Codex: {why}");
+                    return failed(REASON_UPSTREAM_ERROR);
+                }
+                run.await
+            }
+        };
+        if !guard.admitted.load(std::sync::atomic::Ordering::Acquire) { return failed(REASON_UPSTREAM_ERROR); }
+        match output {
+            Ok(output) if output.status.is_some_and(|s| s.success()) => match crate::codex::reply(&output.out) {
+                Some(text) => agent_completed("codex", AgentReply { text, output_tokens: None, stop_reason: None }),
+                None => failed(REASON_UPSTREAM_ERROR),
+            },
+            Ok(_) => failed(REASON_UPSTREAM_ERROR),
+            Err(failure) => failure,
+        }
+    };
+    tokio::time::timeout(timeout, guarded).await.unwrap_or_else(|_| failed(REASON_TIMEOUT))
 }
 
 /// One room turn through an agent's CLI (OpenClaw, Hermes), run in its structured-output mode;

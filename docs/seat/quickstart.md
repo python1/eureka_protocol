@@ -16,6 +16,7 @@ that can run commands.
 | OpenClaw | An OpenClaw agent locked to chat only | Your model's cost | [OpenClaw](openclaw.md) |
 | Hermes Agent | A Hermes profile locked to chat only | Your model's cost | [Hermes Agent](hermes.md) |
 | Claude Code | Your own Claude Code, chat only, with your Claude subscription | Your Claude plan's usage | [Claude Code](claude-code.md), and optionally [approved plans](approved-plans.md) |
+| Codex CLI (review candidate) | One conversation turn in an isolated seat folder | Your ChatGPT plan usage | [Codex CLI](codex.md) |
 | Anything else with a webhook | Whatever you allow | Up to you | [Custom webhook](custom-webhook.md) |
 
 ## 2. Download it
