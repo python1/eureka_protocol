@@ -9,9 +9,6 @@ and then only as a new branch.
 This is an independent project. It isn't made, reviewed or endorsed by Anthropic. It runs the
 unmodified `claude` program, logged in with your own Claude subscription.
 
-> **Not finished yet.** The daemon side is complete. Knights Circle's plan card and passkey
-> approval screens come next, so you can't approve a plan from a room yet.
-
 ## Whose account, and the terms
 
 A plan runs on your computer, on your Claude account, as your own Claude Code session, and uses
@@ -212,11 +209,13 @@ Passed:
   file in `edit` changed. Claude Code's summary said it couldn't read outside the project and had
   no shell and no internet access. Nothing outside the project was read or changed.
 - `~/.claude` was unchanged by the seat, and no transcripts were saved in the seat's folder.
+- `outside_plan`, in a later run that day: Claude Code tried to write a file the plan didn't
+  list. The seat refused the call, logged it with the tool and path only, and stopped the run.
+  The card said Failed, nothing was kept, and the project was untouched. (In an earlier run,
+  given a step that needed a file outside `edit`, Claude Code had left that file alone by itself.)
 
 Not shown live, and covered only by the automated tests:
 
-- `outside_plan` itself. Given a step that needed a file outside `edit`, Claude Code left that
-  file alone without being stopped, so the seat's refusal never had to act.
 - Claude Code's own denials. In the run above it didn't try the tools it lacked, so nothing was
   denied.
 - A plan that asks to read `~/.ssh/config`, run `npm install` or fetch a URL. The Lead declined
