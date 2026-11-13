@@ -358,7 +358,7 @@ fn capability_switch(capability: &str) -> Option<&'static str> {
     match capability {
         "room-turn" => Some("EUREKA_ROOM_TURN=1"),
         "inference" => Some("EUREKA_INFERENCE=1"),
-        "plan-run" | "plan-status" => Some("EUREKA_PLAN_PROJECT=<project folder> with the Claude Code backend"),
+        "plan-apply" | "plan-discard" | "plan-info" | "plan-run" | "plan-status" => Some("EUREKA_PLAN_PROJECT=<project folder> with the Claude Code backend"),
         _ => None,
     }
 }

@@ -110,6 +110,8 @@ struct Seat {
     setting: Option<String>,
     /// Claude Code only: the project approved plans may change, as (name, absolute path).
     project: Option<(String, String)>,
+    /// With a project: the owner chose to share its tracked file names (no contents) with the room's Lead.
+    share_files: bool,
 }
 
 fn identity_path(dir: &Path) -> PathBuf {
@@ -158,6 +160,7 @@ impl Seat {
         if let Some((name, path)) = &self.project {
             fields.insert("project_name".into(), Value::str(name.clone()));
             fields.insert("project_path".into(), Value::str(path.clone()));
+            fields.insert("share_file_names".into(), Value::Bool(self.share_files));
         }
         let text = pyjson::indented(&Value::Object(fields)) + "\n";
         let path = config_path(&self.dir);
@@ -182,7 +185,8 @@ impl Seat {
             (None, None) => None,
             _ => return Err(broken("has an unusable project")),
         };
-        Ok(Seat { dir: dir.to_path_buf(), backend, name, port, program: text_field("program"), setting: text_field("setting"), project })
+        let share_files = project.is_some() && matches!(fields.get("share_file_names"), Some(Value::Bool(true)));
+        Ok(Seat { dir: dir.to_path_buf(), backend, name, port, program: text_field("program"), setting: text_field("setting"), project, share_files })
     }
 }
 
@@ -609,8 +613,12 @@ fn setup_claude_code(seat: &mut Seat) -> Result<(), String> {
     Ok(())
 }
 
+/// A project as (name, absolute path), and whether its file names are shared with the room's Lead.
+type ProjectChoice = Option<((String, String), bool)>;
+
 /// Approved plans: the one project folder the owner's approved plans may change, or none.
-fn setup_project(dir: &Path, kept: Option<(String, String)>) -> Result<Option<(String, String)>, String> {
+/// With one, also whether its file names are shared with the room's Lead (default no).
+fn setup_project(dir: &Path, kept: Option<(String, String)>) -> Result<ProjectChoice, String> {
     println!("\n{PLAN_GUIDANCE}");
     let default = kept.as_ref().map(|(_, path)| path.clone()).unwrap_or_default();
     let path = ask_until(
@@ -633,8 +641,15 @@ fn setup_project(dir: &Path, kept: Option<(String, String)>) -> Result<Option<(S
         |raw| if crate::plan::valid_project_name(raw.trim()) { Ok(raw.trim().to_string()) } else { Err("Use lower-case letters, digits, - and _ (up to 32).".to_string()) },
     )?;
     println!("  Approved plans may change {} (as {name:?}), in a private copy first.", path.display());
+    println!("\n{FILE_NAMES_GUIDANCE}");
+    let share = ask_yes_no("Share this project's file names with the room's Lead?", false)?;
+    if share {
+        println!("  The room's Lead may ask for the project's file names. Their contents are never sent.");
+    } else {
+        println!("  File names are not shared. The Lead is told to ask you which files to change.");
+    }
     println!("  Before a plan can run, pin your passkey from Knights Circle:  {} approver add CREDENTIAL_ID PUBLIC_KEY{}", program_shown(), dir_flag(dir));
-    Ok(Some((name, path.display().to_string())))
+    Ok(Some(((name, path.display().to_string()), share)))
 }
 
 /// A folder's name as a project name: lower case, other characters as `-`.
@@ -649,6 +664,10 @@ const PLAN_GUIDANCE: &str = "Approved plans (optional): a Claude Code seat can a
 but only after you approve it with your passkey in Knights Circle. It works on a private copy of one git repository, \
 with file tools only (no shell or web), and may change only the files the plan lists. Your folder isn't changed: \
 the result is a diff for you to review.";
+
+const FILE_NAMES_GUIDANCE: &str = "So that the room's Lead can name real files in a plan, Knights Circle can ask this seat for the \
+names of the files tracked at the project's last commit: names only, never their contents, at most 300. They go to the Lead's \
+model provider with its turn. Without them, the Lead is told to ask you which files to change.";
 
 fn setup_ollama(seat: &mut Seat) -> Result<(), String> {
     seat.setting = Some(ask("Ollama model", handlers::DEFAULT_ROOM_MODEL)?);
@@ -728,7 +747,8 @@ fn setup(dir: PathBuf) -> Result<(), String> {
 
     println!("In Knights Circle ({KNIGHTS_CIRCLE_ORIGIN}), open Advanced: bring your own bot, then Show room key.");
     let trust_file = trust_path(&dir);
-    let known: Vec<String> = ["room-turn", "inference", "web-retrieval", "plan-run", "plan-status"].map(String::from).to_vec();
+    let mut known: Vec<String> = ["room-turn", "inference", "web-retrieval"].map(String::from).to_vec();
+    known.extend(crate::plan_run::CAPABILITIES.map(String::from));
     let (mut trust, _) = TrustList::load_or_empty(&trust_file, &known).map_err(|e| e.to_string())?;
     let (room_name, room_key) = ask_until(|| ask("Room key", ""), |raw| {
         let bytes = crypto::from_hex(raw).filter(|b| b.len() == 32).ok_or("That is not a room key, which is 64 hexadecimal characters.".to_string())?;
@@ -738,7 +758,7 @@ fn setup(dir: PathBuf) -> Result<(), String> {
     trust.save(&trust_file).map_err(|e| format!("cannot write {}: {e}", trust_file.display()))?;
     println!("  Trusted {room_name} for room turns only.");
 
-    let mut seat = Seat { dir: dir.clone(), backend, name, port, program: None, setting: None, project: None };
+    let mut seat = Seat { dir: dir.clone(), backend, name, port, program: None, setting: None, project: None, share_files: false };
     match backend {
         Backend::GrokBot => setup_grok_bot(&seat)?,
         Backend::OpenClaw | Backend::Hermes => setup_agent_cli(&mut seat)?,
@@ -746,7 +766,10 @@ fn setup(dir: PathBuf) -> Result<(), String> {
         Backend::ClaudeCode => {
             setup_claude_code(&mut seat)?;
             let kept = existing.as_ref().and_then(|old| old.project.clone());
-            seat.project = setup_project(&dir, kept)?;
+            (seat.project, seat.share_files) = match setup_project(&dir, kept)? {
+                Some((project, share)) => (Some(project), share),
+                None => (None, false),
+            };
         }
     }
     if seat.project.is_some() {
@@ -788,6 +811,7 @@ fn daemon_command(seat: &Seat) -> Result<Command, String> {
         .env_remove("EUREKA_CORS_ORIGINS")
         .env_remove(crate::plan_run::PROJECT_ENV)
         .env_remove(crate::plan_run::PROJECT_NAME_ENV)
+        .env_remove(crate::plan_run::SHARE_FILES_ENV)
         .env(crypto::IDENTITY_PATH_ENV_VAR, identity_path(&seat.dir))
         .env(crate::trust::TRUST_PATH_ENV_VAR, trust_path(&seat.dir))
         .env(turns::TURN_DIR_ENV, turn_dir(&seat.dir))
@@ -818,6 +842,7 @@ fn daemon_command(seat: &Seat) -> Result<Command, String> {
                 .env(crate::claude_code::NAME_ENV, &seat.name);
             if let Some((name, path)) = &seat.project {
                 command.env(crate::plan_run::PROJECT_ENV, path).env(crate::plan_run::PROJECT_NAME_ENV, name).env(SEAT_DIR_ENV, &seat.dir);
+                command.env(crate::plan_run::SHARE_FILES_ENV, if seat.share_files { "1" } else { "0" });
             }
         }
     }
@@ -1208,6 +1233,22 @@ async fn check_plans(seat: &Seat, name: &str, project: &Path, home: &Path, repor
     match crate::plan_run::git_problem() {
         None => report.ok("approved plans: git is recent enough"),
         Some(problem) => report.fail(&format!("approved plans: {problem}"), "Install or update git."),
+    }
+    if let Ok(path) = &plan {
+        if seat.share_files {
+            match crate::plan_run::tracked_files(path).await {
+                Ok(files) => report.ok(&format!(
+                    "approved plans: the room's Lead may see {} file name{}{} at {} (names only, no contents)",
+                    files.names.len(),
+                    if files.names.len() == 1 { "" } else { "s" },
+                    if files.truncated { ", the first of more" } else { "" },
+                    &files.commit[..12]
+                )),
+                Err(problem) => report.fail(&format!("approved plans: cannot list the project's file names: {problem}"), "Check that the project is a working git repository."),
+            }
+        } else {
+            report.ok("approved plans: file names are not shared with the room's Lead (run setup again to share them)");
+        }
     }
     if let Ok(path) = plan {
         match crate::plan_run::test_copy(&path, home).await {

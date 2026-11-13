@@ -632,9 +632,17 @@ it with a passkey. It works in one project folder chosen at setup. The guide is
 - **The project.** `setup`, for a Claude Code seat, asks for a project folder: the top folder of
   a git repository with at least one commit, never the home folder. Press Enter for none, and the
   seat stays chat only, exactly as before. With a project, the room key is also granted
-  `plan-run`, `plan-status`, `plan-apply` and `plan-discard`, and `start` passes `EUREKA_PLAN_PROJECT` and
-  `EUREKA_PLAN_PROJECT_NAME`. `EUREKA_PLAN_TIMEOUT` sets a run's limit, from 1 to 1800 seconds
+  `plan-run`, `plan-status`, `plan-apply`, `plan-discard` and `plan-info`, and `start` passes `EUREKA_PLAN_PROJECT`,
+  `EUREKA_PLAN_PROJECT_NAME` and `EUREKA_PLAN_SHARE_FILES`. `EUREKA_PLAN_TIMEOUT` sets a run's limit, from 1 to 1800 seconds
   (default 600). Plans are offered only on the loopback address, and not in the native Windows build.
+- **File names for the Lead.** Setup then asks "Share this project's file names with the room's
+  Lead? [y/N]" (default no), saved as `share_file_names` in `seat.json` and shown by `doctor`.
+  `plan-info` is read-only and needs no approval. It answers `project` and `files_shared` and,
+  only when sharing is on, `commit`, `files` and `truncated`: the names of the files tracked at the
+  last commit (`git ls-tree`, so nothing staged or uncommitted), never their contents. Paths
+  through `.git`, `.gitattributes` or `.gitmodules`, submodules and names with control or
+  direction characters are left out, and it stops at 300 names or 8 KB, with `truncated: true`.
+  Knights Circle uses it to learn that a seat runs plans and for which project.
 
 **A run**, in order:
 
