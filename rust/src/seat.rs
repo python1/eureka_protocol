@@ -55,6 +55,7 @@ enum Backend {
     Hermes,
     Ollama,
     ClaudeCode,
+    Codex,
 }
 
 impl Backend {
@@ -64,17 +65,19 @@ impl Backend {
             Backend::OpenClaw => "openclaw",
             Backend::Hermes => "hermes",
             Backend::Ollama => "ollama",
+            Backend::Codex => "codex",
             Backend::ClaudeCode => "claude-code",
         }
     }
 
     fn from_id(id: &str) -> Option<Backend> {
-        [Backend::GrokBot, Backend::OpenClaw, Backend::Hermes, Backend::Ollama, Backend::ClaudeCode].into_iter().find(|b| b.id() == id)
+        [Backend::GrokBot, Backend::OpenClaw, Backend::Hermes, Backend::Ollama, Backend::ClaudeCode, Backend::Codex].into_iter().find(|b| b.id() == id)
     }
 
     /// The seat name setup suggests: how the agent is known in the room.
     fn default_name(self) -> &'static str {
         match self {
+            Backend::Codex => "Codex",
             Backend::ClaudeCode => crate::claude_code::DEFAULT_NAME,
             _ => DEFAULT_NAME,
         }
@@ -86,6 +89,7 @@ impl Backend {
             Backend::OpenClaw => "OpenClaw",
             Backend::Hermes => "Hermes Agent",
             Backend::Ollama => "Ollama",
+            Backend::Codex => "Codex CLI",
             Backend::ClaudeCode => "Claude Code",
         }
     }
@@ -375,7 +379,8 @@ fn backend_choice(raw: &str) -> Result<Backend, String> {
         "3" | "hermes" => Ok(Backend::Hermes),
         "4" | "ollama" => Ok(Backend::Ollama),
         "5" | "claude" | "claude code" | "claude-code" => Ok(Backend::ClaudeCode),
-        _ => Err("Type 1, 2, 3, 4 or 5.".into()),
+        "6" | "codex" => Ok(Backend::Codex),
+        _ => Err("Type 1 through 6.".into()),
     }
 }
 
@@ -662,6 +667,9 @@ fn backend_problem(seat: &Seat) -> Option<String> {
         Backend::OpenClaw => handlers::openclaw_lockdown_problem(Path::new(seat.program.as_deref()?), seat.setting.as_deref()),
         Backend::Hermes => handlers::check_hermes_seat(Path::new(seat.program.as_deref()?), seat.setting.as_deref()?).err(),
         Backend::Ollama => ollama_problem(seat.setting.as_deref()?),
+        Backend::Codex => seat.program.as_deref().ok_or_else(|| "Codex executable missing".to_string())
+            .and_then(|p| crate::codex::CodexSeat::new(Path::new(p), &seat.dir.join("codex")))
+            .and_then(|s| s.check_login()).err(),
         Backend::ClaudeCode => crate::claude_code::check_seat(Path::new(seat.program.as_deref()?), &claude_home(&seat.dir)).err(),
     }
 }
@@ -694,8 +702,8 @@ fn setup(dir: PathBuf) -> Result<(), String> {
             return Ok(());
         }
     }
-    println!("Which agent sits in this seat?\n  1. Grok Bot, woken by a webhook\n  2. OpenClaw\n  3. Hermes Agent\n  4. Ollama, a local model with no tools\n  5. Claude Code, with your own Claude subscription, chat only\n");
-    let backend = ask_until(|| ask("Choose 1 to 5", "1"), backend_choice)?;
+    println!("Which agent sits in this seat?\n  1. Grok Bot, woken by a webhook\n  2. OpenClaw\n  3. Hermes Agent\n  4. Ollama, a local model with no tools\n  5. Claude Code, with your own Claude subscription, chat only\n  6. Codex CLI (experimental room participant)\n");
+    let backend = ask_until(|| ask("Choose 1 to 6", "1"), backend_choice)?;
     if backend == Backend::GrokBot {
         print_grok_bot_guidance();
     }
@@ -743,6 +751,15 @@ fn setup(dir: PathBuf) -> Result<(), String> {
         Backend::GrokBot => setup_grok_bot(&seat)?,
         Backend::OpenClaw | Backend::Hermes => setup_agent_cli(&mut seat)?,
         Backend::Ollama => setup_ollama(&mut seat)?,
+        Backend::Codex => {
+            handlers::refuse_on_native_windows("codex")?;
+            let wanted = std::env::var(crate::codex::BIN).unwrap_or_else(|_| "codex".into());
+            let path = handlers::find_program(&wanted).ok_or("Install Codex CLI or set EUREKA_CODEX_BIN to its executable.")?;
+            seat.program = Some(path.canonicalize().map_err(|e| e.to_string())?.display().to_string());
+            let home = seat.dir.join("codex");
+            crate::codex::prepare(&home)?;
+            println!("For the seat login, set HOME to {} and CODEX_HOME to {}, then run codex -c 'cli_auth_credentials_store=\"file\"' login using ChatGPT.", home.display(), home.join("auth").display());
+        }
         Backend::ClaudeCode => {
             setup_claude_code(&mut seat)?;
             let kept = existing.as_ref().and_then(|old| old.project.clone());
@@ -799,6 +816,9 @@ fn daemon_command(seat: &Seat) -> Result<Command, String> {
     let setting = seat.setting.as_deref().unwrap_or_default();
     let program = seat.program.as_deref().unwrap_or_default();
     match seat.backend {
+        Backend::Codex => {
+            command.env(crate::codex::BIN, program).env(crate::codex::HOME, seat.dir.join("codex"));
+        }
         Backend::GrokBot => {}
         // A seat is held to chat only: an unsafe agent stops `start`, where a direct run only warns.
         Backend::OpenClaw => {
@@ -1245,6 +1265,19 @@ async fn doctor(dir: PathBuf, wake: bool) -> Result<bool, String> {
             None => report.ok(&format!("Ollama: answering, and it has the model {what:?}")),
             Some(problem) => report.fail("Ollama: not ready", &problem),
         },
+        Backend::Codex => match backend_problem(&seat) {
+            Some(problem) => report.fail("Codex seat is not ready", &problem),
+            None if wake => {
+                let cli = crate::codex::CodexSeat::new(Path::new(seat.program.as_deref().ok_or("Codex executable missing")?), &seat.dir.join("codex"))?;
+                let result = handlers::run_codex(&cli, "Reply with the word awake.".into()).await;
+                if result.status == handlers::STATUS_COMPLETED {
+                    report.ok("Codex answered a live test turn with an empty tool list");
+                } else {
+                    report.fail("Codex guarded wake failed", &result.reason);
+                }
+            }
+            None => report.ok("Codex version and seat login verified. Use doctor --wake to test model access."),
+        },
         Backend::ClaudeCode => check_claude_code(&seat, wake, &mut report).await?,
     }
     if seat.backend == Backend::Hermes {
@@ -1333,7 +1366,9 @@ mod tests {
         assert!(backend_choice(" Hermes ") == Ok(Backend::Hermes));
         assert!(backend_choice("5") == Ok(Backend::ClaudeCode));
         assert!(backend_choice("Claude Code") == Ok(Backend::ClaudeCode));
-        assert!(backend_choice("6").is_err());
+        assert!(backend_choice("6") == Ok(Backend::Codex));
+        assert!(Backend::from_id("codex") == Some(Backend::Codex));
+        assert!(backend_choice("7").is_err());
         assert_eq!(Backend::ClaudeCode.default_name(), "Claude");
         assert_eq!(Backend::Hermes.default_name(), "Bot");
         assert!(Backend::from_id("claude-code") == Some(Backend::ClaudeCode));

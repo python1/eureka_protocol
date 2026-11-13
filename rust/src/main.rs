@@ -7,6 +7,8 @@
 
 mod approval;
 mod claude_code;
+mod codex;
+mod codex_guard;
 mod crypto;
 mod handlers;
 mod http;

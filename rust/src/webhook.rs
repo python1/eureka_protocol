@@ -236,16 +236,7 @@ impl Webhook {
 
     #[cfg(feature = "tls")]
     async fn connect_tls(&self, stream: tokio::net::TcpStream) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, ()> {
-        use tokio_rustls::rustls;
-        let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|_| ())?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        let name = rustls::pki_types::ServerName::try_from(self.target.host.clone()).map_err(|_| ())?;
-        tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)).connect(name, stream).await.map_err(|_| ())
+        tls_stream(&self.target.host, stream).await
     }
 
     #[cfg(not(feature = "tls"))]
@@ -277,6 +268,20 @@ impl Webhook {
         let response = sender.send_request(request).await.map_err(|_| ())?;
         Ok(response.status().as_u16())
     }
+}
+
+#[cfg(feature = "tls")]
+pub(crate) async fn tls_stream(host: &str, stream: tokio::net::TcpStream) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, ()> {
+    use tokio_rustls::rustls;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| ())?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from(host.to_owned()).map_err(|_| ())?;
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)).connect(name, stream).await.map_err(|_| ())
 }
 
 #[cfg(test)]
