@@ -73,6 +73,21 @@ attestation also shows that this repository's workflow built the file. With the
 gh attestation verify "$FILE" --repo python1/eureka_protocol
 ```
 
+That command needs you to be logged in to GitHub (`gh auth login`). Without a GitHub account,
+fetch the attestation from GitHub's public API first, then check the file against it. This
+needs `jq`, which comes with current macOS (on Linux, install it from your package manager):
+
+```bash
+DIGEST=$(shasum -a 256 "$FILE" | cut -d' ' -f1)    # on Linux: sha256sum "$FILE" | cut -d' ' -f1
+curl -fsSL "https://api.github.com/repos/python1/eureka_protocol/attestations/sha256:$DIGEST" \
+  | jq -c '.attestations[].bundle' > attestation.jsonl
+gh attestation verify "$FILE" --bundle attestation.jsonl --repo python1/eureka_protocol
+```
+
+Either way, look for **Verification succeeded**, with the build workflow
+`.github/workflows/draft-release.yml` at the release's tag. If the file was changed in any way,
+the check fails.
+
 ### Build it from source
 
 With [Rust](https://rustup.rs) and a C compiler:
