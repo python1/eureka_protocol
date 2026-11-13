@@ -83,7 +83,7 @@ room turns, for an agent answering through the queue:
   eureka-daemon turn show [--wait SECONDS] [--json] [--queue DIR]
   eureka-daemon turn answer ID [--text-file PATH] [--queue DIR]";
 
-/// `eureka-daemon 0.2.0 (macos aarch64)`, plus the commit when the build was given one, as CI's are.
+/// `eureka-daemon 0.3.0 (macos aarch64)`, plus the commit when the build was given one, as CI's are.
 fn version_line() -> String {
     let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
     match option_env!("EUREKA_BUILD_COMMIT").filter(|c| !c.is_empty()) {
