@@ -23,6 +23,10 @@
 //!   oversized diffs all fail the run.
 //!
 //! Applying a diff to the project is a later, separately approved step (not in this module).
+//!
+//! `plan-info` is read-only and needs no approval: the project's name and, only if the owner chose
+//! it at setup, the names of the files tracked at its last commit (never their contents), so the
+//! room's Lead can name real files in a plan. Nothing runs and nothing is copied.
 
 use crate::approval::{self, ApprovalStore, Approver, Expected};
 use crate::claude_code::{self, ClaudeSeat};
@@ -41,12 +45,18 @@ pub const PLAN_RUN: &str = "plan-run";
 pub const PLAN_STATUS: &str = "plan-status";
 pub const PLAN_APPLY: &str = "plan-apply";
 pub const PLAN_DISCARD: &str = "plan-discard";
-pub const CAPABILITIES: [&str; 4] = [PLAN_APPLY, PLAN_DISCARD, PLAN_RUN, PLAN_STATUS];
+pub const PLAN_INFO: &str = "plan-info";
+pub const CAPABILITIES: [&str; 5] = [PLAN_APPLY, PLAN_DISCARD, PLAN_INFO, PLAN_RUN, PLAN_STATUS];
 /// Git 2.29 is the first with `fetch --no-write-fetch-head`.
 pub const MIN_GIT: (u64, u64) = (2, 29);
 pub const PROJECT_ENV: &str = "EUREKA_PLAN_PROJECT";
 pub const PROJECT_NAME_ENV: &str = "EUREKA_PLAN_PROJECT_NAME";
 pub const TIMEOUT_ENV: &str = "EUREKA_PLAN_TIMEOUT";
+/// `1` when the owner chose, at setup, to share the project's file names with the room's Lead.
+pub const SHARE_FILES_ENV: &str = "EUREKA_PLAN_SHARE_FILES";
+/// What `plan-info` shares at most: this many names, and this many bytes of them.
+pub const MAX_INFO_FILES: usize = 300;
+pub const MAX_INFO_BYTES: usize = 8 * 1024;
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
 pub const MAX_TIMEOUT_SECONDS: u64 = 1800;
 /// The tools a run has, and must have exactly: files only.
@@ -138,6 +148,7 @@ pub struct PlanRunner {
     project: Project,
     seat_dir: PathBuf,
     timeout: Duration,
+    share_files: bool,
     state: Mutex<State>,
 }
 
@@ -289,15 +300,22 @@ impl PlanRunner {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
-        Ok(PlanRunner { seat, project, seat_dir, timeout, state: Mutex::new(State::default()) })
+        Ok(PlanRunner { seat, project, seat_dir, timeout, share_files: false, state: Mutex::new(State::default()) })
+    }
+
+    /// Share the project's file names in `plan-info`: the owner's choice at setup, off unless chosen.
+    pub fn sharing_file_names(mut self, share: bool) -> PlanRunner {
+        self.share_files = share;
+        self
     }
 
     pub fn describe(&self) -> String {
         format!(
-            "{PLAN_RUN}, {PLAN_STATUS}: approved plans for project {:?} at {} ({}s limit, approver {})",
+            "{PLAN_RUN}, {PLAN_STATUS}: approved plans for project {:?} at {} ({}s limit, file names {}, approver {})",
             self.project.name,
             self.project.path.display(),
             self.timeout.as_secs(),
+            if self.share_files { "shared with the room's Lead" } else { "not shared" },
             match Approver::load(&self.seat_dir) {
                 Ok(Some(a)) => a.fingerprint(),
                 Ok(None) => "none yet: eureka-daemon approver add".into(),
@@ -311,6 +329,7 @@ impl PlanRunner {
             PLAN_RUN => self.start(payload, requester_id, seat_id),
             PLAN_APPLY => self.apply(payload, requester_id, seat_id).await,
             PLAN_DISCARD => self.discard(&payload, requester_id),
+            PLAN_INFO => self.info(&payload).await,
             _ => self.status(&payload, requester_id),
         }
     }
@@ -389,6 +408,34 @@ impl PlanRunner {
             ("plan_hash".to_string(), Value::str(checked.approval.plan_hash.clone())),
             ("approval_id".to_string(), Value::str(checked.approval.approval_id)),
         ])))
+    }
+
+    /// `plan-info`: the project's name, and its tracked file names if the owner chose to share them.
+    /// Read-only: it lists names at the last commit with git and runs nothing else.
+    async fn info(&self, payload: &Value) -> HandlerResult {
+        if payload.as_object().is_none() {
+            return failed(REASON_MALFORMED);
+        }
+        let mut out = Map::new();
+        out.insert("project".into(), Value::str(self.project.name.as_str()));
+        out.insert("files_shared".into(), Value::Bool(self.share_files));
+        if !self.share_files {
+            println!("[PLAN] plan-info: project {:?}, file names not shared", self.project.name);
+            return completed(Value::Object(out));
+        }
+        match tracked_files(&self.project.path).await {
+            Ok(files) => {
+                println!("[PLAN] plan-info: project {:?}, shared {} file names at {}{}", self.project.name, files.names.len(), &files.commit[..12], if files.truncated { " (truncated)" } else { "" });
+                out.insert("commit".into(), Value::str(files.commit));
+                out.insert("files".into(), Value::Array(files.names.into_iter().map(Value::str).collect()));
+                out.insert("truncated".into(), Value::Bool(files.truncated));
+                completed(Value::Object(out))
+            }
+            Err(e) => {
+                println!("[PLAN] plan-info: cannot list the project's files: {e}");
+                failed(SETUP_FAILED)
+            }
+        }
     }
 
     fn status(&self, payload: &Value, requester_id: &str) -> HandlerResult {
@@ -648,6 +695,50 @@ pub async fn make_copy(project: &Path, dir: &Path) -> Result<(PathBuf, PathBuf, 
 /// The staged diff, exactly as the run's diff check made it, so its hash can be checked again.
 async fn staged_diff(git_dir: &Path, work: &Path) -> Result<Vec<u8>, String> {
     git(&in_clone(git_dir, work, &["diff", "--cached", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--full-index", "HEAD"])).await
+}
+
+/// The project's file names, as `plan-info` shares them.
+pub struct TrackedFiles {
+    pub commit: String,
+    pub names: Vec<String>,
+    pub truncated: bool,
+}
+
+/// The names of the files tracked at the project's last commit (`git ls-tree`, so nothing staged or
+/// uncommitted), never their contents. Paths through `.git`, `.gitattributes` or `.gitmodules` and
+/// names with control or direction characters are left out. At most `MAX_INFO_FILES` names and
+/// `MAX_INFO_BYTES` bytes, with `truncated` set when more were left.
+pub async fn tracked_files(project: &Path) -> Result<TrackedFiles, String> {
+    let shown = project.display().to_string();
+    let commit = git(&["-C".into(), shown.clone(), "rev-parse".into(), "--verify".into(), "HEAD^{commit}".into()]).await?;
+    let commit = String::from_utf8_lossy(&commit).trim().to_string();
+    if !(commit.len() == 40 || commit.len() == 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("the last commit has no usable id".into());
+    }
+    let listing = git(&["-C".into(), shown, "ls-tree".into(), "-r".into(), "-z".into(), "--full-tree".into(), commit.clone()]).await?;
+    let (names, truncated) = file_names(&listing);
+    Ok(TrackedFiles { commit, names, truncated })
+}
+
+/// The names to share from `git ls-tree -r -z` output: blobs only (not submodules), checked and capped.
+pub fn file_names(listing: &[u8]) -> (Vec<String>, bool) {
+    let (mut names, mut bytes) = (Vec::new(), 0usize);
+    for entry in listing.split(|&b| b == 0).filter(|e| !e.is_empty()) {
+        let Some(tab) = entry.iter().position(|&b| b == b'\t') else { continue };
+        if entry[..tab].split(|&b| b == b' ').nth(1) != Some(b"blob") {
+            continue;
+        }
+        let Ok(name) = std::str::from_utf8(&entry[tab + 1..]) else { continue };
+        if name.is_empty() || name.chars().any(hidden_char) || is_git_path(name) {
+            continue;
+        }
+        if names.len() == MAX_INFO_FILES || bytes + name.len() + 1 > MAX_INFO_BYTES {
+            return (names, true);
+        }
+        bytes += name.len() + 1;
+        names.push(name.to_string());
+    }
+    (names, false)
 }
 
 /// The branch an applied plan goes on: `eureka/plan-` and the plan's short code.
@@ -1131,7 +1222,12 @@ pub fn from_environment(host_is_loopback: bool) -> Result<Option<PlanRunner>, St
         },
         _ => DEFAULT_TIMEOUT_SECONDS,
     };
-    PlanRunner::new(seat, Project { name, path }, seat_dir, Duration::from_secs(timeout)).map(Some)
+    let share = match std::env::var(SHARE_FILES_ENV).unwrap_or_default().trim() {
+        "" | "0" => false,
+        "1" => true,
+        other => return Err(format!("{SHARE_FILES_ENV}={other:?}: use 1 to share the project's file names with the room's Lead, or 0")),
+    };
+    PlanRunner::new(seat, Project { name, path }, seat_dir, Duration::from_secs(timeout)).map(|runner| Some(runner.sharing_file_names(share)))
 }
 
 #[cfg(all(test, unix))]

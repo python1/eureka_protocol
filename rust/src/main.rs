@@ -270,7 +270,7 @@ the file, and `trust add` will not bring it back.
 Restart the daemon afterwards: it reads the file at startup.";
 
 /// Every capability either build knows, so editing the file never rejects a grant the other build serves.
-const KNOWN_CAPABILITIES: [&str; 5] = ["room-turn", "inference", "web-retrieval", "plan-run", "plan-status"];
+const KNOWN_CAPABILITIES: [&str; 8] = ["room-turn", "inference", "web-retrieval", "plan-apply", "plan-discard", "plan-info", "plan-run", "plan-status"];
 
 fn trust_command(args: &[String]) -> ExitCode {
     let path = trust::resolve_trust_path();
@@ -286,7 +286,7 @@ fn trust_command(args: &[String]) -> ExitCode {
     match args {
         [verb, name, key, caps @ ..] if verb == "add" => {
             if let Some(unknown) = caps.iter().find(|c| !KNOWN_CAPABILITIES.contains(&c.trim())) {
-                return fail(&format!("unknown capability {unknown:?}; use room-turn, inference, web-retrieval, plan-run or plan-status"));
+                return fail(&format!("unknown capability {unknown:?}; use room-turn, inference, web-retrieval, plan-apply, plan-discard, plan-info, plan-run or plan-status"));
             }
             if let Err(e) = list.add_peer(name, key, caps) {
                 return fail(&e);

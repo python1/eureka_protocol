@@ -43,7 +43,8 @@ keep secrets in a project you use with approved plans.
 1. Set up a [Claude Code seat](claude-code.md#setup). When setup asks for a **project folder for
    approved plans**, give the top folder of a git repository with at least one commit. Press
    Enter for none, and the seat stays chat only. Setup also asks for a short name for the
-   project, which plans use.
+   project, which plans use, and whether to share the project's
+   [file names with the room's Lead](#file-names-for-the-lead) (default no).
 2. Pin your passkey. When Knights Circle creates your approval passkey, it shows a credential id,
    a public key and a fingerprint. Run this at the seat's own computer, never anywhere else:
 
@@ -70,6 +71,23 @@ The seat accepts only approvals where the passkey verified you, with a PIN, a pa
 - **A security key**, such as a YubiKey, with a PIN set. A key without a PIN can't verify you, so the seat refuses its approvals (`bad_approval`).
 
 Whichever you choose, pin that passkey with `approver add` as above. A browser without passkey support can't approve plans: use a current Chrome, Edge, Safari or Firefox.
+
+## File names for the Lead
+
+A plan has to name the files it may change, and the Lead can't see your project. At setup you
+choose whether Knights Circle may ask the seat for the project's file names:
+
+> Share this project's file names with the room's Lead? [y/N]
+
+- **Yes:** the seat answers with the names of the files tracked at the project's last commit, up
+  to 300 names or 8 KB. Never their contents, nothing staged or uncommitted, and no git files.
+  Knights Circle adds them to the Lead's instructions, marked as data from the seat, and the Lead
+  is told to use those exact paths in `edit`. They go to the Lead's model provider with its turn,
+  so don't choose this if a file name is itself private.
+- **No** (the default): nothing about the files is shared. The Lead is told to ask you which
+  files to change, and you can answer under *Join or redirect*.
+
+`doctor` shows which you chose, and how many names would be shared. To change it, run setup again.
 
 ## A plan, start to finish
 
@@ -144,6 +162,8 @@ A diff waits for 24 hours. If your project has a new commit since the run, apply
 - **No more plans:** run `./eureka-daemon approver remove`. No plan can be approved until you add
   a passkey again.
 - **Chat only again:** run setup again and press Enter at the project question.
+- **Stop sharing file names:** run setup again and answer no (the default) to the file names
+  question.
 
 ## What has been tested
 
@@ -160,6 +180,10 @@ A diff waits for 24 hours. If your project has a new commit since the run, apply
     pinned (`bad_approval`), and approvals for another seat, room key or room
   - a moved project (`project_moved`), an existing branch, a copy changed after its check, and
     discarding
+  - `plan-info`: no names unless sharing is on; then only names tracked at the last commit (not
+    staged, uncommitted or git files, and no contents), capped at 300 names or 8 KB. Setup,
+    `doctor`, and setup run again on a seat that already runs plans, in the release smoke test.
+    Not yet tried with a real room.
 - **Real Claude Code v2.1.319, logged out, on macOS:** the run's exact command line passes the
   seat's start check, showing exactly the five file tools, and ends `not_logged_in`.
 

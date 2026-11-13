@@ -663,3 +663,58 @@ fn refused_and_denied_calls_are_logged_with_the_tool_and_path_only() {
     assert_eq!(denied_calls_for_log(result.as_object().unwrap(), Path::new("/elsewhere")), vec!["Edit /x/README.md".to_string(), "WebFetch".to_string()]);
     assert_eq!(denied_calls_for_log(result.as_object().unwrap(), Path::new("/x")), vec!["Edit README.md".to_string(), "WebFetch".to_string()], "inside the copy: relative");
 }
+
+async fn info(f: &Fixture) -> HandlerResult {
+    f.runner.handle(PLAN_INFO, Value::Object(Map::new()), REQUESTER, SEAT).await
+}
+
+#[tokio::test]
+async fn plan_info_names_the_project_and_shares_no_file_names_unless_the_owner_chose_to() {
+    let f = fixture(&[INIT, RESULT].join("\n"), 60);
+    let answer = info(&f).await;
+    assert_eq!(answer.status, crate::handlers::STATUS_COMPLETED);
+    let out = answer.output.as_object().unwrap();
+    assert_eq!(out["project"].as_str(), Some("site"));
+    assert!(matches!(out["files_shared"], Value::Bool(false)));
+    assert!(!out.contains_key("files") && !out.contains_key("commit"), "no names when sharing is off");
+    assert!(!f.root.join("args.txt").exists(), "plan-info started Claude Code");
+    assert_eq!(f.runner.handle(PLAN_INFO, Value::str("x"), REQUESTER, SEAT).await.reason, REASON_MALFORMED);
+}
+
+#[tokio::test]
+async fn plan_info_shares_only_the_names_tracked_at_the_last_commit() {
+    let mut f = fixture(&[INIT, RESULT].join("\n"), 60);
+    Arc::get_mut(&mut f.runner).unwrap().share_files = true;
+    // Committed: a .gitattributes, a name with a newline in it, and a submodule-like nested path.
+    sh(&f.project, "printf '* text\\n' > .gitattributes && printf x > \"$(printf 'evil\\nname.txt')\" && mkdir -p docs/.git-notes && printf y > docs/.git-notes/a.md && git add -A && git -c user.name=t -c user.email=t@t commit -qm more");
+    // Not committed: a staged file and an untracked one, and a change to a tracked file.
+    sh(&f.project, "printf s > staged.txt && git add staged.txt && printf u > untracked.txt && printf 'SECRET' >> README.md");
+    let answer = info(&f).await;
+    assert_eq!(answer.status, crate::handlers::STATUS_COMPLETED, "{}", answer.reason);
+    let out = answer.output.as_object().unwrap();
+    assert!(matches!(out["files_shared"], Value::Bool(true)));
+    assert!(matches!(out["truncated"], Value::Bool(false)));
+    let names: Vec<&str> = match &out["files"] {
+        Value::Array(items) => items.iter().map(|v| v.as_str().unwrap()).collect(),
+        _ => panic!("no files"),
+    };
+    assert_eq!(names, vec!["README.md", "docs/.git-notes/a.md", "src/app.js", "src/theme.css"]);
+    let head = std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&f.project).output().unwrap();
+    assert_eq!(out["commit"].as_str(), Some(String::from_utf8_lossy(&head.stdout).trim()));
+    let text = pyjson::canonical(&answer.output);
+    assert!(!text.contains("SECRET") && !text.contains("* text"), "contents were sent");
+}
+
+#[test]
+fn plan_info_names_are_capped_by_count_and_by_size() {
+    let entry = |name: &str| format!("100644 blob {}\t{name}\0", "0".repeat(40));
+    let many: String = (0..400).map(|n| entry(&format!("f{n:03}.txt"))).collect();
+    let (names, truncated) = file_names(many.as_bytes());
+    assert_eq!((names.len(), truncated), (MAX_INFO_FILES, true));
+    let long: String = (0..100).map(|n| entry(&format!("{}{n:03}", "d/".repeat(50)))).collect();
+    let (names, truncated) = file_names(long.as_bytes());
+    assert!(truncated);
+    assert!(names.iter().map(|n| n.len() + 1).sum::<usize>() <= MAX_INFO_BYTES);
+    let mixed = [entry("ok.txt"), format!("160000 commit {}\tvendor/lib\0", "0".repeat(40)), entry(".git/config"), entry("a/.GITMODULES"), entry("rtl\u{202E}txt.js"), entry("tab\there")].concat();
+    assert_eq!(file_names(mixed.as_bytes()), (vec!["ok.txt".to_string()], false), "no submodules, git paths or control characters");
+}

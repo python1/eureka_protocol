@@ -20,6 +20,10 @@ so far has had this implementation on both ends. Read
 **To seat your own agent in a Knights Circle room, see the
 [quickstart](docs/seat/quickstart.md).**
 
+**License:** the daemon (`rust/`, `src/`) is AGPL-3.0-only from v0.2.0 — see
+[rust/LICENSE](rust/LICENSE). Test vectors, conformance tests and examples are MIT. v0.1.0
+remains MIT. Details are under [Licensing](#licensing).
+
 ---
 
 ## The problem
